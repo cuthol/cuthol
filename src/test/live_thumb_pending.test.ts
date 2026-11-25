@@ -18,7 +18,9 @@ import { resolveLivePaths } from "../live/live_paths.js";
 
 process.env.CUTHOL_SKILLS_AUTO = "0";
 
-const DEMO = path.resolve(process.cwd(), "test-workspace/live-design/fixture/live_demo");
+import { LIVE_DEMO_DIR, missingLiveDemo } from "./fixtures.js";
+
+const DEMO = LIVE_DEMO_DIR;
 
 function httpGet(port: number, reqPath: string): Promise<{ status: number; body: Buffer; headers: http.IncomingHttpHeaders; ms: number }> {
   const t0 = Date.now();
@@ -33,7 +35,7 @@ function httpGet(port: number, reqPath: string): Promise<{ status: number; body:
   });
 }
 
-test("live: cold thumbnail answers at once, real JPEG follows on retry", async () => {
+test("live: cold thumbnail answers at once, real JPEG follows on retry", { skip: missingLiveDemo() }, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-live-b2-"));
   try {
     fs.cpSync(DEMO, dir, { recursive: true });
@@ -97,7 +99,7 @@ test("live: cold thumbnail answers at once, real JPEG follows on retry", async (
   }
 });
 
-test("live: the window learns when pending thumbnails are ready (thumbs event, s=1 URLs serve JPEG)", async () => {
+test("live: the window learns when pending thumbnails are ready (thumbs event, s=1 URLs serve JPEG)", { skip: missingLiveDemo() }, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-live-thumbs-event-"));
   let sse: http.ClientRequest | null = null;
   try {
@@ -167,7 +169,7 @@ test("live: the window learns when pending thumbnails are ready (thumbs event, s
   }
 });
 
-test("live: missing media still gets the placeholder once the pass finished", async () => {
+test("live: missing media still gets the placeholder once the pass finished", { skip: missingLiveDemo() }, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-live-b2missing-"));
   try {
     fs.cpSync(DEMO, dir, { recursive: true });

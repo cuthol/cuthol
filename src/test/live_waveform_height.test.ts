@@ -19,7 +19,9 @@ process.env.CUTHOL_SKILLS_AUTO = "0";
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "../..");
 const CLI = path.join(REPO, "dist", "cli.js");
-const FIXTURE = path.join(REPO, "test-workspace", "live-design", "fixture", "live_demo");
+import { LIVE_DEMO_DIR, missingLiveDemo } from "./fixtures.js";
+
+const FIXTURE = LIVE_DEMO_DIR;
 const SHOTS = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-live-waveheight-shots-"));
 
 interface Live {
@@ -128,7 +130,7 @@ async function measureWaveRuns(page: import("puppeteer-core").Page): Promise<{ m
 }
 
 for (const [name, aspect] of [["16x9", undefined], ["9x16", "9:16"]] as Array<[string, "9:16" | undefined]>) {
-  test(`waveform fills the lane height (${name} at 1280 px)`, async () => {
+  test(`waveform fills the lane height (${name} at 1280 px)`, { skip: missingLiveDemo() }, async () => {
     const dir = copyDemo(aspect);
     const fx = await startLive(dir);
     try {

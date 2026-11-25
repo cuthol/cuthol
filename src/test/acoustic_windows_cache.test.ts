@@ -19,6 +19,7 @@ import {
   measureAssetAcousticWindows,
 } from "../library/waveform.js";
 import { MediaLedger } from "../library/ledger.js";
+import { missingTrialMedia, TRIAL_MEDIA_DIR } from "./fixtures.js";
 
 const PROBE = path.resolve(process.cwd(), "dist/test/acoustic_windows_cache_probe.js");
 
@@ -42,7 +43,7 @@ function makeToneMedia(tmp: string, name: string, freq: number): string {
   return media;
 }
 
-const NARRATION_FIXTURE = path.resolve(process.cwd(), "test-workspace/fixtures/trial-media/narration.mp3");
+const NARRATION_FIXTURE = path.join(TRIAL_MEDIA_DIR, "narration.mp3");
 
 function makeSpeechLikeMedia(tmp: string, name: string): string {
   const media = path.join(tmp, name);
@@ -81,7 +82,7 @@ function ledgerRowCount(wsDir: string, key: string): number {
   }
 }
 
-test("acoustic profile is served from the ledger with zero decodes in a fresh process", { timeout: 300_000 }, async () => {
+test("acoustic profile is served from the ledger with zero decodes in a fresh process", { timeout: 300_000, skip: missingTrialMedia("narration.mp3") }, async () => {
   const tmp = makeTempRoot("cuthol-acoustic-cache-");
   try {
     const wsDir = path.join(tmp, "proj");
@@ -122,7 +123,7 @@ test("acoustic profile is served from the ledger with zero decodes in a fresh pr
   }
 });
 
-test("acoustic profile recomputes for a changed source digest", { timeout: 300_000 }, async () => {
+test("acoustic profile recomputes for a changed source digest", { timeout: 300_000, skip: missingTrialMedia("narration.mp3") }, async () => {
   const tmp = makeTempRoot("cuthol-acoustic-redigest-");
   try {
     const wsDir = path.join(tmp, "proj");
@@ -145,7 +146,7 @@ test("acoustic profile recomputes for a changed source digest", { timeout: 300_0
   }
 });
 
-test("acoustic profile falls back to measuring on a corrupt cache row", { timeout: 300_000 }, async () => {
+test("acoustic profile falls back to measuring on a corrupt cache row", { timeout: 300_000, skip: missingTrialMedia("narration.mp3") }, async () => {
   const tmp = makeTempRoot("cuthol-acoustic-corrupt-");
   try {
     const wsDir = path.join(tmp, "proj");

@@ -36,6 +36,7 @@ import { extractMono16kPcm } from "../library/waveform.js";
 import { renderSingleCompositeFrameRgb24 } from "../render/renderer.js";
 import { renderSequenceToMp4 } from "../render/render_main.js";
 import { addLaneCue } from "../sequence/lanes.js";
+import { missingTrialMedia, TRIAL_MEDIA_DIR } from "./fixtures.js";
 import { appendSpineClip, setSpineSpeed } from "../sequence/spine.js";
 import {
   integrateSourceOffsetToClipLocalMs,
@@ -425,10 +426,10 @@ test("video offset start: monitor frame and segmented render match the plain ren
   }
 });
 
-test("video offset start: detach-audio pads the leading gap to container time", { timeout: 290_000 }, async () => {
+test("video offset start: detach-audio pads the leading gap to container time", { timeout: 290_000, skip: missingTrialMedia("talk.mp4") }, async () => {
   const tmp = makeTempRoot("cuthol-video-offset-detach-");
   try {
-    const talkSrc = path.resolve("test-workspace/fixtures/trial-media/talk.mp4");
+    const talkSrc = path.join(TRIAL_MEDIA_DIR, "talk.mp4");
     const wsDir = buildProject(tmp, "proj", talkSrc);
     const { paths } = loadSequence(wsDir);
     const detached = detachAudioFromLibraryAsset({ workspaceDir: wsDir, sourceHandle: "vid_01" });

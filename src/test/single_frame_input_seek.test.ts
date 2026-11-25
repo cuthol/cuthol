@@ -10,7 +10,7 @@ import path from "node:path";
 import test from "node:test";
 import "./test_setup.js";
 import { rmRetrySync } from "./fs_cleanup.js";
-import { TRIAL_MEDIA_DIR } from "./fixtures.js";
+import { missingTrialMedia, TRIAL_MEDIA_DIR } from "./fixtures.js";
 
 import { compileSequenceRenderPlan } from "../compositor/compiler.js";
 import { initWorkspace, loadSequence } from "../core/workspace.js";
@@ -114,7 +114,7 @@ test("single-frame plan of a late instant seeks the input near the instant", { t
   }
 });
 
-test("late VFR single frame matches the render frame", { timeout: 300_000 }, () => {
+test("late VFR single frame matches the render frame", { timeout: 300_000, skip: missingTrialMedia("talk.mp4") }, () => {
   const tmpDir = makeTempDir("cuthol-sf-vfr-");
   try {
     const mediaPath = path.join(tmpDir, "vfr.mp4");

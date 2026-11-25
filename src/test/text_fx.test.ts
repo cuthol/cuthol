@@ -18,6 +18,7 @@ import { ingestAssetsIntoWorkspace } from "../library/probe.js";
 import { appendSpineClip } from "../sequence/spine_edit.js";
 import { addLaneCue } from "../sequence/lanes.js";
 import { enableExtensionInWorkspace } from "../extensions/ext_lifecycle.js";
+import { missingTrialMedia, TRIAL_MEDIA_DIR } from "./fixtures.js";
 import type { CutholSequence } from "../core/schema.js";
 
 process.env.CUTHOL_SKILLS_AUTO = "0";
@@ -189,7 +190,7 @@ function frameAt(r: { buf: Buffer; w: number; h: number }, n: number): Buffer {
   return r.buf.subarray(n * size, (n + 1) * size);
 }
 
-test("neutral eq on a text cue stays within the method floor (both presets)", () => {
+test("neutral eq on a text cue stays within the method floor (both presets)", { skip: missingTrialMedia("broll_1.mp4") }, () => {
   // Brief-like content (outlined title over real footage): the transparent-layer path measures
   // 57.4 dB draft / 56.3 dB master against the direct burn, and the neutral fx stage on top of
   // it is bit-identical to the layer without fx (measured: inf). The difference lives only on
@@ -199,7 +200,7 @@ test("neutral eq on a text cue stays within the method floor (both presets)", ()
     fs.rmSync(wsDir, { recursive: true, force: true });
     initWorkspace({ dir: wsDir, title: "textfx-neutral", aspect: "16:9", fps: 30 });
     fs.copyFileSync(
-      "test-workspace/fixtures/trial-media/broll_1.mp4",
+      path.join(TRIAL_MEDIA_DIR, "broll_1.mp4"),
       path.join(wsDir, "bg.mp4")
     );
     ingestAssetsIntoWorkspace({ workspaceDir: wsDir, filePaths: [path.join(wsDir, "bg.mp4")] });

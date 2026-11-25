@@ -13,7 +13,9 @@ import { computeSceneThumbKey, isCompIgnoredFile, setSceneThumbProjectDir } from
 import { buildScenes } from "../live/live_state.js";
 import type { LiveCompChange } from "../live/live_types.js";
 
-const FIXTURE = path.resolve(process.cwd(), "test-workspace/live-design/fixture/live_demo");
+import { LIVE_DEMO_DIR, missingLiveDemo } from "./fixtures.js";
+
+const FIXTURE = LIVE_DEMO_DIR;
 
 function copyFixture(): string | null {
   if (!fs.existsSync(path.join(FIXTURE, "cuthol.sequence.json"))) return null;

@@ -23,12 +23,13 @@ import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { resolveCoordsChromePath } from "../compositor/coords_extract.js";
 import { initWorkspace } from "../core/workspace.js";
 import { rmRetrySync, waitFor } from "./b_helpers.js";
+import { LIVE_DEMO_DIR, missingLiveDemo } from "./fixtures.js";
 
 process.env.CUTHOL_SKILLS_AUTO = "0";
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "../..");
 const CLI = path.join(REPO, "dist", "cli.js");
-const FIXTURE = path.join(REPO, "test-workspace", "live-design", "fixture", "live_demo");
+const FIXTURE = LIVE_DEMO_DIR;
 const SHOTS = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-live-layout-shots-"));
 
 interface Live {
@@ -106,7 +107,7 @@ function rectsIntersect(a: { x: number; y: number; w: number; h: number }, b: { 
   return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h;
 }
 
-test("speed label never overlaps the volume controls", async () => {
+test("speed label never overlaps the volume controls", { skip: missingLiveDemo() }, async () => {
   const dir = copyDemo();
   const fx = await startLive(dir);
   try {
@@ -195,7 +196,7 @@ test("tall project keeps every preview control inside the viewport", async () =>
   }
 });
 
-test("fresh page shows connecting, dead token shows error", async () => {
+test("fresh page shows connecting, dead token shows error", { skip: missingLiveDemo() }, async () => {
   const dir = copyDemo();
   const fx = await startLive(dir);
   try {
@@ -245,7 +246,7 @@ test("fresh page shows connecting, dead token shows error", async () => {
   }
 });
 
-test("caption type scales with the stage in whole px, no blur", async () => {
+test("caption type scales with the stage in whole px, no blur", { skip: missingLiveDemo() }, async () => {
   const dir = copyDemo();
   const fx = await startLive(dir);
   const seen: Array<{ w: number; fontPx: number; strokePx: number; shadow: string }> = [];

@@ -12,8 +12,9 @@ import {
   annotateRgb24BufferToCanvas,
   captureMonitorFrame,
 } from "../monitor/preview.js";
+import { LIVE_DEMO_DIR, missingLiveDemo } from "./fixtures.js";
 
-const DEMO = path.resolve("test-workspace/live-design/fixture/live_demo");
+const DEMO = LIVE_DEMO_DIR;
 
 function makeProject(): string {
   const dir = path.join(fs.realpathSync(os.tmpdir()), `live_b5_${process.pid}_${Date.now()}`);
@@ -27,7 +28,7 @@ function topPixel(canvas: { pixels: Uint8Array; width: number }): [number, numbe
   return [canvas.pixels[i], canvas.pixels[i + 1], canvas.pixels[i + 2]];
 }
 
-test("clean cell frame carries no monitor info strip", () => {
+test("clean cell frame carries no monitor info strip", { skip: missingLiveDemo() }, () => {
   const dir = makeProject();
   try {
     const { sequence } = loadSequence(dir);
@@ -41,7 +42,7 @@ test("clean cell frame carries no monitor info strip", () => {
   }
 });
 
-test("default frame still draws its HUD", () => {
+test("default frame still draws its HUD", { skip: missingLiveDemo() }, () => {
   const dir = makeProject();
   try {
     const { sequence } = loadSequence(dir);
@@ -55,7 +56,7 @@ test("default frame still draws its HUD", () => {
   }
 });
 
-test("contact-sheet capture path hides the strip, default capture keeps it", () => {
+test("contact-sheet capture path hides the strip, default capture keeps it", { skip: missingLiveDemo() }, () => {
   const dir = makeProject();
   try {
     const cleanOut = path.join(dir, "clean_cell.png");

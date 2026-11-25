@@ -17,12 +17,13 @@ import { waveformBinCount } from "../live/live_waveform.js";
 import { resolveLivePaths } from "../live/live_paths.js";
 import { ensureLiveServer, stopLiveServer } from "../live/live_server.js";
 import { LIVE_SCHEMA, type LiveWaveformResponse } from "../live/live_types.js";
+import { LIVE_DEMO_DIR, missingLiveDemo } from "./fixtures.js";
 
 process.env.CUTHOL_SKILLS_AUTO = "0";
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "../..");
 const CLI = path.join(REPO, "dist", "cli.js");
-const FIXTURE = path.join(REPO, "test-workspace", "live-design", "fixture", "live_demo");
+const FIXTURE = LIVE_DEMO_DIR;
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-live-wave-"));
 const DIRS: string[] = [ROOT];
 
@@ -95,7 +96,7 @@ test("waveformBinCount: ~20 bins per second clamped to 16..2000", () => {
   assert.equal(i1 - i0, 17);
 });
 
-test("waveform endpoint serves cached peaks for aud_01; 404 for unknown or silent assets", async () => {
+test("waveform endpoint serves cached peaks for aud_01; 404 for unknown or silent assets", { skip: missingLiveDemo() }, async () => {
   const dir = copyDemo();
   const info = await ensureLiveServer(dir);
   try {
@@ -127,7 +128,7 @@ test("waveform endpoint serves cached peaks for aud_01; 404 for unknown or silen
   }
 });
 
-test("snapshot carries no peaks and is byte-identical before/after waveform reads", async () => {
+test("snapshot carries no peaks and is byte-identical before/after waveform reads", { skip: missingLiveDemo() }, async () => {
   const dir = copyDemo();
   const info = await ensureLiveServer(dir);
   try {
@@ -178,7 +179,7 @@ test("snapshot carries no peaks and is byte-identical before/after waveform read
   }
 });
 
-test("worker analysis and a concurrent ledger-writing CLI both succeed", async () => {
+test("worker analysis and a concurrent ledger-writing CLI both succeed", { skip: missingLiveDemo() }, async () => {
   const dir = copyDemo();
   const info = await ensureLiveServer(dir);
   try {
@@ -201,7 +202,7 @@ test("worker analysis and a concurrent ledger-writing CLI both succeed", async (
   }
 });
 
-test("waveform endpoint leaves the project file and journal byte-identical", async () => {
+test("waveform endpoint leaves the project file and journal byte-identical", { skip: missingLiveDemo() }, async () => {
   const dir = copyDemo();
   // aud_01 carries no waveform marker and the ledger has no entry for the Live
   // bin count, so this request runs the cold worker path end to end.
@@ -227,7 +228,7 @@ test("waveform endpoint leaves the project file and journal byte-identical", asy
   }
 });
 
-test("waveform endpoint serves while the user holds the Live lock without touching it", async () => {
+test("waveform endpoint serves while the user holds the Live lock without touching it", { skip: missingLiveDemo() }, async () => {
   const dir = copyDemo();
   const lp = resolveLivePaths(dir);
   fs.mkdirSync(lp.dir, { recursive: true });
@@ -251,7 +252,7 @@ test("waveform endpoint serves while the user holds the Live lock without touchi
   }
 });
 
-test("library waveform still records the analysis marker", async () => {
+test("library waveform still records the analysis marker", { skip: missingLiveDemo() }, async () => {
   const dir = copyDemo();
   const cli = runCli(dir, ["library", "waveform", "--handle", "aud_01"]);
   assert.equal(cli.status, 0, `cli failed: ${cli.stderr.slice(0, 500)}`);
@@ -261,7 +262,7 @@ test("library waveform still records the analysis marker", async () => {
   assert.equal(asset!.analysis_refs.waveform, `wave_${asset!.digest_sha256.slice(0, 8)}`);
 });
 
-test("no waveform data reaches the project after waveform reads and a window edit", async () => {
+test("no waveform data reaches the project after waveform reads and a window edit", { skip: missingLiveDemo() }, async () => {
   const dir = copyDemo();
   const info = await ensureLiveServer(dir);
   try {

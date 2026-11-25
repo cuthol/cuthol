@@ -24,7 +24,7 @@ import {
   trimSpineClip,
 } from "../sequence/spine.js";
 import { verifySequence } from "../verify/gates.js";
-import { TRIAL_MEDIA_DIR } from "./fixtures.js";
+import { missingTrialMedia, TRIAL_MEDIA_DIR } from "./fixtures.js";
 
 const PRESETS_MANIFEST: Record<string, unknown> = {
   name: "pstudio",
@@ -378,7 +378,7 @@ test("preset short clip crossing anchors rejected", () => {
   });
 });
 
-test("preset beat bounce paces on the grid; moving the cue warns once; reapply --all fixes", () => {
+test("preset beat bounce paces on the grid; moving the cue warns once; reapply --all fixes", { skip: missingTrialMedia("music.mp3") }, () => {
   withPresetWorkspace((ws) => {
     const clipId = setup(ws);
     const musicPath = path.join(TRIAL_MEDIA_DIR, "music.mp3");

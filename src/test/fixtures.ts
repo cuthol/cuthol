@@ -18,6 +18,9 @@ import { loadDotEnvIfNeeded } from "../core/env.js";
 
 export const FIXTURES_DIR = path.resolve(process.env.CUTHOL_TEST_FIXTURES || path.join("test-workspace", "fixtures"));
 export const TRIAL_MEDIA_DIR = path.resolve(process.env.CUTHOL_TRIAL_MEDIA || path.join(FIXTURES_DIR, "trial-media"));
+export const LIVE_DEMO_DIR = path.resolve(
+  process.env.CUTHOL_LIVE_DEMO || path.join("test-workspace", "live-design", "fixture", "live_demo")
+);
 
 export function fixturePath(name: string): string {
   return path.join(FIXTURES_DIR, name);
@@ -27,6 +30,19 @@ export function fixturePath(name: string): string {
 export function missingFixture(...names: string[]): string | false {
   const missing = names.filter((n) => !fs.existsSync(fixturePath(n)));
   return missing.length ? `fixture not present: ${missing.join(", ")} (set CUTHOL_TEST_FIXTURES)` : false;
+}
+
+/** Skip reason when the Live demo fixture project is missing, otherwise `false`. */
+export function missingLiveDemo(): string | false {
+  return fs.existsSync(path.join(LIVE_DEMO_DIR, "cuthol.sequence.json"))
+    ? false
+    : `fixture not present: live_demo (set CUTHOL_LIVE_DEMO)`;
+}
+
+/** Skip reason when a trial-media file is missing, otherwise `false`. */
+export function missingTrialMedia(...names: string[]): string | false {
+  const missing = names.filter((n) => !fs.existsSync(path.join(TRIAL_MEDIA_DIR, n)));
+  return missing.length ? `fixture not present: trial-media/${missing.join(", ")} (set CUTHOL_TRIAL_MEDIA)` : false;
 }
 
 /** Skip reason when a paid-service key is missing, otherwise `false`. */

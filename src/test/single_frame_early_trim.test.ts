@@ -14,6 +14,7 @@ import { setItemColor } from "../sequence/color_edit.js";
 import { addLaneCue } from "../sequence/lanes.js";
 import { compileSequenceRenderPlan } from "../compositor/compiler.js";
 import { renderMultipleCompositeFramesRgb24 } from "../render/render_frames.js";
+import { missingTrialMedia, TRIAL_MEDIA_DIR } from "./fixtures.js";
 
 const TEST_ROOT = path.join(path.resolve(process.cwd(), "test-workspace"), "sf_early_trim");
 const FPS = 30;
@@ -31,7 +32,7 @@ function ensureMedia(): { png: string; mp4: string } {
     ff(["-f", "lavfi", "-i", "color=c=0x90B8D8:s=320x320", "-frames:v", "1", png]);
   }
   if (!fs.existsSync(mp4)) {
-    const fixtures = path.resolve(process.cwd(), "test-workspace/fixtures/trial-media/broll_1.mp4");
+    const fixtures = path.join(TRIAL_MEDIA_DIR, "broll_1.mp4");
     if (fs.existsSync(fixtures)) {
       fs.copyFileSync(fixtures, mp4);
     } else {
@@ -49,7 +50,7 @@ function clipId(seq: { spine: { clips: Array<{ id: string }> } }, n: number): st
   return seq.spine.clips[n].id;
 }
 
-test("single-frame early trim: on/off byte-equal, graph has frame trim and no loop", () => {
+test("single-frame early trim: on/off byte-equal, graph has frame trim and no loop", { skip: missingTrialMedia("broll_1.mp4") }, () => {
   const t0 = Date.now();
   const { png, mp4 } = ensureMedia();
   void png;

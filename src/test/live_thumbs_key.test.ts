@@ -11,7 +11,9 @@ import path from "node:path";
 import { computeSceneThumbKey, setSceneThumbProjectDir } from "../live/live_thumbs.js";
 import { buildScenes } from "../live/live_state.js";
 
-const FIXTURE = path.resolve(process.cwd(), "test-workspace/live-design/fixture/live_demo");
+import { LIVE_DEMO_DIR, missingLiveDemo } from "./fixtures.js";
+
+const FIXTURE = LIVE_DEMO_DIR;
 
 function copyFixture(): string | null {
   if (!fs.existsSync(path.join(FIXTURE, "cuthol.sequence.json"))) return null;

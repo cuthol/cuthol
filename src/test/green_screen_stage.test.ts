@@ -9,6 +9,7 @@ import "./test_setup.js";
 
 import { renderHyperFramesSingleFramePng } from "../compositor/hf_frames.js";
 import { renderHyperFramesCompositionToMp4 } from "../compositor/hf_render.js";
+import { LIVE_DEMO_DIR, missingLiveDemo } from "./fixtures.js";
 
 function makeTempDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -52,7 +53,7 @@ function readCornerPixel(pngPath: string): Buffer {
 
 function stageGreenComposition(): { dir: string; blobs: string } {
   const root = makeTempDir("green-");
-  const src = path.resolve("test-workspace/live-design/fixture/live_demo/comps/title");
+  const src = path.join(LIVE_DEMO_DIR, "comps/title");
   const dir = path.join(root, "comp");
   fs.cpSync(src, dir, { recursive: true });
   const entry = path.join(dir, "index.html");
@@ -66,7 +67,7 @@ function stageGreenComposition(): { dir: string; blobs: string } {
   return { dir, blobs };
 }
 
-test("green background stays on disk while the captured frame is transparent", () => {
+test("green background stays on disk while the captured frame is transparent", { skip: missingLiveDemo() }, () => {
   const { dir, blobs } = stageGreenComposition();
   try {
     const entry = path.join(dir, "index.html");
@@ -109,10 +110,10 @@ test("green background stays on disk while the captured frame is transparent", (
   }
 });
 
-test("composition without green background renders as before", () => {
+test("composition without green background renders as before", { skip: missingLiveDemo() }, () => {
   const root = makeTempDir("nogreen-");
   try {
-    const src = path.resolve("test-workspace/live-design/fixture/live_demo/comps/title");
+    const src = path.join(LIVE_DEMO_DIR, "comps/title");
     const dir = path.join(root, "comp");
     fs.cpSync(src, dir, { recursive: true });
     const blobs = path.join(root, "blobs");

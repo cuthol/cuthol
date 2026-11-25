@@ -14,12 +14,13 @@ import puppeteer, { type Browser } from "puppeteer-core";
 import { resolveCoordsChromePath } from "../compositor/coords_extract.js";
 import { waitFor } from "./b_helpers.js";
 import { rmRetrySync } from "./fs_cleanup.js";
+import { LIVE_DEMO_DIR, missingLiveDemo } from "./fixtures.js";
 
 process.env.CUTHOL_SKILLS_AUTO = "0";
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "../..");
 const CLI = path.join(REPO, "dist", "cli.js");
-const FIXTURE = path.join(REPO, "test-workspace", "live-design", "fixture", "live_demo");
+const FIXTURE = LIVE_DEMO_DIR;
 
 interface Live {
   dir: string;
@@ -65,7 +66,7 @@ after(async () => {
   }
 });
 
-test("a 404 waveform is fetched once and never retried; backoff policy is 5 s, 30 s, stop", async () => {
+test("a 404 waveform is fetched once and never retried; backoff policy is 5 s, 30 s, stop", { skip: missingLiveDemo() }, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "live-waveretry-"));
   fs.cpSync(FIXTURE, dir, { recursive: true });
   try {

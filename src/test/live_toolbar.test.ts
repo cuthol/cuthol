@@ -20,7 +20,9 @@ process.env.CUTHOL_SKILLS_AUTO = "0";
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "../..");
 const CLI = path.join(REPO, "dist", "cli.js");
-const FIXTURE = path.join(REPO, "test-workspace", "live-design", "fixture", "live_demo");
+import { LIVE_DEMO_DIR, missingLiveDemo } from "./fixtures.js";
+
+const FIXTURE = LIVE_DEMO_DIR;
 const SHOTS = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-live-toolbar-shots-"));
 
 interface Live {
@@ -83,7 +85,7 @@ after(async () => {
   }
 });
 
-test("narrow window toolbar: every control inside toolbar and viewport down to 640 px", async () => {
+test("narrow window toolbar: every control inside toolbar and viewport down to 640 px", { skip: missingLiveDemo() }, async () => {
   const dir = makeTallDemo();
   const fx = await startLive(dir);
   try {

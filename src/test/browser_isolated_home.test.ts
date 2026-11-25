@@ -8,11 +8,17 @@ import { hyperframesCacheDir } from "../speech/local_engine.js";
 
 const REAL_CHROME_CACHE = path.join(hyperframesCacheDir(), "chrome");
 
-function countProfiles(): number {
+function listProfiles(): string[] {
   return fs
     .readdirSync(os.tmpdir())
     .filter((n) => n.startsWith("cuthol_browser_profile-") || n.startsWith("puppeteer_dev_chrome_profile-"))
-    .length;
+    .sort();
+}
+
+/** Profiles that appeared after `before` — only entries this launch made. */
+function leakedProfiles(before: string[]): string[] {
+  const seen = new Set(before);
+  return listProfiles().filter((n) => !seen.has(n));
 }
 
 interface IsoHome {
@@ -93,7 +99,7 @@ test("browser: isolated home launches the shell and removes its profile", async 
     const mod = await import("../compositor/coords_extract.js");
     const exe = mod.resolveCoordsChromePath();
     assert.equal(mod.isHeadlessShellPath(exe), true);
-    const before = countProfiles();
+    const before = listProfiles();
     const browser = await mod.launchScriptProbeBrowser();
     try {
       const page = await browser.newPage();
@@ -102,7 +108,7 @@ test("browser: isolated home launches the shell and removes its profile", async 
     } finally {
       await browser.close();
     }
-    assert.equal(countProfiles(), before, "temp profile folders are removed after close");
+    assert.deepEqual(leakedProfiles(before), [], "temp profile folders are removed after close");
   } finally {
     iso.restore();
   }
@@ -115,7 +121,7 @@ test("browser: failed launch names the browser, the profile and the fix", async 
   process.env.HYPERFRAMES_BROWSER_PATH = stub;
   try {
     const mod = await import("../compositor/coords_extract.js");
-    const before = countProfiles();
+    const before = listProfiles();
     let err: unknown;
     try {
       await mod.launchScriptProbeBrowser();
@@ -129,7 +135,7 @@ test("browser: failed launch names the browser, the profile and the fix", async 
     assert.ok(err.message.includes("profile"), "message names the profile folder");
     assert.ok(err.message.includes("hyperframes browser ensure"), "message suggests the fix");
     assert.ok(err.message.includes("G780"), "message points at the launch diagnostic");
-    assert.equal(countProfiles(), before, "temp profile folders are removed after failure");
+    assert.deepEqual(leakedProfiles(before), [], "temp profile folders are removed after failure");
   } finally {
     iso.restore();
   }

@@ -15,8 +15,10 @@ import {
 import type { GeometryQueryResult } from "../compositor/coords_query.js";
 import type { CutholSequence } from "../core/schema.js";
 
+import { LIVE_DEMO_DIR, missingLiveDemo } from "./fixtures.js";
+
 const TEST_ROOT = path.resolve(process.cwd(), "test-workspace");
-const DEMO = path.resolve("test-workspace/live-design/fixture/live_demo");
+const DEMO = LIVE_DEMO_DIR;
 
 function makeProject(): { dir: string; sequence: CutholSequence } {
   const dir = path.join(TEST_ROOT, `live_b3_${process.pid}`);
@@ -71,7 +73,7 @@ function center(b: [number, number, number, number]): [number, number] {
   return [b[0] + b[2] / 2, b[1] + b[3] / 2];
 }
 
-test("pin inside one small composition measures only that cue", () => {
+test("pin inside one small composition measures only that cue", { skip: missingLiveDemo() }, () => {
   const { dir, sequence } = makeProject();
   try {
     const atMs = 2000;
@@ -90,7 +92,7 @@ test("pin inside one small composition measures only that cue", () => {
   }
 });
 
-test("pin on empty space selects no composition cue", () => {
+test("pin on empty space selects no composition cue", { skip: missingLiveDemo() }, () => {
   const { dir, sequence } = makeProject();
   try {
     const atMs = 2000;
@@ -110,7 +112,7 @@ test("pin on empty space selects no composition cue", () => {
   }
 });
 
-test("scoped ranking gives the same top element as whole-frame ranking", () => {
+test("scoped ranking gives the same top element as whole-frame ranking", { skip: missingLiveDemo() }, () => {
   const { dir, sequence } = makeProject();
   try {
     const atMs = 2000;
