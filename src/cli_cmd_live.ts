@@ -1,6 +1,7 @@
 import { CLI_NOT_HANDLED, type CliCommandContext, emitEnvelopeJson } from "./cli_output.js";
 import { boolFlag, numFlag, strFlag } from "./cli_args.js";
 import { resolveLiveConfig, setLiveConfig } from "./live/live_config.js";
+import { othersRunning } from "./live/live_instances.js";
 import { ensureLiveServer, getLiveStatus, runLiveServer, stopLiveServer, waitForLiveResume } from "./live/live_server.js";
 import { openLiveWindow } from "./live/live_window.js";
 import type { LiveMode } from "./live/live_types.js";
@@ -18,9 +19,23 @@ export async function runLiveCommand(ctx: CliCommandContext): Promise<unknown> {
   const { action, flags, workspaceDir } = ctx;
   switch (action) {
     case "open": {
+      const others = othersRunning(workspaceDir);
+      if (others.length > 0 && !boolFlag(flags, "replace")) {
+        const list = others.map((o) => `${o.project_dir} (pid ${o.pid}, port ${o.port}; stop with: cuthol live stop --dir "${o.project_dir}")`).join("; ");
+        emitEnvelopeJson(workspaceDir, "live open", {
+          live: {
+            warning: `another Live server is running for ${list}. Not started and nothing was stopped; pass --replace to stop the other server first and open this one.`,
+            other_servers: others,
+          },
+        });
+        return;
+      }
+      if (others.length > 0 && boolFlag(flags, "replace")) {
+        for (const o of others) await stopLiveServer(o.project_dir);
+      }
       const server = await ensureLiveServer(workspaceDir);
       const window = boolFlag(flags, "no-window") ? { opened: false, mode: "none" as const } : openLiveWindow(server.url, workspaceDir);
-      emitEnvelopeJson(workspaceDir, "live open", { live: { url: server.url, port: server.port, pid: server.pid, window } });
+      emitEnvelopeJson(workspaceDir, "live open", { live: { url: server.url, port: server.port, pid: server.pid, window, replaced: boolFlag(flags, "replace") ? others.length : 0 } });
       return;
     }
     case "status": {

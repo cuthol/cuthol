@@ -86,36 +86,47 @@ tl.set({}, {}, 1);
 window.__timelines["main"] = tl;
 Promise.reject(new Error("async asset failed"));`;
 
+const GOLDEN_DIR = path.join(TEST_ROOT, "golden-template");
+
+/** Init + cue scaffold once; per-test copies only swap index.html. */
+function ensureGolden(): string {
+  if (!fs.existsSync(path.join(GOLDEN_DIR, "cuthol.sequence.json"))) {
+    initWorkspace({ dir: GOLDEN_DIR, title: "golden", aspect: "16:9", fps: 30 });
+    const compDir = path.join(GOLDEN_DIR, "compositions", "cmp");
+    fs.mkdirSync(path.join(compDir, "assets"), { recursive: true });
+    fs.writeFileSync(path.join(compDir, "index.html"), compHtml(HEALTHY_SCRIPT), "utf8");
+    fs.copyFileSync(GSAP as string, path.join(compDir, "assets", "gsap.min.js"));
+    const seqPath = path.join(GOLDEN_DIR, "cuthol.sequence.json");
+    const seq = JSON.parse(fs.readFileSync(seqPath, "utf8")) as CutholSequence;
+    const cue: LaneCue = {
+      id: "cue_01",
+      kind: "composition",
+      anchor: null,
+      at_ms: 0,
+      duration_ms: 1000,
+      z_index: 0,
+      placement: placement(),
+      composition: {
+        composition_dir: "compositions/cmp",
+        entry_html: "index.html",
+        props: {},
+        transparent: true,
+        mode: "overlay_alpha",
+        scene_host: null,
+      },
+      envelopes: [],
+    } as LaneCue;
+    const lane = seq.lanes.find((l) => l.id === "ln_motion") ?? seq.lanes[0];
+    lane.cues.push(cue);
+    fs.writeFileSync(seqPath, JSON.stringify(seq, null, 2), "utf8");
+  }
+  return GOLDEN_DIR;
+}
+
 function makeProject(name: string, script: string): string {
   const projDir = fs.mkdtempSync(path.join(TEST_ROOT, `${name}-`));
-  initWorkspace({ dir: projDir, title: name, aspect: "16:9", fps: 30 });
-  const compDir = path.join(projDir, "compositions", "cmp");
-  fs.mkdirSync(path.join(compDir, "assets"), { recursive: true });
-  fs.writeFileSync(path.join(compDir, "index.html"), compHtml(script), "utf8");
-  fs.copyFileSync(GSAP as string, path.join(compDir, "assets", "gsap.min.js"));
-  const seqPath = path.join(projDir, "cuthol.sequence.json");
-  const seq = JSON.parse(fs.readFileSync(seqPath, "utf8")) as CutholSequence;
-  const cue: LaneCue = {
-    id: "cue_01",
-    kind: "composition",
-    anchor: null,
-    at_ms: 0,
-    duration_ms: 1000,
-    z_index: 0,
-    placement: placement(),
-    composition: {
-      composition_dir: "compositions/cmp",
-      entry_html: "index.html",
-      props: {},
-      transparent: true,
-      mode: "overlay_alpha",
-      scene_host: null,
-    },
-    envelopes: [],
-  } as LaneCue;
-  const lane = seq.lanes.find((l) => l.id === "ln_motion") ?? seq.lanes[0];
-  lane.cues.push(cue);
-  fs.writeFileSync(seqPath, JSON.stringify(seq, null, 2), "utf8");
+  fs.cpSync(ensureGolden(), projDir, { recursive: true });
+  fs.writeFileSync(path.join(projDir, "compositions", "cmp", "index.html"), compHtml(script), "utf8");
   return projDir;
 }
 

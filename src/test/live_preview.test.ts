@@ -12,7 +12,7 @@
  * the server file will mount them (see the endpoint contracts in
  * live_proxy.ts, live_comp_serve.ts and live_frame.ts).
  */
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
@@ -26,6 +26,7 @@ import { loadSequence } from "../core/workspace.js";
 import { routeLiveCompRequest } from "../live/live_comp_serve.js";
 import { routeLiveFrameRequest } from "../live/live_frame.js";
 import { LiveProxyManager, routeProxyRequest } from "../live/live_proxy.js";
+import { waitFor } from "./b_helpers.js";
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "../..");
 const CLI = path.join(REPO, "dist", "cli.js");
@@ -47,17 +48,6 @@ function ffprobeJson(file: string, args: string[]): any {
   const proc = spawnSync("ffprobe", ["-v", "error", ...args, file], { encoding: "utf8", timeout: 60000 });
   assert.equal(proc.status, 0, `ffprobe failed: ${proc.stderr}`);
   return JSON.parse(proc.stdout);
-}
-
-/** Wait until `fn` returns truthy (poll 250 ms) or throw after `timeoutMs`. */
-async function waitFor<T>(fn: () => T | Promise<T> | null | undefined | false, timeoutMs: number, what: string): Promise<NonNullable<T>> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const v = await fn();
-    if (v) return v as NonNullable<T>;
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((r) => setTimeout(r, 250));
-  }
 }
 
 interface Fixture {
@@ -163,6 +153,44 @@ async function stopFixture(fx: Fixture): Promise<void> {
   } catch {}
 }
 
+/**
+ * One live server + proxy manager shared by every test that leaves the
+ * project untouched (the revision test below gets its own copy because it
+ * edits the sequence through the CLI). Tests run in file order, so the
+ * proxy-shape test still sees a cold cache and the queue test still sees a
+ * cold big asset; later tests reuse the encoded proxies instead of
+ * re-encoding them.
+ */
+let shared: Fixture | null = null;
+async function sharedFixture(): Promise<Fixture> {
+  if (!shared) shared = await startFixture();
+  return shared;
+}
+
+/** One headless browser for the file; each window test opens its own page. */
+let sharedBrowser: Browser | null = null;
+async function sharedBrowser_(): Promise<Browser> {
+  if (!sharedBrowser) {
+    sharedBrowser = await puppeteer.launch({
+      executablePath: resolveCoordsChromePath(),
+      headless: true,
+      args: ["--no-sandbox", "--autoplay-policy=no-user-gesture-required", "--mute-audio"],
+    });
+  }
+  return sharedBrowser;
+}
+
+after(async () => {
+  if (sharedBrowser) {
+    await sharedBrowser.close().catch(() => {});
+    sharedBrowser = null;
+  }
+  if (shared) {
+    await stopFixture(shared).catch(() => {});
+    shared = null;
+  }
+});
+
 function httpGet(url: string, headers: Record<string, string> = {}): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
   return new Promise((resolve, reject) => {
     http
@@ -176,7 +204,7 @@ function httpGet(url: string, headers: Record<string, string> = {}): Promise<{ s
 }
 
 test("live preview: proxies encode with the right shape, cache and progress", { skip: FIXTURE_SKIP }, async () => {
-  const fx = await startFixture();
+  const fx = await sharedFixture();
   try {
     // Smallest asset first (fast encode); the big one later proves 202 + queueing.
     fx.manager.ensure("vid_04");
@@ -240,12 +268,12 @@ test("live preview: proxies encode with the right shape, cache and progress", { 
     const missing = await httpGet(fx.url("/api/proxy/nope_99"));
     assert.equal(missing.status, 404);
   } finally {
-    await stopFixture(fx);
+    // Shared fixture: closed once in after().
   }
 });
 
 test("live preview: big asset reports 202 while queued/encoding (max 1 at a time)", { skip: FIXTURE_SKIP }, async () => {
-  const fx = await startFixture();
+  const fx = await sharedFixture();
   try {
     fx.manager.ensure("vid_04");
     const st1 = fx.manager.ensure("vid_01");
@@ -258,12 +286,12 @@ test("live preview: big asset reports 202 while queued/encoding (max 1 at a time
     assert.equal(direct.status, 202, "unready proxy answers 202 + status so the window falls back to /media");
     assert.ok(direct.headers["content-type"]?.includes("application/json"));
   } finally {
-    await stopFixture(fx);
+    // Shared fixture: closed once in after().
   }
 });
 
 test("live preview: composition files are served confined to the cue dir", { skip: FIXTURE_SKIP }, async () => {
-  const fx = await startFixture();
+  const fx = await sharedFixture();
   try {
     const entry = await httpGet(fx.url("/comp/cue_02/"));
     assert.equal(entry.status, 200);
@@ -283,12 +311,12 @@ test("live preview: composition files are served confined to the cue dir", { ski
     assert.equal(unknown.status, 404);
     assert.ok(JSON.parse(unknown.body.toString("utf8")).diagnostic.code === "CUTHOL-G611");
   } finally {
-    await stopFixture(fx);
+    // Shared fixture: closed once in after().
   }
 });
 
 test("live preview: exact frame renders the monitor frame as PNG", { skip: FIXTURE_SKIP }, async () => {
-  const fx = await startFixture();
+  const fx = await sharedFixture();
   try {
     const t0 = Date.now();
     const res = await httpGet(fx.url("/api/frame?at=2500"));
@@ -299,7 +327,7 @@ test("live preview: exact frame renders the monitor frame as PNG", { skip: FIXTU
     const bad = await httpGet(fx.url("/api/frame?at=-5"));
     assert.equal(bad.status, 400);
   } finally {
-    await stopFixture(fx);
+    // Shared fixture: closed once in after().
   }
 });
 
@@ -317,13 +345,8 @@ interface PreviewState {
   playing: boolean;
 }
 
-async function openPreview(fx: Fixture): Promise<{ browser: Browser; page: Page; errors: string[] }> {
-  const browser = await puppeteer.launch({
-    executablePath: resolveCoordsChromePath(),
-    headless: true,
-    args: ["--no-sandbox", "--autoplay-policy=no-user-gesture-required", "--mute-audio"],
-  });
-  const page = await browser.newPage();
+async function openPreview(fx: Fixture): Promise<{ page: Page; errors: string[] }> {
+  const page = await (await sharedBrowser_()).newPage();
   await page.setViewport({ width: 1600, height: 900 });
   const errors: string[] = [];
   page.on("console", (m) => {
@@ -337,7 +360,7 @@ async function openPreview(fx: Fixture): Promise<{ browser: Browser; page: Page;
   await page.goto(fx.url("/"), { waitUntil: "domcontentloaded", timeout: 60000 });
   await page.waitForFunction(() => (window as any).__livePreview, { timeout: 30000 });
   await page.waitForFunction(() => ((window as any).__livePreview.state().duration ?? 0) > 0, { timeout: 30000 });
-  return { browser, page, errors };
+  return { page, errors };
 }
 
 async function previewState(page: Page): Promise<PreviewState> {
@@ -355,7 +378,7 @@ async function seekSettled(page: Page, t: number): Promise<PreviewState> {
     last = await previewState(page);
     if (last.sourceMs != null && Math.abs(last.videoTimeMs - last.sourceMs) <= FRAME_MS + 7) return last;
     if (Date.now() > deadline) return last;
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 50));
   }
 }
 
@@ -384,11 +407,12 @@ async function iframeBox(page: Page, cueId: string, elementId: string): Promise<
   );
 }
 
-test("live preview: window accuracy at 6 timestamps (spine, comps, captions)", { skip: FIXTURE_SKIP, timeout: 600000 }, async () => {
-  const fx = await startFixture();
+// "load: " tests measure wall time or CPU: scripts/test.mjs runs them alone, after the other stages.
+test("load: live preview: window accuracy at 6 timestamps (spine, comps, captions)", { skip: FIXTURE_SKIP, timeout: 600000 }, async () => {
+  const fx = await sharedFixture();
   // Encode the big proxy in the background while accuracy runs on media fallback.
   fx.manager.ensure("vid_01");
-  const { browser, page, errors } = await openPreview(fx);
+  const { page, errors } = await openPreview(fx);
   try {
     const rows: Array<{
       t: number;
@@ -435,22 +459,28 @@ test("live preview: window accuracy at 6 timestamps (spine, comps, captions)", {
     console.log(`\npreview accuracy (demo copy):\n${table.join("\n")}\n`);
     assert.deepEqual(errors, [], `zero console/page/network errors (got ${errors.length})`);
   } finally {
-    await browser.close();
-    await stopFixture(fx);
+    await page.close().catch(() => {});
   }
 });
 
-test("live preview: proxy playback performance (1080p source, drops, heap, idle)", { skip: FIXTURE_SKIP, timeout: 600000 }, async () => {
-  const fx = await startFixture();
+test("load: live preview: proxy playback performance (1080p source, drops, heap, idle)", { skip: FIXTURE_SKIP, timeout: 600000 }, async () => {
+  const fx = await sharedFixture();
   try {
     fx.manager.ensure("vid_01");
     await waitFor(() => {
       const st = fx.manager.status("vid_01");
       return st.status === "ready" ? st : null;
     }, 420000, "vid_01 proxy");
-    const { browser, page, errors } = await openPreview(fx);
+    const { page, errors } = await openPreview(fx);
     try {
       await seekSettled(page, 5000);
+      // The proxy URL is assigned before the slot becomes visible; wait for
+      // the visible slot so the playback measurement reads the live element.
+      await waitFor(async () => {
+        return await page.evaluate(() =>
+          [...document.querySelectorAll(".pv-video")].some((v) => (v as HTMLVideoElement).style.visibility === "visible")
+        );
+      }, 30000, "visible video slot");
       const st = await previewState(page);
       assert.ok(st.videoSrc.includes("/api/proxy/vid_01"), `playing the proxy, not the original (${st.videoSrc})`);
       const perf = await page.evaluate(async () => {
@@ -510,16 +540,17 @@ test("live preview: proxy playback performance (1080p source, drops, heap, idle)
       assert.ok(dropRate < 0.2, `drop rate under 20% in headless (${(dropRate * 100).toFixed(1)}%)`);
       assert.deepEqual(errors, [], `zero console/page/network errors (got ${errors.length})`);
     } finally {
-      await browser.close();
+      await page.close().catch(() => {});
     }
   } finally {
-    await stopFixture(fx);
+    // Shared fixture: closed once in after().
   }
 });
 
 test("live preview: new revision renders at the same playhead without a flicker", { skip: FIXTURE_SKIP, timeout: 300000 }, async () => {
+  // Own copy: this test edits the sequence through the CLI.
   const fx = await startFixture();
-  const { browser, page, errors } = await openPreview(fx);
+  const { page, errors } = await openPreview(fx);
   try {
     await seekSettled(page, 2500);
     // A real agent-side edit through the CLI + journal (backdrop color).
@@ -544,7 +575,7 @@ test("live preview: new revision renders at the same playhead without a flicker"
     assert.equal(applied.bg, "rgb(20, 32, 46)", `new backdrop renders (${applied.bg})`);
     assert.deepEqual(errors, [], `zero console/page/network errors (got ${errors.length})`);
   } finally {
-    await browser.close();
+    await page.close().catch(() => {});
     await stopFixture(fx);
   }
 });

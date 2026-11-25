@@ -8,7 +8,7 @@ import { connect, createApi } from "./live_client.js";
 
 /**
  * @typedef {Object} LiveUiState
- * @property {"offline"|"agent"|"human"|"render"} mode    who holds the timeline (render = a render is running)
+ * @property {"connecting"|"offline"|"agent"|"human"|"render"} mode    who holds the timeline (render = a render is running)
  * @property {any|null} snapshot     last LiveSnapshot (see src/live/live_types.ts)
  * @property {any|null} sequence     current cuthol.sequence.json document
  * @property {number} revision
@@ -50,7 +50,7 @@ import { connect, createApi } from "./live_client.js";
 function createStore() {
   const listeners = new Map();
   /** @type {LiveUiState} */
-  const state = { mode: "offline", snapshot: null, sequence: null, revision: 0, scenes: [], activity: [], lock: null, progress: null, selection: null, playheadMs: 0, playing: false, annotate: false, lastChanged: [], agentMs: null, agentFollow: false, agentIds: [], noteTimes: [] };
+  const state = { mode: "connecting", snapshot: null, sequence: null, revision: 0, scenes: [], activity: [], lock: null, progress: null, selection: null, playheadMs: 0, playing: false, annotate: false, lastChanged: [], agentMs: null, agentFollow: false, agentIds: [], noteTimes: [] };
   const on = (event, fn) => { if (!listeners.has(event)) listeners.set(event, new Set()); listeners.get(event).add(fn); return () => listeners.get(event).delete(fn); };
   const emit = (event, payload) => { for (const fn of listeners.get(event) ?? []) { try { fn(payload); } catch (e) { console.error(`[live] ${event} listener`, e); } } };
   const set = (patch, event = "state") => { Object.assign(state, patch); emit(event, patch); };
@@ -63,6 +63,7 @@ const api = createApi();
 const ctx = { store, api };
 
 function modeFrom(state) {
+  if (state.mode === "connecting") return "connecting";
   if (state.mode === "offline") return "offline";
   if (state.progress && state.progress.state === "running") return "render";
   if (state.lock && state.lock.holder === "human") return "human";

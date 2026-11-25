@@ -16,29 +16,51 @@ import { lintHyperFramesComposition } from "./hf_lint.js";
  * Generates a deterministic, offline-self-contained HyperFrames HTML composition
  * that obeys all `/hyperframes-core` lint and determinism rules.
  */
-export function scaffoldHyperFramesComposition(options: HyperFramesScaffoldOptions): {
-  compositionDir: string;
-  entryHtml: string;
-  compositionId: string;
-} {
-  const compDir = path.resolve(options.targetDir);
+export interface CompositionRuntimeFileOptions {
+  width: number;
+  height: number;
+  fps: number;
+  durationMs: number;
+  compositionId?: string;
+  props?: Record<string, unknown>;
+}
+
+/**
+ * Writes the runtime support files a mounted composition needs
+ * (`assets/gsap.min.js`, `assets/cuthol-runtime.js`, `assets/cuthol-data.*`,
+ * `assets/cuthol-vars.json`, `hyperframes.json`) without touching the entry
+ * HTML. With `overwrite: false` only missing files are placed, so an
+ * agent-written `index.html` is never clobbered.
+ */
+export function ensureCompositionRuntimeFiles(
+  targetDir: string,
+  options: CompositionRuntimeFileOptions,
+  overwrite = false
+): { placed: string[] } {
+  const compDir = path.resolve(targetDir);
   const assetsDir = path.join(compDir, "assets");
   fs.mkdirSync(assetsDir, { recursive: true });
+  const placed: string[] = [];
+  const writeIf = (file: string, content: string): void => {
+    if (!overwrite && fs.existsSync(file)) return;
+    fs.writeFileSync(file, content, "utf8");
+    placed.push(path.relative(compDir, file));
+  };
 
   // Copy local gsap.min.js into composition assets/ so no network/CDN request occurs
-  const gsapSrc = findLocalGsapMinJs();
   const gsapDest = path.join(assetsDir, "gsap.min.js");
-  fs.copyFileSync(gsapSrc, gsapDest);
+  if (overwrite || !fs.existsSync(gsapDest)) {
+    fs.copyFileSync(findLocalGsapMinJs(), gsapDest);
+    placed.push(path.relative(compDir, gsapDest));
+  }
 
   const rawCompId = options.compositionId ?? "main";
   const compId = rawCompId.replace(/[^a-zA-Z0-9_-]/g, "_") || "main";
   const durationSec = Number((options.durationMs / 1000).toFixed(3));
-  const preset = options.preset ?? "lower_third";
   const props = options.props ?? {};
 
   // Write initial cuthol-runtime.js, cuthol-data.json/js, and cuthol-vars.json
-  const runtimeDest = path.join(assetsDir, "cuthol-runtime.js");
-  fs.writeFileSync(runtimeDest, getCutholRuntimeJsSource(), "utf8");
+  writeIf(path.join(assetsDir, "cuthol-runtime.js"), getCutholRuntimeJsSource());
 
   const safeMarginX = Math.round(options.width * 0.05);
   const safeMarginY = Math.round(options.height * 0.05);
@@ -80,7 +102,51 @@ export function scaffoldHyperFramesComposition(options: HyperFramesScaffoldOptio
   }
 
   const scalarVars = extractScalarHyperFramesVariables(props);
-  fs.writeFileSync(path.join(assetsDir, "cuthol-vars.json"), JSON.stringify(scalarVars, null, 2), "utf8");
+  writeIf(path.join(assetsDir, "cuthol-vars.json"), JSON.stringify(scalarVars, null, 2));
+
+  const hfConfig = {
+    name: compId,
+    entry: "index.html",
+    width: options.width,
+    height: options.height,
+    fps: options.fps,
+  };
+  writeIf(path.join(compDir, "hyperframes.json"), JSON.stringify(hfConfig, null, 2));
+
+  return { placed };
+}
+
+/**
+ * Generates a deterministic, offline-self-contained HyperFrames HTML composition
+ * that obeys all `/hyperframes-core` lint and determinism rules.
+ */
+export function scaffoldHyperFramesComposition(options: HyperFramesScaffoldOptions): {
+  compositionDir: string;
+  entryHtml: string;
+  compositionId: string;
+} {
+  const compDir = path.resolve(options.targetDir);
+  const rawCompId = (options.compositionId ?? "main").replace(/[^a-zA-Z0-9_-]/g, "_") || "main";
+  const durationSec = Number((options.durationMs / 1000).toFixed(3));
+  const preset = options.preset ?? "lower_third";
+  const props = options.props ?? {};
+
+  // Runtime files first (overwritten, exactly as before), then the entry HTML.
+  ensureCompositionRuntimeFiles(
+    compDir,
+    {
+      width: options.width,
+      height: options.height,
+      fps: options.fps,
+      durationMs: options.durationMs,
+      compositionId: rawCompId,
+      props,
+    },
+    true
+  );
+  const compId = rawCompId;
+
+  const scalarVars = extractScalarHyperFramesVariables(props);
 
   const varDeclarations = Object.entries(scalarVars).map(([key, val]) => ({
     id: key,
@@ -523,15 +589,6 @@ export function scaffoldHyperFramesComposition(options: HyperFramesScaffoldOptio
   const entryPath = path.join(compDir, "index.html");
   fs.writeFileSync(entryPath, htmlContent, "utf8");
 
-  const hfConfig = {
-    name: compId,
-    entry: "index.html",
-    width: options.width,
-    height: options.height,
-    fps: options.fps,
-  };
-  fs.writeFileSync(path.join(compDir, "hyperframes.json"), JSON.stringify(hfConfig, null, 2), "utf8");
-
   return {
     compositionDir: compDir,
     entryHtml: "index.html",
@@ -552,11 +609,45 @@ function escapeHtml(str: string): string {
  * `/hyperframes-core` contract rules (`data-composition-id`, `window.__timelines`,
  * `<template>` rules, determinism bans, no `crossorigin` on media).
  */
+export interface CompositionRuntimeStatus {
+  timelineRegistered: boolean;
+  timelinePaused: boolean | null;
+}
+
+/**
+ * Collects the text of local `<script src="...">` files referenced by the
+ * entry HTML (project-relative, same folder or below). Timeline builders
+ * often live in a separate JS file instead of inline in `index.html`.
+ */
+export function readCompositionScriptSources(compositionDir: string, html: string): string[] {
+  const out: string[] = [];
+  const absDir = path.resolve(compositionDir);
+  const srcRe = /<script\b[^>]*\bsrc\s*=\s*(["'])([^"']+)\1[^>]*>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = srcRe.exec(html)) !== null) {
+    const src = m[2].trim();
+    if (!src || /^(https?:|data:|blob:)?\/\//i.test(src) || /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(src)) continue;
+    const clean = src.split(/[?#]/)[0];
+    if (!clean) continue;
+    const full = path.resolve(absDir, clean);
+    if (!full.startsWith(absDir + path.sep) && full !== absDir) continue;
+    try {
+      if (fs.existsSync(full) && fs.statSync(full).isFile() && fs.statSync(full).size <= 2 * 1024 * 1024) {
+        out.push(fs.readFileSync(full, "utf8"));
+      }
+    } catch {
+      // unreadable script: ignore, the browser probe reports it instead
+    }
+  }
+  return out;
+}
+
 export function validateHyperFramesCompositionContract(
   compositionDir: string,
   entryHtml = "index.html",
   runCliLint = false,
-  expectSubComposition = false
+  expectSubComposition = false,
+  runtime?: CompositionRuntimeStatus
 ): HyperFramesValidationResult {
   const htmlPath = path.join(path.resolve(compositionDir), entryHtml);
   if (!fs.existsSync(htmlPath)) {
@@ -576,11 +667,23 @@ export function validateHyperFramesCompositionContract(
     findings.push("Missing 'data-composition-id' attribute on composition root.");
   }
 
-  if (compId && !html.includes(`window.__timelines["${compId}"]`) && !html.includes(`window.__timelines['${compId}']`)) {
+  // Timeline registration and the paused flag are checked against the entry
+  // HTML plus every local script it loads: both are correct at run time when
+  // the builder lives in a separate JS file. A run-time probe result, when
+  // given, overrides these two static findings (never the other way round).
+  const haystack = [html, ...readCompositionScriptSources(compositionDir, html)].join("\n");
+
+  const timelineRegisteredStatic =
+    !compId || haystack.includes(`window.__timelines["${compId}"]`) || haystack.includes(`window.__timelines['${compId}']`);
+  const timelinePausedStatic = /gsap\.timeline\s*\(\s*\{[^}]*\bpaused\s*:\s*true\b/s.test(haystack);
+  const timelineRegistered = runtime ? runtime.timelineRegistered : timelineRegisteredStatic;
+  const timelinePaused = runtime ? (runtime.timelinePaused ?? timelinePausedStatic) : timelinePausedStatic;
+
+  if (compId && !timelineRegistered) {
     findings.push(`Missing timeline registration 'window.__timelines["${compId}"] = ...' matching root data-composition-id.`);
   }
 
-  if (!/gsap\.timeline\s*\(\s*\{[^}]*\bpaused\s*:\s*true\b/s.test(html)) {
+  if (!timelinePaused) {
     findings.push("Timeline must be created paused: 'gsap.timeline({ paused: true })'.");
   }
 

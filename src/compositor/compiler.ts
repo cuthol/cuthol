@@ -14,6 +14,7 @@ import {
   isProbeMetadataComplete,
 } from "../library/probe.js";
 import { compileSequenceAudioPlan } from "./compile_audio.js";
+import { atempoChain, outputDurationMs, outputFrameAtSeqMs, tempoOf, tempoVideoRetimeFilter } from "../sequence/tempo.js";
 import { StaticStillLayerSpec } from "./compile_backdrop.js";
 import { BT709_TO_YUV420P, BT709_TO_YUVA420P } from "./compile_color.js";
 import { compileLane } from "./compile_lane.js";
@@ -243,6 +244,8 @@ function resolveDirectVideoBlobPath(ctx: VideoGraphCompileContext): string | nul
   // The transparent master never remuxes an opaque overlay blob: the copy
   // would bake the stage backdrop into every pixel and destroy the alpha plane.
   if (preset === "master_alpha") return null;
+  // A global tempo retime cannot be stream-copied: the blob is on the sequence clock.
+  if (tempoOf(ctx.seq) !== 1) return null;
   // Determine if the entire sequence visual output is satisfied by a single full-frame opaque HyperFrames MP4 blob
   let directVideoBlobPath: string | null = null;
   if (
@@ -301,9 +304,29 @@ export function compileSequenceRenderPlan(
   const directVideoBlobPath = resolveDirectVideoBlobPath(ctx);
 
   // Finalize Video Output Pad (preserve AVTB so FFmpeg -t duration trim does not round down to 1/fps)
+  // Sequence tempo (stage.tempo) is applied here, after compositing: captions and
+  // overlays follow automatically, in a single encode. Frames keep their absolute
+  // sequence timestamps until the retime, and each output frame takes the nearest
+  // sequence frame, so segment windows (whole output frames, see
+  // tempoOutputSegments) join without drift. Single frames (monitor) stay on the
+  // sequence clock.
   const finalVideoPad = "[vout]";
   const pixFmt = presetPixFormatFilter(preset);
-  if (ctx.activeWin && compileOptions?.singleFrameAtMs === undefined) {
+  const tempoRate = compileOptions?.singleFrameAtMs === undefined ? tempoOf(seq) : 1;
+  if (tempoRate !== 1) {
+    const winStartMs = ctx.activeWin ? Number(ctx.winStartSec) * 1000 : 0;
+    const outStartFrame = ctx.activeWin ? outputFrameAtSeqMs(winStartMs, tempoRate, ctx.fps) : 0;
+    const retime = tempoVideoRetimeFilter(tempoRate, ctx.fps, outStartFrame);
+    if (ctx.activeWin) {
+      // Half a sequence frame of margin each side so the nearest frame exists at the edges.
+      const halfFrameSec = 0.5 / Math.max(1, ctx.fps);
+      const trimStart = Math.max(0, Number(ctx.winStartSec) - halfFrameSec).toFixed(6);
+      const trimEnd = (Number(ctx.winEndSec) + 2 * halfFrameSec).toFixed(6);
+      ctx.filterChains.push(`${ctx.currentVideoPad}trim=start=${trimStart}:end=${trimEnd},${retime},${pixFmt},settb=AVTB${finalVideoPad}`);
+    } else {
+      ctx.filterChains.push(`${ctx.currentVideoPad}${retime},${pixFmt},settb=AVTB${finalVideoPad}`);
+    }
+  } else if (ctx.activeWin && compileOptions?.singleFrameAtMs === undefined) {
     ctx.filterChains.push(
       `${ctx.currentVideoPad}trim=start=${ctx.winStartSec}:end=${ctx.winEndSec},setpts=PTS-STARTPTS,${pixFmt},settb=AVTB${finalVideoPad}`
     );
@@ -324,6 +347,11 @@ export function compileSequenceRenderPlan(
     ctx.inputArgs.push(...audioPlan.inputArgs);
     ctx.filterChains.push(audioPlan.filterComplex);
     audioOutPad = audioPlan.audioOutPad;
+    if (tempoOf(seq) !== 1 && audioPlan.audioOutPad) {
+      const tempoPad = "[aout_tempo]";
+      ctx.filterChains.push(`${audioPlan.audioOutPad}${atempoChain(tempoOf(seq))}${tempoPad}`);
+      audioOutPad = tempoPad;
+    }
   }
 
   return {
@@ -331,7 +359,7 @@ export function compileSequenceRenderPlan(
     filterComplex: ["sws_flags=accurate_rnd+full_chroma_int", ...ctx.filterChains].join(";"),
     videoOutPad: finalVideoPad,
     audioOutPad,
-    totalDurationMs: ctx.totalDurationMs,
+    totalDurationMs: outputDurationMs(ctx.totalDurationMs, tempoOf(seq)),
     renderWidth: ctx.renderWidth,
     renderHeight: ctx.renderHeight,
     fps: ctx.fps,

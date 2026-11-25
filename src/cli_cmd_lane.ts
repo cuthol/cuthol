@@ -3,11 +3,17 @@ import fs from "node:fs";
 import path from "node:path";
 import { syncEnabledExtensionAssetsToComposition } from "./compositor/bridge_exporter.js";
 import {
+  ensureCompositionRuntimeFiles,
   HyperFramesPresetKind,
   scaffoldHyperFramesComposition,
   validateHyperFramesCompositionContract,
 } from "./compositor/hyperframes_bridge.js";
-import { CutholError, DIAGNOSTICS } from "./core/diagnostics.js";
+import { readCurrentScriptErrorRecord } from "./compositor/coords_extract.js";
+import {
+  probeScriptRecordsChildSync,
+  scriptRecordToDiagnostic,
+} from "./compositor/hf_script_errors.js";
+import { CutholDiagnostic, CutholError, DIAGNOSTICS } from "./core/diagnostics.js";
 import { CompositionAudioMode, HyperFramesCompositeMode, LaneCue, LaneKind } from "./core/schema.js";
 import { parseTimeMs } from "./core/time.js";
 import { loadSequence, setLaneLockStatus, setLaneMuteStatus } from "./core/workspace.js";
@@ -179,13 +185,82 @@ export function runLaneCommand(ctx: CliCommandContext): CliCommandResult {
       });
     }
 
+    // Place missing runtime files into the folder without touching the
+    // agent-written entry HTML (no `composition scaffold` round-trip needed).
+    try {
+      ensureCompositionRuntimeFiles(absCompDir, {
+        width: sequence.stage.width,
+        height: sequence.stage.height,
+        fps: sequence.stage.fps,
+        durationMs,
+        props,
+      });
+    } catch {
+      // non-blocking runtime file top-up
+    }
+
     try {
       syncEnabledExtensionAssetsToComposition(sequence, absCompDir, entryHtml, paths);
     } catch {
       // non-blocking extension asset pre-sync
     }
 
-    const contract = validateHyperFramesCompositionContract(absCompDir, entryHtml);
+    // Static contract check (entry HTML plus every local script it loads, so
+    // a timeline built in a separate JS file passes).
+    let contract = validateHyperFramesCompositionContract(absCompDir, entryHtml);
+
+    // A cached run-time record (same file hash) is judged here. A browser probe
+    // runs at add time only when the static check fails, because a page whose
+    // timeline registers in a real browser passes even when the static text
+    // does not name it. Otherwise the probe is left to `verify`, which checks
+    // every unprobed composition in one shared browser run.
+    const extraDiagnostics: CutholDiagnostic[] = [];
+    try {
+      let record = readCurrentScriptErrorRecord(workspaceDir, absCompDir, entryHtml);
+      if (!record && contract.ok) {
+        extraDiagnostics.push(DIAGNOSTICS.COMPOSITIONS_NEVER_PROBED_IN_BROWSER(1));
+      }
+      if (!record && !contract.ok) {
+        probeScriptRecordsChildSync(workspaceDir, [
+          {
+            cueId: "add-composition",
+            absCompDir,
+            entryHtml,
+            width: Math.max(1, Math.round(sequence.stage.width)),
+            height: Math.max(1, Math.round(sequence.stage.height)),
+            fps: Math.max(1, sequence.stage.fps),
+            durationSec: Math.max(0.1, durationMs / 1000),
+          },
+        ]);
+        record = readCurrentScriptErrorRecord(workspaceDir, absCompDir, entryHtml);
+      }
+      if (record) {
+        if (record.timeline_expected && record.timeline_registered && record.timeline_paused === false) {
+          throw new CutholError(
+            DIAGNOSTICS.INVALID_COMPOSITION_CONTRACT(
+              "composition",
+              "timeline is not paused at run time: keep the main timeline paused until Cuthol seeks it"
+            )
+          );
+        }
+        if (!contract.ok && record.timeline_registered) {
+          const recheck = validateHyperFramesCompositionContract(absCompDir, entryHtml, false, false, {
+            timelineRegistered: true,
+            timelinePaused: record.timeline_paused ?? null,
+          });
+          if (recheck.ok) contract = recheck;
+        }
+        const scriptDiag = scriptRecordToDiagnostic("composition", record);
+        if (scriptDiag) {
+          if (record.severity === "ERROR") throw new CutholError(scriptDiag);
+          extraDiagnostics.push(scriptDiag);
+        }
+      }
+    } catch (err) {
+      if (err instanceof CutholError) throw err;
+      // probe failure must never fail the add: the static verdict stands
+    }
+
     if (!contract.ok) {
       throw new Error(`HyperFrames composition contract errors: ${contract.findings.join("; ")}`);
     }
@@ -215,10 +290,14 @@ export function runLaneCommand(ctx: CliCommandContext): CliCommandResult {
       emitted = setCueCompositionAudio(workspaceDir, res.cue.id, addCompAudio);
     }
     const durationWarning = bareDurationWarning(strFlag(flags, "duration"));
+    const addDiagnostics = [
+      ...extraDiagnostics,
+      ...(durationWarning ? [durationWarning] : []),
+    ];
     emitEnvelopeJson(workspaceDir, "lane.add-composition", {
       action: "lane.add-composition",
       ...emitted,
-      ...(durationWarning ? { diagnostics: [durationWarning] } : {}),
+      ...(addDiagnostics.length > 0 ? { diagnostics: addDiagnostics } : {}),
     });
     return;
   }

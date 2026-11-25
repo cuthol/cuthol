@@ -28,11 +28,12 @@ import {
   CutholBridgeV1, getCutholRuntimeJsSource
 } from "./cuthol_runtime.js";
 import { resolveExtension } from "../extensions/manager.js";
+import { syncSharedProjectAssetsToComposition } from "./bridge_extension_assets.js";
 import { exportBridgeDataForCue, isAutoAnalyzingInBridge } from "./bridge_export_cue.js";
 import { analyzeCompositionDataUsage, computeUsedBridgePayloadHashes, hashDirectoryRecursive, extractScalarHyperFramesVariables, findBundledGsapMinJs } from "./bridge_hash.js";
 export { hashDirectoryRecursive, extractScalarHyperFramesVariables, analyzeCompositionDataUsage, hashCompositionFilesExcludingBridgeData, computeUsedBridgePayloadHashes, compositionUsesAudio } from "./bridge_hash.js";
 export type { CompositionDataUsage } from "./bridge_hash.js";
-export { syncEnabledExtensionAssetsToComposition, detectCompositionExtensionCopyDrift } from "./bridge_extension_assets.js";
+export { syncEnabledExtensionAssetsToComposition, detectCompositionExtensionCopyDrift, syncSharedProjectAssetsToComposition, compositionReferencesSharedAssets } from "./bridge_extension_assets.js";
 export { exportBridgeDataForCue } from "./bridge_export_cue.js";
 
 
@@ -411,6 +412,16 @@ export function syncCompositionBridgeFiles(
       updated = true;
       updatedFiles.push(entryRel);
       updateReasons.push("entry_html_scripts_injected");
+    }
+
+    // 4c. Sync the project-level `shared/` folder into compositions that reference it.
+    const sharedSync = syncSharedProjectAssetsToComposition(compDir, entryRel, paths);
+    if (sharedSync.updated) {
+      updated = true;
+      updatedFiles.push(...sharedSync.updatedFiles);
+      if (!updateReasons.includes("shared_assets_updated")) {
+        updateReasons.push("shared_assets_updated");
+      }
     }
 
     // 5. Hand-written compositions that reference `assets/gsap.min.js` get the bundled copy;

@@ -16,6 +16,8 @@ export async function openEffect(id, ctx) {
   const host = document.getElementById("rightcol");
   if (!fx || !host) return;
   closeEffect();
+  // Tells other overlays on the right column (expanded notes) to give way.
+  document.dispatchEvent(new CustomEvent("live:effect-open", { detail: { id } }));
   const el = document.createElement("section");
   el.className = "panel fx-overlay";
   el.setAttribute("role", "dialog");

@@ -20,6 +20,7 @@ import {
   handleLiveEdit,
   humanEditsEntriesForRange,
 } from "../live/live_edit_api.js";
+import { buildActivity, buildDelta } from "../live/live_state.js";
 import { LIVE_SCHEMA } from "../live/live_types.js";
 import { appendSpineClip } from "../sequence/spine.js";
 import { addLaneCue } from "../sequence/lanes.js";
@@ -284,4 +285,86 @@ test("edit: a lock from a dead server is ignored (stale drop)", async () => {
   // the agent path (which would be allowed through instead of blocked).
   assert.equal(out.status, 409);
   assert.match(String(out.json.message), /human pause/);
+});
+
+// --- undo activity line names the undone revision ---------------------------
+
+test("undo delta reads as a new event naming the undone revision", async () => {
+  const w = makeWorkspace("undoline1");
+  takeHumanLock(w.dir);
+  const atPause = cursorOf(w.dir);
+  const clip = (seqOf(w.dir) as any).spine.clips[1];
+  const mid = clip.timeline_in_ms + Math.floor(clip.duration_ms / 2);
+  const split = await handleLiveEdit(w.dir, { action: "split", target: clip.id, params: { at_ms: mid }, expect_rev: atPause });
+  assert.equal(split.status, 200);
+  const from = cursorOf(w.dir);
+  const oldSeq = seqOf(w.dir);
+  const undone = await handleLiveEdit(w.dir, { action: "undo", expect_rev: from });
+  assert.equal(undone.status, 200);
+  const to = cursorOf(w.dir);
+  assert.equal(to, from - 1);
+  const newSeq = seqOf(w.dir);
+  // Same inputs the Live server feeds the window on a cursor move.
+  const delta = buildDelta({
+    projectDir: w.dir, fromRevision: from, toRevision: to,
+    oldSequence: oldSeq, newSequence: newSeq,
+    operation: "journal.undo", timestamp: new Date().toISOString(),
+  });
+  assert.equal(delta.entry.operation, "journal.undo");
+  // Window-style Activity lines, newest first: the undo is a new event on top.
+  const lines = [`r${delta.entry.revision} ${delta.entry.summary}`, ...buildActivity(w.dir).map((e) => `r${e.revision} ${e.summary}`)];
+  assert.match(lines[0], new RegExp(`^r${to} undo r${from}\\b`));
+  assert.match(lines[0], /sp_0/);
+});
+
+// --- trim extends into unused media ------------------------------------------
+
+function firstClipWithMedia(seq: any): { clip: any; mediaEnd: number } {
+  const clip = (seq as any).spine.clips[0];
+  const asset = (seq as any).library.find((a: any) => a.handle === clip.asset_handle);
+  return { clip, mediaEnd: asset.probe.duration_ms };
+}
+
+test("trim out edge extends into unused source media", async () => {
+  const w = makeWorkspace("trimext1");
+  takeHumanLock(w.dir);
+  let seq = seqOf(w.dir) as any;
+  const { clip, mediaEnd } = firstClipWithMedia(seq);
+  assert.ok(mediaEnd >= 6000, `media end is ${mediaEnd}`);
+  // Shorten first so 2 s of source media sits unused after the clip.
+  const start = clip.timeline_in_ms ?? 0;
+  const shortTo = start + 2000;
+  const short = await handleLiveEdit(w.dir, { action: "trim", target: clip.id, params: { edge: "out", to_ms: shortTo }, expect_rev: cursorOf(w.dir) });
+  assert.equal(short.status, 200, JSON.stringify(short.json).slice(0, 500));
+  seq = seqOf(w.dir) as any;
+  const shortened = seq.spine.clips.find((c: any) => c.id === clip.id);
+  const shortEnd = (shortened.timeline_in_ms ?? 0) + (shortened.duration_ms ?? 0);
+  assert.ok(Math.abs(shortEnd - shortTo) < 2, `short end is ${shortEnd}`);
+  // Extend the out edge by 2 s into the unused media.
+  const extendTo = shortEnd + 2000;
+  const args = buildEditCliArgs({ action: "trim", target: clip.id, params: { edge: "out", to_ms: extendTo } }, seq);
+  assert.equal(args[0], "spine");
+  assert.equal(args[1], "trim");
+  const grown = await handleLiveEdit(w.dir, { action: "trim", target: clip.id, params: { edge: "out", to_ms: extendTo }, expect_rev: cursorOf(w.dir) });
+  assert.equal(grown.status, 200, JSON.stringify(grown.json).slice(0, 500));
+  const after = (seqOf(w.dir) as any).spine.clips.find((c: any) => c.id === clip.id);
+  const grownEnd = (after.timeline_in_ms ?? 0) + (after.duration_ms ?? 0);
+  assert.ok(Math.abs(grownEnd - extendTo) < 2, `grown end is ${grownEnd}, wanted ${extendTo}`);
+});
+
+test("trim past the media end fails naming the limit", async () => {
+  const w = makeWorkspace("trimext2");
+  takeHumanLock(w.dir);
+  const seq = seqOf(w.dir) as any;
+  const { clip, mediaEnd } = firstClipWithMedia(seq);
+  const end = (clip.timeline_in_ms ?? 0) + (clip.duration_ms ?? 0);
+  assert.throws(
+    () => buildEditCliArgs({ action: "trim", target: clip.id, params: { edge: "out", to_ms: end + 2000 } }, seq),
+    new RegExp(`past the end of media.*${mediaEnd}ms`)
+  );
+  const out = await handleLiveEdit(
+    w.dir, { action: "trim", target: clip.id, params: { edge: "out", to_ms: end + 2000 }, expect_rev: cursorOf(w.dir) }
+  );
+  assert.equal(out.status, 400);
+  assert.match(String(out.json.message), new RegExp(`past the end of media.*${mediaEnd}ms`));
 });

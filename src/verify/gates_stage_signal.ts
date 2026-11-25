@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { CutholDiagnostic, CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
 import { createDefaultTreatments, CutholSequence, LaneCue, LibraryItem } from "../core/schema.js";
-import { OPEN_STANDARDS } from "../core/standards.js";
+import { isVerticalStage, OPEN_STANDARDS } from "../core/standards.js";
 import { resolveCueStartMs } from "../core/timeline.js";
 import { WorkspacePaths } from "../core/workspace.js";
 import {
@@ -121,20 +121,17 @@ export function verifyG4Stage(
   const safeTop = Math.round(
     seq.stage.height * (OPEN_STANDARDS.SAFE_ZONES.TITLE_MARGIN_PCT / 100)
   );
-  const safeRight =
-    seq.stage.aspect === "9:16"
-      ? Math.round(
-          seq.stage.width *
-            (1 - OPEN_STANDARDS.SAFE_ZONES.VERTICAL_9_16_RIGHT_CHROME_PCT / 100)
-        )
-      : seq.stage.width - safeLeft;
-  const safeBottom =
-    seq.stage.aspect === "9:16"
-      ? Math.round(
-          seq.stage.height *
-            (1 - OPEN_STANDARDS.SAFE_ZONES.VERTICAL_9_16_BOTTOM_CHROME_PCT / 100)
-        )
-      : seq.stage.height - safeTop;
+  const verticalStage = isVerticalStage(seq.stage);
+  const safeRight = verticalStage
+    ? Math.round(
+        seq.stage.width * (1 - OPEN_STANDARDS.SAFE_ZONES.VERTICAL_9_16_RIGHT_CHROME_PCT / 100)
+      )
+    : seq.stage.width - safeLeft;
+  const safeBottom = verticalStage
+    ? Math.round(
+        seq.stage.height * (1 - OPEN_STANDARDS.SAFE_ZONES.VERTICAL_9_16_BOTTOM_CHROME_PCT / 100)
+      )
+    : seq.stage.height - safeTop;
 
   // Resolve project/transcript language for caption CPS threshold (19 CPS for Turkish, 17 CPS default)
   let transcriptLangFromLedger: string | null = null;
@@ -237,6 +234,22 @@ export function verifyG4Stage(
           );
         } catch {
           // ignore pre-lint asset sync error
+        }
+        try {
+          const entryPath = path.join(compDir, cue.composition.entry_html);
+          const html = fs.readFileSync(entryPath, "utf8");
+          const m1 = /data-width\s*=\s*"(\d+)"[\s\S]*?data-height\s*=\s*"(\d+)"/.exec(html);
+          if (m1) {
+            const cw = Number(m1[1]);
+            const ch = Number(m1[2]);
+            if (cw !== seq.stage.width || ch !== seq.stage.height) {
+              diagnostics.push(
+                DIAGNOSTICS.STAGE_COMPOSITION_SIZE_MISMATCH(cue.id, `${cw}x${ch}`, `${seq.stage.width}x${seq.stage.height}`)
+              );
+            }
+          }
+        } catch {
+          // ignore unreadable composition html
         }
         const lintRes = lintHyperFramesComposition(
           compDir,

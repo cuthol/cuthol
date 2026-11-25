@@ -51,7 +51,7 @@ export function mount(root, ctx) {
   // --- mode: nobody else writes "human" into the store, so the lock watcher
   // here derives it (see the report: contract gap). Offline is never overridden.
   const syncMode = () => {
-    if (st().mode === "offline") {
+    if (st().mode === "offline" || st().mode === "connecting") {
       updateButtons();
       return;
     }
@@ -90,7 +90,7 @@ export function mount(root, ctx) {
   function updateButtons() {
     const mode = st().mode;
     const human = mode === "human";
-    const offline = mode === "offline";
+    const offline = mode === "offline" || mode === "connecting";
     pauseBtn.disabled = offline || lockBusy;
     pauseBtn.innerHTML = human
       ? `<svg class="icon" viewBox="0 0 24 24" aria-hidden="true">${ICONS.play}</svg><span>Resume</span>`
@@ -233,7 +233,7 @@ export function mount(root, ctx) {
   document.body.appendChild(hintEl);
   const hintText = () => {
     const mode = st().mode;
-    if (mode === "offline") return "Not connected to Cuthol";
+    if (mode === "offline" || mode === "connecting") return "Not connected to Cuthol";
     if (mode === "render") return "Editing is off while a render runs";
     return "Pause the agent to edit";
   };
@@ -420,10 +420,13 @@ export function mount(root, ctx) {
         g0 = span.start + d;
         g1 = span.end + d;
       }
-      // Clamp inside sane bounds; the server validates strictly.
-      if (what === "trim-in" || what === "trim-out") {
-        g0 = Math.min(Math.max(g0, span.start), span.end - frame);
-        g1 = Math.max(Math.min(g1, span.end), span.start + frame);
+      // Clamp inside sane bounds; the server validates strictly. Trim edges may
+      // extend past the clip into unused source media, so only the degenerate
+      // side is clamped (a failed drop keeps the server's plain error).
+      if (what === "trim-in") {
+        g0 = Math.max(0, Math.min(g0, span.end - frame));
+      } else if (what === "trim-out") {
+        g1 = Math.max(g1, span.start + frame);
       } else if (what === "cue-in") {
         g0 = Math.min(Math.max(g0, 0), span.end - frame);
       } else if (what === "cue-out") {

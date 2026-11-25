@@ -7,7 +7,12 @@
  */
 
 import { resolveCueStartMs } from "../core/timeline.js";
-import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
+import { CutholDiagnostic, CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
+import {
+  isProjectEmptyForAdoption,
+  maybeAdoptStageFromFirstSource,
+  readCompositionDims,
+} from "./stage_adopt.js";
 import {
   allocateNextHandle,
   createDefaultAudioChain,
@@ -137,16 +142,43 @@ export function addLaneCue(options: {
   muted?: boolean;
   composition?: HyperFramesMountSpec;
 }): { cue: LaneCue; revision: number; verification: VerificationReport } {
+  const gridInfoHolder: {
+    info: { cueId: string; atMs: number; frameIdx: number; gridMs: number } | null;
+  } = { info: null };
+  let stageNote: CutholDiagnostic | null = null;
   const { result, revision, verification } = commitVerifiedMutation(
     options.workspaceDir,
     `lane.add-cue(${options.laneId})`,
-    (seq) => {
+    (seq, paths) => {
+      const emptyBefore = isProjectEmptyForAdoption(seq);
       const existingLane = seq.lanes.find((l) => l.id === options.laneId);
       const kind = options.kind ?? existingLane?.kind ?? "title";
       const lane = ensureLaneExists(seq, options.laneId, kind, options.zIndex);
 
       const id = options.explicitId ?? allocateNextHandle(collectAllCueIds(seq), "cue", seq);
       syncSequenceHandleCounters(seq, [id]);
+
+      if (emptyBefore) {
+        const earlyAsset = options.assetHandle
+          ? seq.library.find((a) => a.handle === options.assetHandle)
+          : undefined;
+        if (earlyAsset?.probe.has_video) {
+          stageNote = maybeAdoptStageFromFirstSource(
+            seq,
+            { width: earlyAsset.probe.width, height: earlyAsset.probe.height },
+            "cuthol workspace journal undo"
+          );
+        } else if (options.composition) {
+          const dims = readCompositionDims(
+            paths.rootDir,
+            options.composition.composition_dir,
+            options.composition.entry_html
+          );
+          if (dims) {
+            stageNote = maybeAdoptStageFromFirstSource(seq, dims, "cuthol workspace journal undo");
+          }
+        }
+      }
 
       if (
         options.rate !== undefined &&
@@ -291,10 +323,26 @@ export function addLaneCue(options: {
       newCue.at_ms = resolveCueStartMs(seq, newCue);
       lane.cues.push(newCue);
       syncCueAnchors(seq);
+      const laneFps = Math.max(1, seq.stage.fps);
+      const startMs = resolveCueStartMs(seq, newCue);
+      const frameIdx = Math.ceil(startMs * laneFps / 1000 - 1e-9);
+      const gridMs = (frameIdx * 1000) / laneFps;
+      if (Math.abs(gridMs - startMs) > 1e-9) {
+        gridInfoHolder.info = { cueId: newCue.id, atMs: startMs, frameIdx, gridMs: Number(gridMs.toFixed(3)) };
+      }
       return newCue;
     }
   );
 
+  // Report an off-grid start without moving the stored value: the frame the
+  // cue first appears on is `ceil(at_ms * fps / 1000)`.
+  if (stageNote) verification.diagnostics.push(stageNote);
+  if (gridInfoHolder.info) {
+    const info = gridInfoHolder.info;
+    verification.diagnostics.push(
+      DIAGNOSTICS.CUE_OFF_FRAME_GRID(info.cueId, info.atMs, info.frameIdx, info.gridMs)
+    );
+  }
   return { cue: result, revision, verification };
 }
 

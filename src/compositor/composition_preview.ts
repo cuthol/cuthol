@@ -532,6 +532,7 @@ export function previewAndCheckComposition(options: {
               source: "preview",
               timelineExpected: probed.timeline_expected,
               timelineRegistered: probed.timeline_registered,
+              timelinePaused: probed.timeline_paused,
               errors: merged,
             })
           : probed;

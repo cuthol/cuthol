@@ -483,5 +483,12 @@ ${paddingLines}
     ),
     "size/splitting advisories must not be emitted as warnings"
   );
-  assert.equal(rep2.diagnostics.length, rep1.diagnostics.length);
+  // The composition file was written after mounting (an outside edit): the first verify adopts it
+  // automatically and says so once (G460); the second verify has nothing left to adopt.
+  assert.equal(rep1.diagnostics.filter((d) => d.code === "CUTHOL-G460").length, 1);
+  assert.equal(rep2.diagnostics.filter((d) => d.code === "CUTHOL-G460").length, 0);
+  assert.equal(
+    rep2.diagnostics.length,
+    rep1.diagnostics.filter((d) => d.code !== "CUTHOL-G460").length
+  );
 });

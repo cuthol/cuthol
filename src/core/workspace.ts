@@ -141,6 +141,9 @@ export function initWorkspace(options: {
   title?: string;
   aspect?: AspectPreset;
   fps?: number;
+  size?: { width: number; height: number };
+  stageExplicit?: boolean;
+  adoptFirstSource?: boolean;
 }): { paths: WorkspacePaths; sequence: CutholSequence } {
   const paths = resolveWorkspacePaths(options.dir);
   ensureWorkspaceDirectories(paths);
@@ -159,12 +162,22 @@ export function initWorkspace(options: {
   }
 
   const projectId = path.basename(paths.rootDir).replace(/[^a-zA-Z0-9_-]/g, "_") || "cuthol_project";
+  const explicit = Boolean(options.size ?? options.aspect ?? options.stageExplicit);
   const sequence = createEmptySequence({
     projectId,
     title: options.title ?? path.basename(paths.rootDir),
     aspect: options.aspect ?? "9:16",
     fps: options.fps ?? 30,
+    size: options.size,
+    stageExplicit: explicit ? true : undefined,
   });
+  if (explicit) {
+    sequence.stage.set_explicit = true;
+  } else if (!options.adoptFirstSource) {
+    // Direct initWorkspace() callers without the CLI adoption flag keep today's
+    // behaviour: implicit 9:16, never adopted from a later source.
+    sequence.stage.set_explicit = true;
+  }
 
   writeJsonAtomically(paths.sequenceFile, sequence);
 
@@ -735,12 +748,17 @@ export function formatWorkspaceOpenSummary(
 ): string {
   const maxItems = options.maxItems ?? 3;
   const totalMs = computeSequenceDurationMs(seq);
+  const tempoRate = seq.stage.tempo ?? 1;
+  const tempoSuffix =
+    tempoRate !== 1
+      ? ` | Tempo: \`${tempoRate}x\` (output \`${Math.max(1, Math.round(totalMs / tempoRate))}ms\`)`
+      : "";
   const totalCues = seq.lanes.reduce((sum, l) => sum + l.cues.length, 0);
   const lines: string[] = [];
   if (options.noticeLine) lines.push(options.noticeLine);
 
   lines.push(
-    `- Project: **${seq.meta.title}** (\`${seq.meta.project_id}\`) | Rev: \`r${seq.meta.revision}\` | Stage: \`${seq.stage.width}x${seq.stage.height}\` (\`${seq.stage.aspect}\`) @ \`${seq.stage.fps}fps\` | Backdrop: \`${seq.stage.backdrop.color}\` | Duration: \`${totalMs}ms\` (\`${formatTimecode(totalMs)}\`)`
+    `- Project: **${seq.meta.title}** (\`${seq.meta.project_id}\`) | Rev: \`r${seq.meta.revision}\` | Stage: \`${seq.stage.width}x${seq.stage.height}\` (\`${seq.stage.aspect}\`) @ \`${seq.stage.fps}fps\` | Backdrop: \`${seq.stage.backdrop.color}\` | Duration: \`${totalMs}ms\` (\`${formatTimecode(totalMs)}\`)${tempoSuffix}`
   );
 
   if (seq.library.length === 0) {

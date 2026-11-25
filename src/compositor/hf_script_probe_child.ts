@@ -47,6 +47,7 @@ async function main(): Promise<void> {
           source: "probe",
           timelineExpected: probe.timelineExpected,
           timelineRegistered: probe.timelineRegistered,
+          timelinePaused: probe.timelinePaused,
           errors: probe.errors,
         });
       } catch {

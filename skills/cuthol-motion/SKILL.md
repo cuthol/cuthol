@@ -30,7 +30,12 @@ audio energy and cuts **in the composition's own seconds** (0 = cue start).
    both are MCP-only, no CLI form).
 3. `lane.add_composition(comp_dir="compositions/intro", at="1.5s",
    duration="4.5s", z_index?)` (or `anchor="sp_02"`). The duration must match
-   `data-duration` in the HTML.
+   `data-duration` in the HTML. The mount checks the contract (paused
+   timeline registered in `window.__timelines`, also found in a separate JS
+   file; judged at run time in a headless browser when the text is unclear),
+   probes the page for script errors (G430–G432, reported before any monitor
+   call), and places missing runtime files itself — no `composition.scaffold`
+   round-trip needed for hand-written folders.
 4. `composition.preview(cue="cue_05", at=["0.3","1.2","3.0"])` → contact sheet:
    checkerboard (true alpha) | over the real footage | alpha mask, plus WCAG
    contrast findings. (`composition.check` is the same call.)
@@ -152,10 +157,11 @@ Beats are analyzed automatically.
 - A composition whose script throws still snapshots a healthy-looking static
   page: read monitor/preview diagnostics (G430 ERROR before the timeline
   registers — render stops with G503; G431 WARN while running; G432 WARN on
-  `console.error`, e.g. a failed shader compile). `verify` reports the recorded
-  error without a browser — but only after the composition was measured once
-  (monitor/preview/coords); an unmeasured composition stays silent, which is
-  not "clean". After fixing, re-run `cuthol composition preview --cue <cue_XX>`.
+  `console.error`, e.g. a failed shader compile). `lane.add_composition` does
+  not open a browser (it says G509: unchecked); `verify` and `render` probe
+  unchecked compositions themselves and report the recorded error, including
+  a timeline that runs instead of staying paused (G105). After fixing, re-run
+  `cuthol composition preview --cue <cue_XX>`.
 - Animation craft that survives field use — masked reveals, state sets, stroke
   drawing, the camera pattern, word-locked timing, WebGL/3D packaging, stills
   from compositions: `references/craft.md`.

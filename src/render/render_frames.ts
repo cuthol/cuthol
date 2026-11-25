@@ -269,8 +269,9 @@ export function renderMultipleCompositeFramesRgb24(
   const frameDurMs = 1000 / fps;
 
   const plans: SingleFrameFfmpegPlan[] = timestampsMs.map((atMs) => {
-    const clampedMs = Math.max(0, Math.min(Math.round(atMs), maxSafeMs));
-    const frameIdx = Math.max(0, Math.min(lastFrameIdx, Math.floor((clampedMs / 1000) * fps + 1e-6)));
+    // Snap from the raw request, not the rounded clamp: rounding first can
+    // push a timestamp inside frame N onto frame N+1 across a cue boundary.
+    const frameIdx = Math.max(0, Math.min(lastFrameIdx, Math.floor((atMs / 1000) * fps + 1e-6)));
     const exactFrameMs = (frameIdx * 1000) / fps;
 
     const activeInfo = resolveActiveCompositionRefsAt(seq, paths, exactFrameMs, fps);
@@ -295,12 +296,15 @@ export function renderMultipleCompositeFramesRgb24(
       }
     }
 
+    // The label time must be the drawn frame-grid instant, not the rounded
+    // request: `annotateRgb24BufferToCanvas` derives `active_handles` from it,
+    // so a rounded label could name the cue on the other side of a boundary.
     return buildSingleFrameFfmpegPlanFromCompiledPlan(
       compiledPlan,
       paths,
       fps,
       frameIdx,
-      clampedMs,
+      exactFrameMs,
       bboxTargets
     );
   });

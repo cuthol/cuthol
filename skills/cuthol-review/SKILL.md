@@ -81,7 +81,7 @@ Every diagnostic is `[CODE] what happened | Suggestion: next step`.
 | G415–G419 | G4 WARN | Failed sub-composition script (that part renders blank); in-composition audio (never enters the mix — move it to `ln_sfx`/`ln_bgm`); coords measurement failed / raw-HTML fallback / unmappable placement. |
 | G428 / G429 | G4 ERROR | Unknown geometry element ref (message names the nearest key); geometry query misuse. |
 | G430–G432 | G4 ERROR/WARN | Composition script threw before the timeline registered (render stops; monitor shows the static page — don't trust it) / while running / `console.error` (e.g. shader compile). Fix, then `composition.preview(cue=…)` to refresh the record. |
-| G509 | G4 INFO | N compositions were never opened in a browser, so their scripts are unchecked → `composition.preview(cue=…)` to record a check. |
+| G509 | G4 INFO | N compositions were never opened in a browser, so their scripts are unchecked → `verify()` checks them in one run; if verify itself says this, `composition.preview(cue=…)` shows why. |
 | G501–G508 | G5 | True peak > −1 dBTP; blank/backdrop frame (with timestamps after render); overlay render failed (render stops, nothing substituted); ducking skipped untranscribed clips; opaque overlay hiding moving footage; 8 px edge strip; inaudible `C.audio` window; post-render audio drift/gap. See `cuthol-render` for the render-side ones. |
 
 Full table with severities and fix commands: `references/diagnostics.md`.

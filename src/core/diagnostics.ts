@@ -305,6 +305,194 @@ export const DIAGNOSTICS = {
       "Mute a spine clip with 'cuthol spine mute --clip <id>', or pass a lane id ('ln_*') to 'cuthol lane mute --lane <id>'.",
       "spine"
     ),
+  // [edit-check G140–G149]       envelope parameter names, cue frame-grid alignment, monitor argument checks
+  ENVELOPE_UNKNOWN_PARAMETER: (parameter: string, targetId: string, suggestion: string | null) =>
+    createDiagnostic(
+      "CUTHOL-G140",
+      "G1_SCHEMA",
+      "ERROR",
+      `Unknown envelope parameter '${parameter}' on '${targetId}'; the render ignores it.` +
+        (suggestion ? ` Did you mean '${suggestion}'?` : ""),
+      `Use one of 'placement.scale_x', 'placement.scale_y', 'placement.x_pct', 'placement.y_pct', 'placement.rotation_deg', 'placement.opacity', 'audio_chain.gain_db', 'treatments.color_grade.*', 'fx.<id>.<param>' or 'color.*'.`,
+      targetId
+    ),
+  CUE_OFF_FRAME_GRID: (cueId: string, atMs: number, frameIdx: number, gridMs: number) =>
+    createDiagnostic(
+      "CUTHOL-G141",
+      "G3_TIMING",
+      "INFO",
+      `Cue '${cueId}' starts at ${atMs}ms, which is not on the frame grid; it first appears on frame ${frameIdx} (${gridMs}ms).`,
+      `Pass an on-grid start ('${gridMs}ms') when the boundary must be frame-exact; the stored value is kept as given.`,
+      cueId
+    ),
+  UNITLESS_FRACTION_TIME: (raw: string) =>
+    createDiagnostic(
+      "CUTHOL-G142",
+      "G1_SCHEMA",
+      "ERROR",
+      `Unitless time '${raw}' is ambiguous ('${raw}' would read as milliseconds); add a unit.`,
+      `Write '${raw}s' for seconds or '${raw}ms' for milliseconds (e.g. '21.1s' or '21100ms').`,
+    ),
+  SHEET_AT_WITH_WINDOW: (detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G143",
+      "G1_SCHEMA",
+      "ERROR",
+      `Monitor sheet takes either explicit 'at' timestamps or a 'start'/'end' window, not both (${detail}).`,
+      `Drop 'start'/'end' to sample the 'at' timestamps, or drop 'at' to sample the window.`,
+    ),
+  SHEET_AT_WITH_WINDOW_WARN: (detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G144",
+      "G1_SCHEMA",
+      "WARN",
+      `Monitor sheet ignores 'start'/'end' when several 'at' timestamps are given (${detail}).`,
+      `Drop 'start'/'end' to silence this, or drop 'at' to sample the window.`,
+    ),
+  // [boundary G520–G529]         composition boundary frames, boundary continuity (verify), render input hygiene
+  BOUNDARY_CONTINUITY_MATCH: (laneId: string, atMs: number, diff: number) =>
+    createDiagnostic(
+      "CUTHOL-G520",
+      "G5_SIGNAL",
+      "INFO",
+      `Boundary on '${laneId}' at ${atMs}ms is continuous (mean pixel difference ${diff} between the last frame of the outgoing composition and the first frame of the incoming one).`,
+      `No action needed; the cut is seamless at this resolution.`,
+    ),
+  BOUNDARY_CONTINUITY_JUMP: (laneId: string, atMs: number, diff: number) =>
+    createDiagnostic(
+      "CUTHOL-G521",
+      "G5_SIGNAL",
+      "INFO",
+      `Boundary on '${laneId}' at ${atMs}ms changes the picture (mean pixel difference ${diff} between the last frame of the outgoing composition and the first frame of the incoming one).`,
+      `Check the two compositions around ${atMs}ms when the cut should be seamless.`,
+    ),
+  // [live-preview G670–G679]     Live preview reloads, preloading, watchdog
+  LIVE_PREVIEW_RESYNCED: (reason: string) =>
+    createDiagnostic(
+      "CUTHOL-G670",
+      "SYS",
+      "WARN",
+      `The Live window missed a sequence update and resynced from the server (${reason}).`,
+      `If this repeats, reopen the window with 'cuthol live open' and report the tail of '.cuthol/live/server.log'.`
+    ),
+  LIVE_PREVIEW_PRELOAD_DROPPED: (cueId: string, reason: string) =>
+    createDiagnostic(
+      "CUTHOL-G671",
+      "SYS",
+      "INFO",
+      `The Live window dropped the preloaded next composition '${cueId}' (${reason}).`,
+      `No action needed; the preview loads compositions on demand.`
+    ),
+  LIVE_PREVIEW_INITIAL_SEEK: () =>
+    createDiagnostic(
+      "CUTHOL-G672",
+      "SYS",
+      "INFO",
+      `The Live window seeked compositions to the playhead on first open.`,
+      `No action needed.`
+    ),
+  LIVE_PREVIEW_INCIDENT: (reason: string, cueId: string) =>
+    createDiagnostic(
+      "CUTHOL-G673",
+      "SYS",
+      "WARN",
+      `The Live window detected a stuck preview (${reason}${cueId ? ` on '${cueId}'` : ""}) and reported it.`,
+      `The window reloads its preview automatically; if the notice persists, reopen the window and report the incident from 'cuthol live status'.`,
+      cueId
+    ),
+  LIVE_PREVIEW_RELOADED: (outcome: string) =>
+    createDiagnostic(
+      "CUTHOL-G674",
+      "SYS",
+      "WARN",
+      `The Live window reloaded its preview (${outcome}).`,
+      `If the preview keeps stalling, reopen the window and report the incident from 'cuthol live status'.`
+    ),
+  LIVE_PREVIEW_STILL_STUCK: (cueId: string) =>
+    createDiagnostic(
+      "CUTHOL-G675",
+      "SYS",
+      "ERROR",
+      `The Live preview is still stuck${cueId ? ` on '${cueId}'` : ""} after an automatic reload.`,
+      `Reload the Live window page, then report the incident from 'cuthol live status' with the console errors it captured.`,
+      cueId
+    ),
+  LIVE_PREVIEW_RELOAD_CAPPED: (cueId: string) =>
+    createDiagnostic(
+      "CUTHOL-G676",
+      "SYS",
+      "WARN",
+      `The Live window stopped automatic preview reloads for '${cueId}' (3 reloads in 10 minutes).`,
+      `Reload the Live window page manually; the preview keeps running with warnings only.`,
+      cueId
+    ),
+  // [live-notes G680–G689]       Live note measurement, server instances, incident log
+  LIVE_NOTE_MEASURE_OFFLOADED: (detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G680",
+      "G5_SIGNAL",
+      "WARN",
+      `Live note measurement runs off the server loop: ${detail}.`,
+      "Wait for the cached result (the window asks again) or send the note; names attach when ready."
+    ),
+  LIVE_OTHER_SERVER_RUNNING: (detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G681",
+      "G5_SIGNAL",
+      "WARN",
+      `Another Live server is running: ${detail}.`,
+      "Stop it first ('cuthol live stop --dir <project>') or reopen with '--replace'."
+    ),
+  LIVE_INCIDENT_STORED: (detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G682",
+      "G5_SIGNAL",
+      "WARN",
+      `Live window reported a preview incident: ${detail}.`,
+      "See the newest file under '.cuthol/live/incidents/' ('cuthol live status' names it)."
+    ),
+  // [comp-runtime G450–G459]     sequence clock, shared project assets, runtime files, lint resolution
+  SEQ_TIME_CLAMPED: (helper: string, detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G450",
+      "G3_TIMING",
+      "WARN",
+      `Composition time clamped in '${helper}': ${detail} lies outside the composition window.`,
+      `Pass sequence times with the sequence clock ("clock: 'sequence'") or keep the time inside the composition window.`
+    ),
+  SHARED_ASSET_SYNCED: (compositionDir: string, files: string[]) =>
+    createDiagnostic(
+      "CUTHOL-G451",
+      "G2_ASSETS",
+      "INFO",
+      `Project shared files synced into '${compositionDir}': ${files.join(", ") || "none"}.`,
+      `Edit shared files in the project 'shared/' folder; compositions that use them re-render automatically.`
+    ),
+  LINT_FALSE_ALARM_RESOLVED: (code: string, reason: string) =>
+    createDiagnostic(
+      "CUTHOL-G452",
+      "G1_SCHEMA",
+      "INFO",
+      `Lint finding '${code}' downgraded to info: ${reason}.`,
+      `No action needed; the finding stays visible as info for inspection.`
+    ),
+  // [comp-contract G460–G469]    runtime contract probe, script check on add/verify, automatic adopt
+  EXTERNAL_COMPOSITION_EDITS_AUTO_ADOPTED: (comps: string[]) =>
+    createDiagnostic(
+      "CUTHOL-G460",
+      "G2_ASSETS",
+      "INFO",
+      `Adopted outside composition edits: ${comps.join(", ")}.`,
+      `The hand edit is now a journaled revision; undo with 'cuthol workspace journal undo'. Edits to 'cuthol.sequence.json' still need an explicit 'cuthol workspace changes adopt'.`
+    ),
+  BACKDROP_GAPS_SUMMARY: (count: number, totalMs: number) =>
+    createDiagnostic(
+      "CUTHOL-G461",
+      "G3_TIMING",
+      "WARN",
+      `${String(count)} empty ranges show only the stage backdrop (${String(totalMs)}ms in total).`,
+      `Run 'cuthol verify' for the full per-range list, or cover the ranges with spine or lane cues.`
+    ),
   // [local-speech G237–G239]
   // [script-ext G433, G438–G439]
   // [monitor-scaffold G214–G216]
@@ -1066,7 +1254,7 @@ export const DIAGNOSTICS = {
       count === 1
         ? `1 composition was never opened in a browser, so its script is unchecked (no record).`
         : `${count} compositions were never opened in a browser, so their scripts are unchecked (no record).`,
-      `Run 'cuthol composition preview --cue <cue_XX>' (or 'composition coords --all' / 'monitor frame') to record a script-error check.`
+      `Run 'cuthol verify' (it checks every unchecked composition in one browser run). If verify itself reports this, its browser check could not run: run 'cuthol composition preview --cue <cue_XX>' to see why.`
     ),
 
   DUCKING_WITHOUT_TRANSCRIPT: (clipIds: string[], mode: "skipped" | "acoustic_vad") =>
@@ -1199,7 +1387,7 @@ export const DIAGNOSTICS = {
       detail
         ? `Extension '${name}' enabled in the project, or its copy in the composition, differs from its source (${detail}; pinned in sequence: v${expectedVersion} ${expectedHash}, current on disk: v${actualVersion} ${actualHash}); the render is stopped so it does not go out with the stale copy.`
         : `Extension '${name}' enabled in the project changed on disk (pinned in sequence: v${expectedVersion} ${expectedHash}, current on disk: v${actualVersion} ${actualHash}); the render is stopped so it does not go out with the stale copy.`,
-      `Run 'cuthol extension enable --name ${name}' to accept the change, move to the new content hash and sync the compositions.`,
+      `Refresh with 'cuthol extension enable --name ${name}' to accept the change and move to the new content hash; if you delete your edited copy inside the composition, Cuthol writes it again.`,
       name
     ),
 
@@ -1820,6 +2008,112 @@ export const DIAGNOSTICS = {
       `No action needed; re-check with 'cuthol composition preview --cue ${cueId}' if the message changes.`,
       cueId
     ),
+
+  // [mcp-reload G635–G639]       MCP server noticing a newer Cuthol build on disk
+  MCP_RELOADED_NEWER_BUILD: (from: string, to: string) =>
+    createDiagnostic(
+      "CUTHOL-G635",
+      "SYS",
+      "INFO",
+      `Cuthol was rebuilt on disk while this MCP session ran (${from} -> ${to}); the MCP server restarted itself on the new build and the tool list was refreshed.`,
+      `Continue with the MCP tools; their arguments now match the CLI on disk. Re-open your project with workspace open if a call reports no project.`
+    ),
+  MCP_RELOAD_FAILED: (running: string, onDisk: string, detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G636",
+      "SYS",
+      "WARN",
+      `Cuthol on disk (${onDisk}) is newer than this MCP process (${running}) and the automatic restart failed: ${detail}. MCP tool arguments may not match the CLI on disk.`,
+      `Reconnect the cuthol MCP server in your agent (for Claude Code: /mcp -> cuthol -> Reconnect); until then avoid mixing MCP calls with CLI calls.`
+    ),
+  INVALID_STAGE_SIZE: (raw: string) =>
+    createDiagnostic(
+      "CUTHOL-G150",
+      "G1_SCHEMA",
+      "ERROR",
+      `Invalid stage size '${raw}'. Use WIDTHxHEIGHT with even numbers, e.g. --size 1920x800.`,
+      `Pass --size WIDTHxHEIGHT with even numbers between 16 and 8192 (e.g. --size 1920x800).`
+    ),
+  STAGE_ADOPTED_FROM_SOURCE: (size: string, undo: string) =>
+    createDiagnostic(
+      "CUTHOL-G151",
+      "G1_SCHEMA",
+      "INFO",
+      `Stage set to ${size} from the first visual source. Undo: ${undo}.`,
+      `Pass --aspect or --size at init (or run the suggested command) to fix the stage instead.`
+    ),
+  STAGE_SIZE_SUGGESTED: (size: string, command: string) =>
+    createDiagnostic(
+      "CUTHOL-G152",
+      "G1_SCHEMA",
+      "INFO",
+      `First visual source suggests stage ${size}. Run: ${command}.`,
+      `Run the suggested command to adopt the source size.`
+    ),
+  STAGE_RESIZED: (detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G153",
+      "G1_SCHEMA",
+      "INFO",
+      `Stage resized: ${detail}.`,
+      `Undo with workspace journal undo if the new layout is wrong.`
+    ),
+  STAGE_COMPOSITION_SIZE_MISMATCH: (cueId: string, compSize: string, stageSize: string) =>
+    createDiagnostic(
+      "CUTHOL-G154",
+      "G4_STAGE",
+      "WARN",
+      `Composition '${cueId}' declares ${compSize} but the stage is ${stageSize}; the composition HTML is not rewritten.`,
+      `Resize the composition or run workspace stage to match it.`
+    ),
+  // [canvas G150–G159]           free stage size, size suggestion from sources, stage resize and rescale
+  // [tempo G160–G169]            sequence tempo (stage.tempo): validation, render/monitor/export mapping
+  INVALID_TEMPO: (raw: string) =>
+    createDiagnostic(
+      "CUTHOL-G160",
+      "G1_SCHEMA",
+      "ERROR",
+      `Invalid tempo '${raw}': rate must be between 0.5 and 2.0 (sequence rate applied at output; absent = 1).`,
+      `Run 'cuthol workspace tempo --rate 1.1' with a rate in 0.5..2.0, or '--rate 1' to clear it.`
+    ),
+  // [multi-notes G690–G699]      Live notes across frames, scene boundaries, scene ranges
+  LIVE_MULTI_NOTES_QUEUED: (id: string, cells: number, frames: number) =>
+    createDiagnostic(
+      "CUTHOL-G690",
+      "G5_SIGNAL",
+      "INFO",
+      `Multi-scene note packet '${id}' queued with ${cells} contact-sheet cells across ${frames} frames; the sheet attaches to the stored packet when ready.`,
+      "Read the note lines with the next command result; the sheet image follows on disk."
+    ),
+  LIVE_SHEET_CELLS_DROPPED: (dropped: number, total: number, cap: number) =>
+    createDiagnostic(
+      "CUTHOL-G691",
+      "G5_SIGNAL",
+      "WARN",
+      `Contact sheet keeps ${total - dropped} of ${total} cells (cap ${cap}); the packet names the dropped count.`,
+      "Open the sheet for the kept cells; read the remaining pins from the note lines."
+    ),
+
+  // [fix:A G530–G534] render output
+  // [fix:B G692–G696] live server (reserved; B1 needs no new diagnostic: failures keep the G612 contract)
+  LIVE_NOTE_COORDS_PIN_SCOPED: (frame: number, kept: number, total: number) =>
+    createDiagnostic(
+      "CUTHOL-G692",
+      "G5_SIGNAL",
+      "INFO",
+      `Pin measurement for frame ${frame} scoped to ${kept} of ${total} compositions whose stage box covers the pin.`,
+      "Pin again elsewhere if the element name looks stale; each pin measures only its own compositions."
+    ),
+  LIVE_NOTE_COORDS_PIN_FALLBACK: (frame: number) =>
+    createDiagnostic(
+      "CUTHOL-G693",
+      "G5_SIGNAL",
+      "INFO",
+      `Pin measurement for frame ${frame} found nothing in the covering compositions, so the remaining compositions were measured too.`,
+      "No action needed; the element answer matches the whole-frame measurement."
+    ),
+  // [fix:C G642–G646] live window
+  // [fix:D G250–G254] ingest, brief, scaffold
 
   // ---------------------------------------------------------------------------------------------------
 } as const;

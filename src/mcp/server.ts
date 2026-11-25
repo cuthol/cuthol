@@ -44,6 +44,7 @@ import { resolveExtension } from "../extensions/manager.js";
 import { CUTHOL_PROGRESS_PREFIX } from "../core/progress.js";
 import { repairToolArguments, readRevision, tryParseJson, formatEnvelopeCompact, findValuesByKey, stripCutholProgress } from "./mcp_format.js";
 import { drainLiveInbox, formatLiveNotesBlock, LIVE_NOTES_HEADER } from "../live/live_inbox.js";
+import { McpReloadRelay, prependNoteToResponse, RELAY_CHILD_ENV } from "./mcp_reload.js";
 export { repairToolArguments, readWorkspaceRevision, translateCliHint, resolveActionSpecForCommand, formatEnvelopeCompact } from "./mcp_format.js";
 export type { FormatEnvelopeCompactOptions } from "./mcp_format.js";
 
@@ -215,6 +216,11 @@ export class CutholMcpServer {
     this.cliPath = options.cliPath ?? DEFAULT_CLI_PATH;
     this.sessionDir = options.defaultDir ? path.resolve(options.defaultDir) : null;
     this.pendingSkillsNote = options.skillsNote ?? null;
+  }
+
+  /** Project folder this session currently defaults to (set by init/open or `--dir`). */
+  public currentSessionDir(): string | null {
+    return this.sessionDir;
   }
 
   private notify(method: string, params?: Record<string, unknown>): void {
@@ -873,6 +879,46 @@ export function startMcpStdioServer(options: Omit<CutholMcpServerOptions, "onNot
     skillsNote: options.skillsNote ?? autoSkillsNote,
     onNotification: write,
   });
+  // A newer build on disk restarts the server from disk and relays to it (see mcp_reload.ts).
+  // A server that is itself such a restart never relays (the parent owns later restarts).
+  const relay =
+    process.env[RELAY_CHILD_ENV] === "1"
+      ? null
+      : new McpReloadRelay({
+          packageRoot: PACKAGE_ROOT_DIR,
+          mcpDir: MODULE_DIR,
+          cliPath: DEFAULT_CLI_PATH,
+          write,
+          sessionDir: () => server.currentSessionDir(),
+        });
+  process.on("exit", () => relay?.dispose());
+  let inflight = 0;
+  const dispatch = async (raw: string, req: JsonRpcRequest): Promise<void> => {
+    if (relay) {
+      if (inflight === 0 && (req.method === "tools/call" || req.method === "tools/list")) {
+        if (await relay.maybeSwitch()) {
+          relay.forward(raw, req.id);
+          return;
+        }
+      } else if (relay.isRelaying) {
+        relay.forward(raw, req.id);
+        return;
+      }
+    }
+    inflight += 1;
+    let res: JsonRpcResponse | null;
+    try {
+      res = await server.handleJsonRpcRequest(req);
+    } finally {
+      inflight -= 1;
+    }
+    if (!res || req.id === undefined) return;
+    if (relay && req.method === "tools/call") {
+      const note = relay.takePendingNote();
+      if (note) prependNoteToResponse(res as Parameters<typeof prependNoteToResponse>[0], note);
+    }
+    write(res);
+  };
   const rl = readline.createInterface({ input: process.stdin, terminal: false });
   rl.on("line", (line) => {
     const trimmed = line.trim();
@@ -888,8 +934,9 @@ export function startMcpStdioServer(options: Omit<CutholMcpServerOptions, "onNot
       });
       return;
     }
-    void server.handleJsonRpcRequest(req).then((res) => {
-      if (res && req.id !== undefined) write(res);
-    });
+    if (req.method === "initialize") relay?.observeInitialize(req.params);
+    void dispatch(trimmed, req);
   });
+  // Client gone: stop a restarted server so neither process lingers.
+  rl.on("close", () => relay?.dispose());
 }

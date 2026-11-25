@@ -266,7 +266,7 @@ test("monitor sheet renders only requested cell frames and matches monitor frame
     const codecArgs =
       ext === "mov"
         ? ["-c:v", "prores_ks", "-profile:v", "4444", "-pix_fmt", "yuva444p10le"]
-        : ["-c:v", "libx264", "-pix_fmt", "yuv420p"];
+        : ["-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p"];
     const genProc = spawnSync(
       "ffmpeg",
       [
@@ -300,35 +300,44 @@ test("monitor sheet renders only requested cell frames and matches monitor frame
     });
     assert.equal(batchOut.length, testFrames.length);
 
+    // One ffmpeg run for all 7 frames: a combined select emits the same bytes
+    // as seven single-frame runs (deterministic decode, same filter chain),
+    // with one process spawn instead of seven.
+    const combinedSelect = testFrames.map((idx) => `eq(n\\,${idx})`).join("+");
+    const refProc = spawnSync(
+      "ffmpeg",
+      [
+        "-v",
+        "error",
+        "-i",
+        blobPath,
+        "-vf",
+        `select='${combinedSelect}',format=rgba`,
+        "-vsync",
+        "0",
+        "-frames:v",
+        String(testFrames.length),
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        "rgb24",
+        "pipe:1",
+      ],
+      { maxBuffer: 16 * 1024 * 1024 }
+    );
+    assert.equal(refProc.status, 0);
+    const refAll = refProc.stdout as Buffer;
+
     for (let i = 0; i < testFrames.length; i++) {
       const fIdx = testFrames[i];
       const item = batchOut[i];
       assert.equal(item.frameIdx, fIdx);
       assert.ok(fs.existsSync(item.pngPath));
 
-      const refProc = spawnSync(
-        "ffmpeg",
-        [
-          "-v",
-          "error",
-          "-i",
-          blobPath,
-          "-vf",
-          `select='eq(n\\,${fIdx})',format=rgba`,
-          "-frames:v",
-          "1",
-          "-f",
-          "rawvideo",
-          "-pix_fmt",
-          "rgb24",
-          "pipe:1",
-        ],
-        { maxBuffer: 16 * 1024 * 1024 }
-      );
-      assert.equal(refProc.status, 0);
       const gotRgb = decodePngRegionRgb24(item.pngPath);
+      const refRgb = refAll.subarray(i * gotRgb.length, (i + 1) * gotRgb.length);
       assert.equal(
-        meanAbsPixelDiff(refProc.stdout as Buffer, gotRgb),
+        meanAbsPixelDiff(refRgb, gotRgb),
         0,
         `Frame ${fIdx} from cached .${ext} must match select='eq(n,${fIdx})' with 0 pixel diff`
       );

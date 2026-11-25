@@ -239,7 +239,7 @@ export function pruneSceneThumbs(projectDir: string, liveKeys: Set<string>): voi
 function renderThumbJpeg(projectDir: string, atMs: number, outFile: string): void {
   const tmpPng = path.join(os.tmpdir(), `cuthol-thumb-${process.pid}-${Date.now()}.png`);
   try {
-    captureMonitorFrame({ workspaceDir: projectDir, atMs, showBoxes: false, outputPath: tmpPng });
+    captureMonitorFrame({ workspaceDir: projectDir, atMs, showBoxes: false, hideHud: true, outputPath: tmpPng });
     spawnWatchedSync(
       "ffmpeg",
       ["-y", "-v", "error", "-i", tmpPng, "-vf", `scale=${LIVE_THUMB_WIDTH}:-1`, "-q:v", "4", outFile],

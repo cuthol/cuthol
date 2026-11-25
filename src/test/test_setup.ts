@@ -33,3 +33,11 @@ if (process.env.CUTHOL_SETTINGS_FILE === undefined) {
 if (process.env.CUTHOL_SKILLS_AUTO === undefined) {
   process.env.CUTHOL_SKILLS_AUTO = "0";
 }
+
+// HyperFrames keeps a warm browser alive for 5 minutes after `hyperframes check`
+// unless `CI` is set (its own rule). In tests that daemon outlives the test, holds
+// the test project folder open (the next run cannot delete it) and keeps loading the
+// machine; `CI` only changes HyperFrames' terminal/telemetry behaviour otherwise.
+if (process.env.CI === undefined) {
+  process.env.CI = "1";
+}

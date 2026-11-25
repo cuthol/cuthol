@@ -28,6 +28,7 @@ import {
 } from "../core/workspace.js";
 import { CutholMcpServer } from "../mcp/server.js";
 import { addLaneCue } from "../sequence/lanes.js";
+import { runCliFast } from "./c_helpers.js";
 
 const REPO_ROOT = process.cwd();
 const CLI_PATH = path.resolve(REPO_ROOT, "dist/cli.js");
@@ -53,37 +54,46 @@ function mcpText(res: { content: Array<{ type: string; text?: string }> }): stri
   return res.content.map((c) => c.text ?? "").join("\n");
 }
 
-/** Fresh project with one mounted composition; returns ws dir + comp dir. */
-function setupProject(name: string, compName = "cmp_intro"): { ws: string; compDir: string } {
-  const ws = path.join(TEST_ROOT, name);
-  fs.rmSync(ws, { recursive: true, force: true });
-  initWorkspace({ dir: ws, title: name, aspect: "16:9", fps: 30 });
-  const compDir = path.join(ws, "compositions", compName);
-  scaffoldHyperFramesComposition({
-    targetDir: compDir,
-    width: 1920,
-    height: 1080,
-    fps: 30,
-    durationMs: 3000,
-    preset: "counter",
-    props: {},
-    transparent: true,
-  });
-  addLaneCue({
-    workspaceDir: ws,
-    laneId: "ln_motion",
-    kind: "composition",
-    atMs: 0,
-    durationMs: 3000,
-    composition: {
-      composition_dir: `compositions/${compName}`,
-      entry_html: "index.html",
+const GOLDEN_DIR = path.join(TEST_ROOT, "golden-single");
+
+/** Init + scaffold + mount once (~2 s); every single-comp test copies it. */
+function ensureGolden(): string {
+  if (!fs.existsSync(path.join(GOLDEN_DIR, "cuthol.sequence.json"))) {
+    initWorkspace({ dir: GOLDEN_DIR, title: "golden", aspect: "16:9", fps: 30 });
+    scaffoldHyperFramesComposition({
+      targetDir: path.join(GOLDEN_DIR, "compositions", "cmp_intro"),
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      durationMs: 3000,
+      preset: "counter",
       props: {},
       transparent: true,
-      mode: "overlay_alpha",
-    },
-  });
-  return { ws, compDir };
+    });
+    addLaneCue({
+      workspaceDir: GOLDEN_DIR,
+      laneId: "ln_motion",
+      kind: "composition",
+      atMs: 0,
+      durationMs: 3000,
+      composition: {
+        composition_dir: "compositions/cmp_intro",
+        entry_html: "index.html",
+        props: {},
+        transparent: true,
+        mode: "overlay_alpha",
+      },
+    });
+  }
+  return GOLDEN_DIR;
+}
+
+/** Fresh project with one mounted composition; returns ws dir + comp dir. */
+function setupProject(name: string): { ws: string; compDir: string } {
+  const ws = path.join(TEST_ROOT, name);
+  fs.rmSync(ws, { recursive: true, force: true });
+  fs.cpSync(ensureGolden(), ws, { recursive: true });
+  return { ws, compDir: path.join(ws, "compositions", "cmp_intro") };
 }
 
 test("1. external comp edit is reported by open/brief/MCP with file names; bridge + synced files stay silent", async () => {
@@ -104,7 +114,9 @@ test("1. external comp edit is reported by open/brief/MCP with file names; bridg
   assert.ok(briefOut.startsWith("> External project change detected: "), briefOut.slice(0, 120));
   assert.ok(briefOut.includes("index.html"));
 
-  const shown = runCliJson(ws, ["workspace", "changes", "show"]);
+  const shownRes = await runCliFast(["workspace", "changes", "show", "--dir", ws]);
+  assert.equal(shownRes.status, 0, shownRes.stderr || shownRes.stdout);
+  const shown = JSON.parse(shownRes.stdout) as Record<string, unknown>;
   assert.equal(shown.has_changes, true);
   assert.equal((shown.diagnostic as { code: string }).code, "CUTHOL-G210");
   assert.ok((shown.summary_text as string).includes("<!-- dis duzenleme -->"));

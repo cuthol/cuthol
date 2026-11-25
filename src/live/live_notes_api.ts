@@ -23,9 +23,12 @@ import os from "node:os";
 import path from "node:path";
 import { DIAGNOSTICS } from "../core/diagnostics.js";
 import type { CutholSequence } from "../core/schema.js";
+import { selectPinCandidateCues } from "./live_coords_worker.js";
+
+export { selectPinCandidateCues };
 import { spawnWatchedSync } from "../core/subprocess.js";
 import { loadSequence } from "../core/workspace.js";
-import { runGeometryQuery, type GeometryElementRow, type GeometryQueryResult } from "../compositor/coords_query.js";
+import type { GeometryElementRow, GeometryQueryResult } from "../compositor/coords_query.js";
 import { captureMonitorFrame } from "../monitor/preview.js";
 import { writeLiveNotePacket } from "./live_inbox.js";
 import { resolveLivePaths } from "./live_paths.js";
@@ -141,17 +144,136 @@ export function sortTopmostFirst(rows: RankedElement[]): RankedElement[] {
 /** In-flight geometry queries by project + frame; concurrent pins share one measurement. */
 const inFlightGeometry = new Map<string, Promise<GeometryQueryResult>>();
 
-function geometryAtFrame(projectDir: string, frame: number): Promise<GeometryQueryResult> {
-  const key = `${path.resolve(projectDir)}::${frame}`;
-  const running = inFlightGeometry.get(key);
+/** Finished geometry results by project + frame (bounded; avoids re-measuring while the user pins). */
+const geometryCache = new Map<string, { at: number; result: GeometryQueryResult }>();
+const GEOMETRY_CACHE_MAX = 8;
+const GEOMETRY_CACHE_TTL_MS = 60_000;
+
+function geometryCacheGet(key: string): GeometryQueryResult | null {
+  const hit = geometryCache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.at > GEOMETRY_CACHE_TTL_MS) {
+    geometryCache.delete(key);
+    return null;
+  }
+  return hit.result;
+}
+
+function geometryCacheSet(key: string, result: GeometryQueryResult): void {
+  geometryCache.delete(key);
+  geometryCache.set(key, { at: Date.now(), result });
+  while (geometryCache.size > GEOMETRY_CACHE_MAX) {
+    const oldest = geometryCache.keys().next().value;
+    if (oldest === undefined) break;
+    geometryCache.delete(oldest);
+  }
+}
+
+/** Test hook: clears the geometry result cache. */
+export function clearGeometryCacheForTests(): void {
+  geometryCache.clear();
+  inFlightGeometry.clear();
+}
+
+/**
+ * Runs the composition geometry query in a worker thread so a heavy scene
+ * never blocks the server event loop (`/api/events` and the preview keep
+ * flowing while it measures).
+ */
+interface ScopedGeometry {
+  result: GeometryQueryResult;
+  complete: boolean;
+  scoped: { kept: number; total: number } | null;
+  fallback: boolean;
+}
+
+function geometryInWorker(
+  projectDir: string,
+  frame: number,
+  pin: { x: number; y: number; w: number; h: number }
+): Promise<ScopedGeometry> {
+  return new Promise<ScopedGeometry>((resolve, reject) => {
+    let worker: Worker;
+    try {
+      const workerPath = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "live_coords_worker.js");
+      worker = new Worker(workerPath, {
+        workerData: { kind: "coords", projectDir: path.resolve(projectDir), atRaw: `${frame}f`, pin },
+      });
+    } catch (e) {
+      reject(e);
+      return;
+    }
+    const fail = (msg: string): void => {
+      try {
+        worker.terminate();
+      } catch {
+        // already gone
+      }
+      reject(new Error(msg));
+    };
+    worker.on(
+      "message",
+      (m: { ok?: boolean; result?: GeometryQueryResult; complete?: boolean; scoped?: { kept: number; total: number } | null; fallback?: boolean; error?: string }) => {
+        if (m?.ok) {
+          resolve({
+            result: m.result as GeometryQueryResult,
+            complete: m.complete !== false,
+            scoped: m.scoped ?? null,
+            fallback: m.fallback === true,
+          });
+          worker.terminate();
+        } else fail(m?.error ?? "geometry worker failed");
+      }
+    );
+    worker.on("error", (e) => fail(String(e instanceof Error ? e.message : e)));
+    worker.on("exit", (code) => {
+      if (code !== 0) fail(`geometry worker exited with code ${code}`);
+    });
+  });
+}
+
+function pinScopeKey(pin: { x: number; y: number; w: number; h: number }): string {
+  return `${pin.x},${pin.y},${pin.w},${pin.h}`;
+}
+
+function geometryAtFrame(
+  projectDir: string,
+  frame: number,
+  pin: { x: number; y: number; w: number; h: number }
+): Promise<GeometryQueryResult> {
+  const root = path.resolve(projectDir);
+  const frameKey = `${root}::${frame}`;
+  const scopedKey = `${frameKey}::${pinScopeKey(pin)}`;
+  // The frame key holds only whole-frame results (every involved cue); a
+  // pin-scoped partial answer is cached under its own pin, never as the frame.
+  const scopedHit = geometryCacheGet(scopedKey);
+  if (scopedHit) return Promise.resolve(scopedHit);
+  const frameHit = geometryCacheGet(frameKey);
+  if (frameHit) return Promise.resolve(frameHit);
+  const running = inFlightGeometry.get(scopedKey);
   if (running) return running;
-  const work = runGeometryQuery({ workspaceDir: projectDir, atRaw: `${frame}f`, all: true });
-  // The loser of a timeout race keeps warming the cache; never reject unobserved.
+  // One in-flight measurement per project + frame + pin; the loser of a
+  // timeout race keeps warming the cache. Never reject unobserved.
+  logLiveWarn(root, DIAGNOSTICS.LIVE_NOTE_MEASURE_OFFLOADED(`frame ${frame} measures in a worker; the server loop stays responsive`).formatted);
+  const work = geometryInWorker(projectDir, frame, pin).then((scoped) => {
+    if (scoped.scoped && !scoped.fallback) {
+      logLiveWarn(
+        root,
+        DIAGNOSTICS.LIVE_NOTE_COORDS_PIN_SCOPED(frame, scoped.scoped.kept, scoped.scoped.total).formatted
+      );
+    }
+    if (scoped.fallback) {
+      logLiveWarn(root, DIAGNOSTICS.LIVE_NOTE_COORDS_PIN_FALLBACK(frame).formatted);
+    }
+    geometryCacheSet(scopedKey, scoped.result);
+    if (scoped.complete) geometryCacheSet(frameKey, scoped.result);
+    return scoped.result;
+  });
   work.then(
-    () => inFlightGeometry.delete(key),
-    () => inFlightGeometry.delete(key)
+    () => inFlightGeometry.delete(scopedKey),
+    () => inFlightGeometry.delete(scopedKey)
   );
-  inFlightGeometry.set(key, work);
+  inFlightGeometry.set(scopedKey, work);
   return work;
 }
 
@@ -162,6 +284,28 @@ function spineClipAt(sequence: CutholSequence, atMs: number): { id: string } | n
     if (atMs >= (c.timeline_in_ms ?? 0) && atMs < (c.timeline_in_ms ?? 0) + (c.duration_ms ?? 0)) return { id: c.id };
   }
   return null;
+}
+
+/**
+ * Composition cue under a sequence time (topmost visible in paint order),
+ * else the spine clip. This is the user-visible "scene" of a note.
+ */
+export function cueAtTime(sequence: CutholSequence, atMs: number): string | undefined {
+  const order = cuePaintOrder(sequence);
+  let best: string | undefined;
+  let bestRank: { lane: number; cue: number } | null = null;
+  for (const lane of sequence.lanes ?? []) {
+    for (const cue of lane.cues ?? []) {
+      const start = cue.at_ms ?? 0;
+      if (atMs < start || atMs >= start + (cue.duration_ms ?? 0)) continue;
+      const rank = order.get(cue.id) ?? { lane: -1, cue: -1 };
+      if (!bestRank || rank.lane > bestRank.lane || (rank.lane === bestRank.lane && rank.cue > bestRank.cue)) {
+        bestRank = rank;
+        best = cue.id;
+      }
+    }
+  }
+  return best ?? spineClipAt(sequence, atMs)?.id;
 }
 
 /**
@@ -192,7 +336,7 @@ export async function queryElementsAtPoint(
   const timeoutMs = opts.timeoutMs ?? COORDS_TIMEOUT_MS;
   let result: GeometryQueryResult;
   try {
-    const raced = await withQueryTimeout(geometryAtFrame(root, frame), timeoutMs);
+    const raced = await withQueryTimeout(geometryAtFrame(root, frame, { x, y, w, h }), timeoutMs);
     if (!raced.ok) {
       logLiveWarn(root, DIAGNOSTICS.LIVE_NOTE_COORDS_FAILED(`measurement still running after ${timeoutMs} ms (frame ${frame})`).formatted);
       return { pending: true, elements: [] };
@@ -207,6 +351,21 @@ export async function queryElementsAtPoint(
     };
   }
 
+  return rankElements(sequence, result, atMs, x, y, w, h, isArea);
+}
+
+export function rankElements(
+  sequence: CutholSequence,
+  result: GeometryQueryResult,
+  atMs: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  isArea: boolean
+): CoordsAnswer {
+  const stageW = sequence.stage.width;
+  const stageH = sequence.stage.height;
   const order = cuePaintOrder(sequence);
   const candidates: RankedElement[] = [];
   for (let i = result.elements.length - 1; i >= 0; i--) {
@@ -237,6 +396,41 @@ export async function queryElementsAtPoint(
     if (overlap > 0) answer.overlap_px2 = Math.round(overlap * 10) / 10;
   }
   return answer;
+}
+
+/**
+ * Fills notes that arrived with no elements from the warm geometry cache
+ * (synchronous, never waits): element names attach to the packet when the
+ * measurement is already ready, otherwise the packet keeps `elements: []`.
+ */
+export function fillElementsFromCache(projectDir: string, notes: LiveNote[]): number {
+  const root = path.resolve(projectDir);
+  let sequence: CutholSequence;
+  try {
+    sequence = loadSequence(root).sequence;
+  } catch {
+    return 0;
+  }
+  const fps = Math.max(1, sequence.stage.fps);
+  let filled = 0;
+  for (const note of notes) {
+    if (!note.point || (note.elements?.length ?? 0) > 0) continue;
+    const frame = Math.max(0, Math.floor((note.at_ms / 1000) * fps));
+    const cached = geometryCacheGet(`${root}::${frame}`);
+    if (!cached) continue;
+    const area = note.area;
+    const w = area ? area[2] : 0;
+    const h = area ? area[3] : 0;
+    const qx = area ? area[0] : note.point.x;
+    const qy = area ? area[1] : note.point.y;
+    const answer = rankElements(sequence, cached, note.at_ms, qx, qy, w, h, w > 0 && h > 0);
+    if (!answer.pending && answer.elements.length > 0) {
+      note.elements = answer.elements;
+      if (answer.overlap_px2 !== undefined) note.overlap_px2 = answer.overlap_px2;
+      filled++;
+    }
+  }
+  return filled;
 }
 
 function numParam(params: URLSearchParams, name: string): number | null {
@@ -317,12 +511,43 @@ export function stageToCell(cell: SheetCell, sx: number, sy: number): [number, n
 // Contact sheet rendering (worker thread; synchronous ffmpeg + monitor frame).
 // ---------------------------------------------------------------------------
 
+/** One contact-sheet cell: the exact frame to capture plus the pin to draw on it. */
+export interface SheetCellSpec {
+  at_ms: number;
+  note: LiveNote;
+}
+
 interface SheetWorkerData {
   kind: "sheet";
   projectDir: string;
-  atMs: number;
-  notes: LiveNote[];
+  cells: SheetCellSpec[];
   outFile: string;
+}
+
+/** Contact-sheet capacity: at most this many cells; extras are reported, not silently dropped. */
+export const SHEET_MAX_CELLS = 6;
+
+/**
+ * One cell per pinned note at its own frame. Notes with no pin need no cell
+ * (`all` never, `range` one representative cell at the note's own frame).
+ * Boundary notes get two cells (last frame of `from`, first frame of `to`).
+ * Cells are capped at SHEET_MAX_CELLS; the caller reports the dropped count.
+ */
+export function planSheetCells(notes: LiveNote[], fps: number, frameMs = 0): { cells: SheetCellSpec[]; dropped: number } {
+  const cells: SheetCellSpec[] = [];
+  for (const note of notes) {
+    if (note.scope?.kind === "all") continue;
+    if (!note.point && note.scope?.kind !== "boundary") continue;
+    if (note.scope?.kind === "boundary") {
+      const step = frameMs > 0 ? frameMs : Math.max(1, Math.round(1000 / Math.max(1, fps)));
+      cells.push({ at_ms: Math.max(0, note.at_ms - step), note });
+      cells.push({ at_ms: note.at_ms, note });
+    } else {
+      cells.push({ at_ms: note.at_ms, note });
+    }
+  }
+  const dropped = Math.max(0, cells.length - SHEET_MAX_CELLS);
+  return { cells: cells.slice(0, SHEET_MAX_CELLS), dropped };
 }
 
 function pngSize(file: string): { w: number; h: number } {
@@ -370,23 +595,27 @@ export function renderContactSheetSync(data: SheetWorkerData): void {
   const stageW = sequence.stage.width;
   const stageH = sequence.stage.height;
   const frameTmp = path.join(os.tmpdir(), `cuthol-notes-frame-${process.pid}-${crypto.randomBytes(4).toString("hex")}.png`);
+  const font = findDrawTextFont();
+  const branches: string[] = [];
+  const labels: string[] = [];
+  const inputs: string[] = [];
+  let inputIndex = 0;
   try {
-    const captured = captureMonitorFrame({ workspaceDir: root, atMs: data.atMs, showBoxes: false, outputPath: frameTmp });
-    if (!captured.ok || !fs.existsSync(frameTmp)) {
-      const first = captured.diagnostics[0];
-      throw new Error(first ? `${first.code}: ${first.what}` : "frame render failed");
-    }
-    const png = pngSize(frameTmp);
-    // The monitor frame may be smaller than the stage; map stage pixels to frame pixels.
-    const kx = png.w / Math.max(1, stageW);
-    const ky = png.h / Math.max(1, stageH);
-    const font = findDrawTextFont();
-    const branches: string[] = [];
-    const labels: string[] = [];
-    const pointed = data.notes.filter((note) => note.point);
-    pointed.forEach((note, i) => {
-      const pinX = note.point!.x * kx;
-      const pinY = note.point!.y * ky;
+    for (const [i, cellSpec] of data.cells.entries()) {
+      const note = cellSpec.note;
+      const frameFile = `${frameTmp}.${i}.png`;
+      const captured = captureMonitorFrame({ workspaceDir: root, atMs: cellSpec.at_ms, showBoxes: false, hideHud: true, outputPath: frameFile });
+      if (!captured.ok || !fs.existsSync(frameFile)) {
+        const first = captured.diagnostics[0];
+        throw new Error(first ? `${first.code}: ${first.what}` : "frame render failed");
+      }
+      inputs.push("-i", frameFile);
+      const png = pngSize(frameFile);
+      // The monitor frame may be smaller than the stage; map stage pixels to frame pixels.
+      const kx = png.w / Math.max(1, stageW);
+      const ky = png.h / Math.max(1, stageH);
+      const pinX = (note.point?.x ?? stageW / 2) * kx;
+      const pinY = (note.point?.y ?? stageH / 2) * ky;
       const cell = computeSheetCell(png.w, png.h, pinX, pinY);
       // Boxes in frame pixels, clipped to the crop, then mapped to cell pixels.
       const boxes: string[] = [];
@@ -421,28 +650,37 @@ export function renderContactSheetSync(data: SheetWorkerData): void {
         boxes.push(`drawbox=x=${badgeX}:y=${badgeY}:w=34:h=40:color=red:t=fill`);
       }
       const chain = `crop=${cell.cropW}:${cell.cropH}:${cell.cropX}:${cell.cropY},scale=${SHEET_CELL_W}:${SHEET_CELL_H}:force_original_aspect_ratio=decrease,pad=${SHEET_CELL_W}:${SHEET_CELL_H}:(ow-iw)/2:(oh-ih)/2${boxes.length ? "," : ""}${boxes.join(",")}`;
-      branches.push(`[0:v]${chain}[c${i}]`);
+      branches.push(`[${inputIndex}:v]${chain}[c${i}]`);
+      inputIndex++;
       const col = i % SHEET_MAX_COLS;
       const row = Math.floor(i / SHEET_MAX_COLS);
       labels.push(`${col * SHEET_CELL_W}_${row * SHEET_CELL_H}`);
-    });
-    const args = ["-y", "-v", "error", "-i", frameTmp];
-    if (pointed.length === 1) {
+    }
+    if (branches.length === 0) throw new Error("contact sheet needs at least one cell");
+    const args = ["-y", "-v", "error", ...inputs];
+    if (branches.length === 1) {
       args.push("-filter_complex", `${branches[0]},[c0]copy[out]`, "-map", "[out]", "-frames:v", "1", data.outFile);
     } else {
       const layout = labels.join("|");
-      const inputs = pointed.map((_, i) => `[c${i}]`).join("");
-      args.push("-filter_complex", `${branches.join(";")};${inputs}xstack=inputs=${pointed.length}:layout=${layout}:fill=black[out]`, "-map", "[out]", "-frames:v", "1", data.outFile);
+      const stacked = branches.map((_, i) => `[c${i}]`).join("");
+      args.push("-filter_complex", `${branches.join(";")};${stacked}xstack=inputs=${branches.length}:layout=${layout}:fill=black[out]`, "-map", "[out]", "-frames:v", "1", data.outFile);
     }
     const res = spawnWatchedSync("ffmpeg", args, { step: "live note contact sheet" });
     if (res.status !== 0 || !fs.existsSync(data.outFile)) {
       throw new Error((res.stderr ?? "ffmpeg contact sheet failed").toString().slice(0, 300) || "ffmpeg contact sheet failed");
     }
   } finally {
+    for (let i = 0; i < data.cells.length; i++) {
+      try {
+        fs.unlinkSync(`${frameTmp}.${i}.png`);
+      } catch {
+        // already gone
+      }
+    }
     try {
       fs.unlinkSync(frameTmp);
     } catch {
-      // already gone
+      // legacy single-frame temp; usually never written
     }
   }
 }
@@ -513,6 +751,15 @@ function sanitizeNote(raw: unknown, stageW: number, stageH: number): LiveNote | 
     }
   }
   const overlap = Number((r as { overlap_px2?: unknown }).overlap_px2);
+  const cue = typeof r.cue === "string" && r.cue.trim() !== "" ? r.cue.slice(0, 200) : undefined;
+  let scope: LiveNote["scope"];
+  if (r.scope && typeof r.scope === "object") {
+    const s = r.scope as { kind?: unknown; from?: unknown; to?: unknown };
+    if (s.kind === "all") scope = { kind: "all" };
+    else if ((s.kind === "boundary" || s.kind === "range") && typeof s.from === "string" && typeof s.to === "string" && s.from !== "" && s.to !== "") {
+      scope = s.kind === "boundary" ? { kind: "boundary", from: s.from.slice(0, 200), to: s.to.slice(0, 200) } : { kind: "range", from: s.from.slice(0, 200), to: s.to.slice(0, 200) };
+    }
+  }
   return {
     n,
     text,
@@ -524,6 +771,8 @@ function sanitizeNote(raw: unknown, stageW: number, stageH: number): LiveNote | 
     ...(area ? { area } : {}),
     elements,
     ...(Number.isFinite(overlap) && overlap > 0 ? { overlap_px2: Math.round(overlap * 10) / 10 } : {}),
+    ...(cue ? { cue } : {}),
+    ...(scope ? { scope } : {}),
   };
 }
 
@@ -556,6 +805,7 @@ export async function handleLiveNotesPost(
   revision: number,
   log: (msg: string) => void
 ): Promise<NotesPostResult> {
+  const t0 = Date.now();
   const root = path.resolve(projectDir);
   const lp = resolveLivePaths(root);
   if (!Array.isArray(body.notes)) throw new Error("body needs notes: LiveNote[]");
@@ -570,6 +820,14 @@ export async function handleLiveNotesPost(
   }
   const dropped_over_limit = Math.max(0, received - MAX_NOTES_PER_PACKET);
   if (notes.length === 0) throw new Error("body needs at least one valid note");
+  for (const note of notes) {
+    if (!note.cue) {
+      const cue = cueAtTime(sequence, note.at_ms);
+      if (cue) note.cue = cue;
+    }
+  }
+  const fps = Math.max(1, sequence.stage.fps);
+  const plan = planSheetCells(notes, fps);
   const id = `n_${Date.now().toString(36)}_${crypto.randomBytes(4).toString("hex")}`;
   const packet: LiveNotePacket = {
     schema: LIVE_SCHEMA,
@@ -577,34 +835,73 @@ export async function handleLiveNotesPost(
     created_at: new Date().toISOString(),
     revision,
     notes,
+    ...(plan.dropped > 0 ? { sheet_note: `${plan.dropped} of ${plan.dropped + plan.cells.length} sheet cells dropped (cap ${SHEET_MAX_CELLS})` } : {}),
   };
+  // The packet is queued at once; the contact sheet renders in the background
+  // and is attached to the stored packet when ready (the agent reads the
+  // inbox on its next step, by which time the image is usually there).
+  const tValidated = Date.now();
+  const filled = fillElementsFromCache(root, notes);
   let sheet: string | null = null;
   if (typeof body.sheet_png_base64 === "string" && body.sheet_png_base64.length > 0) {
     const file = path.join(lp.inboxDir, `${id}.png`);
     fs.mkdirSync(lp.inboxDir, { recursive: true });
     fs.writeFileSync(file, Buffer.from(body.sheet_png_base64, "base64"));
     sheet = path.relative(root, file).split(path.sep).join("/");
-  } else if (!notes.some((note) => note.point)) {
-    // A packet of general notes has no pins: it travels without an image.
-    sheet = null;
-  } else {
-    const file = path.join(lp.inboxDir, `${id}.png`);
-    fs.mkdirSync(lp.inboxDir, { recursive: true });
-    try {
-      await buildSheetInWorker({ projectDir: root, atMs: notes[0].at_ms, notes, outFile: file });
-      sheet = path.relative(root, file).split(path.sep).join("/");
-    } catch (e) {
-      const detail = String(e instanceof Error ? e.message : e);
-      log(DIAGNOSTICS.LIVE_NOTE_SHEET_FAILED(detail).formatted);
-      try {
-        fs.unlinkSync(file);
-      } catch {
-        // never written
-      }
-    }
   }
   if (sheet) packet.sheet = sheet;
   writeLiveNotePacket(root, packet);
+  const t1 = Date.now();
+  const distinctFrames = new Set(plan.cells.map((c) => c.at_ms)).size;
+  log(DIAGNOSTICS.LIVE_MULTI_NOTES_QUEUED(id, plan.cells.length, distinctFrames).formatted + ` (validated ${notes.length}/${received} in ${tValidated - t0} ms, cache-filled ${filled}, queued in ${t1 - t0} ms total)`);
+  if (plan.dropped > 0) log(DIAGNOSTICS.LIVE_SHEET_CELLS_DROPPED(plan.dropped, plan.dropped + plan.cells.length, SHEET_MAX_CELLS).formatted);
+  if (!sheet && plan.cells.length > 0) {
+    const file = path.join(lp.inboxDir, `${id}.png`);
+    fs.mkdirSync(lp.inboxDir, { recursive: true });
+    const sheetRel = path.relative(root, file).split(path.sep).join("/");
+    const sheetCells = plan.cells.map((c) => ({ at_ms: c.at_ms, note: { ...c.note, elements: c.note.elements ?? [] } }));
+    void buildSheetInWorker({ projectDir: root, cells: sheetCells, outFile: file }).then(
+      () => {
+        // The agent may have drained the packet while the sheet rendered;
+        // attach wherever the packet file is now (inbox or delivered).
+        for (const packetFile of [path.join(lp.inboxDir, `${id}.json`), path.join(lp.inboxDir, "delivered", `${id}.json`)]) {
+          try {
+            const cur = JSON.parse(fs.readFileSync(packetFile, "utf8")) as LiveNotePacket;
+            if (!cur.sheet) {
+              cur.sheet = packetFile.includes("delivered") ? path.posix.join(".cuthol/live/inbox/delivered", `${id}.png`) : sheetRel;
+              const { schema: _drop, ...rest } = cur as unknown as Record<string, unknown>;
+              void _drop;
+              fs.writeFileSync(packetFile, JSON.stringify({ schema: LIVE_SCHEMA, ...rest }, null, 2));
+              // A drained packet's png already moved with it; an inbox
+              // packet's png sits next to its json.
+              const wantPng = path.join(path.dirname(packetFile), `${id}.png`);
+              if (wantPng !== file) {
+                try {
+                  fs.renameSync(file, wantPng);
+                } catch {
+                  // already moved or never written
+                }
+              }
+              log(`note packet ${id}: contact sheet attached`);
+            }
+            return;
+          } catch {
+            // not here; try the next location
+          }
+        }
+        log(DIAGNOSTICS.LIVE_NOTE_SHEET_FAILED(`packet ${id} left the inbox before the sheet finished`).formatted);
+      },
+      (e: unknown) => {
+        const detail = String(e instanceof Error ? e.message : e);
+        log(DIAGNOSTICS.LIVE_NOTE_SHEET_FAILED(detail).formatted);
+        try {
+          fs.unlinkSync(file);
+        } catch {
+          // never written
+        }
+      }
+    );
+  }
   return { id, sheet, received, stored: notes.length, dropped_over_limit, dropped_invalid };
 }
 

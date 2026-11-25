@@ -270,9 +270,9 @@ export function analyzeCompositionDataUsage(
       preset === "cut_phases" ||
       /\.\s*(?:cuts\s*\(|cuts\b|segments\b)/.test(combined);
     const usesSequenceTiming =
-      /\.\s*(?:sequenceStartSec|sequenceDuration|cueStart|cueEnd|toGlobal|toLocal)\b/.test(
+      /\.\s*(?:sequenceStartSec|sequenceDuration|cueStart|cueEnd|toGlobal|toLocal|seq)\b/.test(
         combined
-      );
+      ) || /clock\s*:\s*["']sequence["']/.test(combined);
 
     return {
       usesLocalWords,

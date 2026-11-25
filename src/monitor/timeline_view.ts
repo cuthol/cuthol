@@ -95,8 +95,10 @@ export function captureMonitorTimeline(options: {
   // 1. Header bar
   canvas.fillRect(0, 0, canvasW, headerH, [19, 26, 38, 255]);
   const totalCues = sequence.lanes.reduce((acc, l) => acc + l.cues.length, 0);
+  const tempoRate = sequence.stage.tempo ?? 1;
+  const tempoHeader = tempoRate !== 1 ? ` | TEMPO ${tempoRate}X (OUT ${formatTimecode(Math.max(1, Math.round(sequenceDurationMs / tempoRate)))})` : "";
   canvas.drawText(
-    `CUTHOL TIMELINE | ${sequence.meta.project_id} R${sequence.meta.revision} | DUR ${formatTimecode(sequenceDurationMs)} (${sequenceDurationMs}MS) | SPINE ${sequence.spine.clips.length} | CUES ${totalCues}`,
+    `CUTHOL TIMELINE | ${sequence.meta.project_id} R${sequence.meta.revision} | DUR ${formatTimecode(sequenceDurationMs)} (${sequenceDurationMs}MS)${tempoHeader} | SPINE ${sequence.spine.clips.length} | CUES ${totalCues}`,
     16,
     14,
     [241, 245, 249, 255],

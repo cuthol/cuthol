@@ -269,13 +269,31 @@ export function mount(root, ctx) {
   let assetByHandle = new Map();
   let fps = 30, stageW = 1920, stageH = 1080, durationMs = 0;
   let uiRate = 1, muted = false, volume = 1;
+  let tempoRate = 1; // sequence tempo from the snapshot (project.tempo); multiplies the preview clock only
   let anchorT = 0, anchorPerf = 0;         // master clock while playing
   let lastT = -1;                          // last rendered time
   let stagePxW = 0, stagePxH = 0;          // measured stage box
   let proxyReady = new Map();              // asset handle -> boolean
   let proxyStat = new Map();               // asset handle -> {status, progress}
   let proxyPollTimer = 0;
-  let compSizeCache = new Map();           // cueId -> {w,h}, capped (removed cues must not pile up)
+  let compSizeCache = new Map();           // cueId -> {w,h[,dir]}, capped (removed cues must not pile up)
+  /** Drop cached composition sizes for cues that no longer exist or whose
+      composition directory changed (a stale size would misplace the frame). */
+  function pruneCompSizeCache() {
+    if (compSizeCache.size === 0) return;
+    const live = new Map();
+    for (const lane of seq?.lanes ?? []) {
+      for (const cue of lane.cues ?? []) {
+        if ((cue.kind === "composition" || cue.kind === "title") && cue.composition?.composition_dir) {
+          live.set(cue.id, String(cue.composition.composition_dir).replace(/\\/g, "/"));
+        }
+      }
+    }
+    for (const [id, size] of compSizeCache) {
+      const dir = live.get(id);
+      if (!dir || (size && size.dir && size.dir !== dir)) compSizeCache.delete(id);
+    }
+  }
   function compSizeSet(cueId, size) {
     compSizeCache.set(cueId, size);
     if (compSizeCache.size > 40) {
@@ -283,7 +301,36 @@ export function mount(root, ctx) {
       if (firstKey !== cueId) compSizeCache.delete(firstKey);
     }
   }
-  let compFrames = new Map();              // cueId -> {frame, loaded, cue}
+  let compFrames = new Map();              // cueId -> {frame, loaded, cue, held}
+  let initialSeekDone = false;           // explicit first-frame seek after the initial snapshot
+  // -- watchdog (self-healing preview) -------------------------------------------
+  const recentEvents = [];               // last SSE/store event names, newest last (max 20)
+  const consoleErrors = [];              // last console.error lines (max 20)
+  let lastSeenServerRevision = null;     // newest revision observed in snapshot/delta events
+  let lastAppliedRevision = null;        // revision fully applied by takeSequence
+  const reloadLog = new Map();           // cueId|global -> timestamps of automatic preview reloads
+  let watchdogNotice = null;             // "Preview not responding" badge element
+  let watchdogTimer = 0;
+  let lastIncidentAt = 0;
+  const clockTrack = new Map();          // cueId -> {clock, at} last observed main clock
+  function noteEvent(name) {
+    recentEvents.push(name);
+    if (recentEvents.length > 20) recentEvents.shift();
+  }
+  function noteConsoleError(args) {
+    try {
+      const line = [...args].map((a) => (a instanceof Error ? String(a && a.stack || a) : String(a))).join(" ").slice(0, 300);
+      consoleErrors.push(line);
+      if (consoleErrors.length > 20) consoleErrors.shift();
+    } catch {}
+  }
+  if (typeof window !== "undefined" && !window.__cutholErrWrapped) {
+    window.__cutholErrWrapped = true;
+    try {
+      const origError = window.console.error.bind(window.console);
+      window.console.error = (...args) => { noteConsoleError(args); origError(...args); };
+    } catch {}
+  }
   let cueAudio = new Map();                // cueId -> {el, src, gain}
   let audioCtx = null, masterGain = null;
   let exactVisible = false;
@@ -292,7 +339,7 @@ export function mount(root, ctx) {
 
   function nowMs() {
     if (!store.state.playing) return clamp(store.state.playheadMs ?? 0, 0, durationMs);
-    return clamp(anchorT + (performance.now() - anchorPerf) * uiRate, 0, durationMs);
+    return clamp(anchorT + (performance.now() - anchorPerf) * uiRate * tempoRate, 0, durationMs);
   }
 
   // Frame-grid instant the rendered video shows at playhead t: render, draft
@@ -459,7 +506,7 @@ export function mount(root, ctx) {
     const wantVol = muted ? 0 : clamp(dbToLin(spineGainDb(layer.clip, layer.localMs)) * volume, 0, 1);
     if (Math.abs(slot.el.volume - wantVol) > 0.002) slot.el.volume = wantVol;
     if (store.state.playing && !layer.hold) {
-      const rate = rampRateAt(layer.clip, layer.sourceMs - layer.clip.source_in_ms) * uiRate;
+      const rate = rampRateAt(layer.clip, layer.sourceMs - layer.clip.source_in_ms) * uiRate * tempoRate;
       if (Math.abs(slot.el.playbackRate - rate) > 0.01) slot.el.playbackRate = clamp(rate, 0.1, 16);
       if (!slot.el.ended && slot.el.paused && slot.ready) slot.el.play().catch(() => {});
     } else {
@@ -578,13 +625,14 @@ export function mount(root, ctx) {
 
   async function compSize(cueId, cue) {
     if (compSizeCache.has(cueId)) return compSizeCache.get(cueId);
-    const fallback = { w: stageW, h: stageH };
+    const dir = cue?.composition?.composition_dir ? String(cue.composition.composition_dir).replace(/\\/g, "/") : "";
+    const fallback = { w: stageW, h: stageH, dir };
     try {
       const res = await fetch(api.url(`/comp/${encodeURIComponent(cueId)}/hyperframes.json`));
       if (res.ok) {
         const j = await res.json();
         if (j.width > 0 && j.height > 0) {
-          const size = { w: j.width, h: j.height };
+          const size = { w: j.width, h: j.height, dir };
           compSizeSet(cueId, size);
           return size;
         }
@@ -592,6 +640,36 @@ export function mount(root, ctx) {
     } catch {}
     compSizeSet(cueId, fallback);
     return fallback;
+  }
+  /** Full state resync when an event arrives that the current sequence cannot
+      explain (a missed delta): fetch a fresh snapshot and apply it. */
+  let resyncPending = false;
+  function resyncFromServer(reason) {
+    if (resyncPending) return;
+    resyncPending = true;
+    api.get("/api/snapshot").then((s) => {
+      resyncPending = false;
+      if (!s || typeof s.revision !== "number") return;
+      if (s.revision === store.state.revision && s.sequence === store.state.sequence) return;
+      try {
+        console.warn(`[CUTHOL-G670] Live preview resynced from the server (${reason}) | Suggestion: if this repeats, reopen the window and report the server log tail`);
+      } catch {}
+      const snap = { sequence: s.sequence, snapshot: s, project: s.project ?? null };
+      store.set(
+        {
+          snapshot: s,
+          sequence: s.sequence,
+          revision: s.revision,
+          scenes: s.scenes ?? [],
+          activity: s.activity ?? [],
+          lock: s.lock ?? null,
+          progress: s.progress ?? null,
+          mode: "agent",
+        },
+        "snapshot"
+      );
+      takeSequence(snap.sequence, snap.project);
+    }).catch(() => { resyncPending = false; });
   }
 
   // A comp iframe boots its own timelines after its load event (scripts,
@@ -626,7 +704,8 @@ export function mount(root, ctx) {
   function settleCompSeeks() {
     if (store.state.playing) return;
     const now = performance.now();
-    for (const rec of compFrames.values()) {
+    const all = [...compFrames.values(), ...compPreload.values()];
+    for (const rec of all) {
       if (rec.pendingSeek == null || now < rec.nextRetry || now > rec.seekUntil) {
         if (rec.pendingSeek != null && now > rec.seekUntil) rec.pendingSeek = null;
         continue;
@@ -648,39 +727,155 @@ export function mount(root, ctx) {
         rec.nextRetry = now + 250;
       }
     }
+    if (!initialSeekDone) {
+      let pending = false;
+      try {
+        const t = clamp(store.state.playheadMs ?? 0, 0, durationMs);
+        for (const { cue } of visibleCompCues(t)) {
+          const rec = compFrames.get(cue.id);
+          if (rec && rec.pendingSeek != null) { pending = true; break; }
+        }
+      } catch {}
+      if (!pending) initialSeekDone = true;
+    }
   }
+  // Hidden next-cue iframes (at most one per lane): the next composition boots
+  // before its boundary so the switch is visibility-only (no backdrop flash).
+  let compPreload = new Map();           // cueId -> {frame, loaded, cue}
+  const PRELOAD_LOOKAHEAD_MS = 2000;
+  const PRELOAD_MAX_DISTANCE_MS = 10000;
+
+  function laneOfCue(cueId) {
+    if (!cueId) return null;
+    for (const lane of seq?.lanes ?? []) {
+      for (const cue of lane.cues ?? []) if (cue.id === cueId) return lane;
+    }
+    return null;
+  }
+
+  function nextCompCues(t, lookaheadMs) {
+    const tq = quantMs(t);
+    const out = [];
+    const seenLane = new Set();
+    for (const lane of seq?.lanes ?? []) {
+      if (lane.muted) continue;
+      let best = null;
+      for (const cue of lane.cues ?? []) {
+        if (cue.kind !== "composition" && cue.kind !== "title") continue;
+        if (!cue.composition?.composition_dir) continue;
+        const start = cueStartMs(seq, cue, cueById);
+        if (start <= tq) continue;
+        if (!best || start < best.start) best = { cue, start, lane };
+      }
+      if (best && best.start - t <= lookaheadMs && !seenLane.has(lane)) {
+        seenLane.add(lane);
+        out.push(best);
+      }
+    }
+    return out;
+  }
+
+  function makeCompFrame(cue, hidden) {
+    const frame = document.createElement("iframe");
+    frame.className = "pv-comp-frame";
+    frame.setAttribute("scrolling", "no");
+    frame.setAttribute("tabindex", "-1");
+    frame.style.visibility = "hidden";
+    frame.src = api.url(`/comp/${encodeURIComponent(cue.id)}/`);
+    frame.__cutholCreatedAt = performance.now();
+    frame.addEventListener("error", () => { frame.__cutholLoadError = true; }, { once: true });
+    compLayer.appendChild(frame);
+    return frame;
+  }
+
   function renderComps(t, seekAll) {
     const visible = visibleCompCues(t);
     const ids = new Set(visible.map((v) => v.cue.id));
+    const byLane = new Map(); // lane -> visible cue on that lane
+    for (const v of visible) if (!byLane.has(v.lane)) byLane.set(v.lane, v);
+    // Successor (visible, not yet loaded) per lane: the old frame is held
+    // until the new one can take over, so the backdrop never shows mid-cut.
+    const successorLoading = new Set();
+    for (const v of visible) {
+      const rec = compFrames.get(v.cue.id);
+      if (!rec || !rec.loaded) successorLoading.add(v.lane);
+    }
     for (const [id, rec] of compFrames) {
-      if (!ids.has(id)) {
-        rec.frame.remove();
-        compFrames.delete(id);
+      if (ids.has(id)) continue;
+      const lane = laneOfCue(rec.cue?.id);
+      if (lane && successorLoading.has(lane) && rec.loaded) {
+        // Hold the previous frame (seeked to its end below) until the
+        // successor iframe reports load.
+        rec.held = true;
+        continue;
+      }
+      rec.frame.remove();
+      compFrames.delete(id);
+    }
+    // Preload the next composition per lane while playing or after a seek.
+    if (seq && (store.state.playing || seekAll)) {
+      const lookahead = PRELOAD_LOOKAHEAD_MS;
+      const nexts = nextCompCues(t, lookahead);
+      const nextIds = new Set(nexts.map((n) => n.cue.id));
+      for (const [id, rec] of compPreload) {
+        const stillNext = nextIds.has(id);
+        const gone = !cueById.has(id);
+        const tooFar = rec.cue && (cueStartMs(seq, rec.cue, cueById) - t > PRELOAD_MAX_DISTANCE_MS);
+        if (!stillNext || gone || tooFar) {
+          try { rec.frame.remove(); } catch {}
+          compPreload.delete(id);
+        }
+      }
+      for (const { cue } of nexts) {
+        if (compFrames.has(cue.id) || compPreload.has(cue.id)) continue;
+        const frame = makeCompFrame(cue, true);
+        const rec = { frame, loaded: false, cue, pendingSeek: null, nextRetry: 0, seekUntil: 0 };
+        compPreload.set(cue.id, rec);
+        frame.addEventListener("load", () => {
+          rec.loaded = true;
+          rec.loadedAt = performance.now();
+          // Boot cued to the first frame so the boundary switch is instant.
+          try { requestCompSeek(rec, cue, 0); } catch {}
+        }, { once: true });
+      }
+    } else {
+      for (const [id, rec] of compPreload) {
+        try { rec.frame.remove(); } catch {}
+        compPreload.delete(id);
       }
     }
     for (const { cue, start, tq } of visible) {
       let rec = compFrames.get(cue.id);
       if (!rec) {
-        const frame = document.createElement("iframe");
-        frame.className = "pv-comp-frame";
-        frame.setAttribute("scrolling", "no");
-        frame.setAttribute("tabindex", "-1");
-        frame.style.visibility = "hidden";
-        frame.src = api.url(`/comp/${encodeURIComponent(cue.id)}/`);
-        compLayer.appendChild(frame);
-        rec = { frame, loaded: false, cue, pendingSeek: null, nextRetry: 0, seekUntil: 0 };
-        compFrames.set(cue.id, rec);
-        frame.addEventListener("load", () => {
-          rec.loaded = true;
-          try {
-            const lt = clamp(quantMs(nowMs()) - start, 0, cue.duration_ms);
-            requestCompSeek(rec, cue, lt);
-          } catch {}
-          frame.style.visibility = "visible";
-          lastT = -1; // force a placement refresh once the size is known
-        }, { once: true });
+        // Adopt a ready preloaded iframe when the boundary arrives: the page
+        // is already booted, so only visibility switches.
+        const pre = compPreload.get(cue.id);
+        if (pre && pre.loaded) {
+          compPreload.delete(cue.id);
+          rec = pre;
+          compFrames.set(cue.id, rec);
+        } else {
+          if (pre) {
+            try { pre.frame.remove(); } catch {}
+            compPreload.delete(cue.id);
+          }
+          const frame = makeCompFrame(cue, true);
+          rec = { frame, loaded: false, cue, pendingSeek: null, nextRetry: 0, seekUntil: 0 };
+          compFrames.set(cue.id, rec);
+          frame.addEventListener("load", () => {
+            rec.loaded = true;
+            rec.loadedAt = performance.now();
+            try {
+              const lt = clamp(quantMs(nowMs()) - start, 0, cue.duration_ms);
+              requestCompSeek(rec, cue, lt);
+            } catch {}
+            frame.style.visibility = "visible";
+            lastT = -1; // force a placement refresh once the size is known
+          }, { once: true });
+        }
       }
       rec.cue = cue;
+      rec.held = false;
       const localMs = clamp(tq - start, 0, cue.duration_ms);
       if (seekAll && rec.loaded) requestCompSeek(rec, rec.cue, localMs);
       void compSize(cue.id, cue).then((size) => {
@@ -697,6 +892,14 @@ export function mount(root, ctx) {
         rec.frame.style.opacity = String(clamp(p.opacity ?? 1, 0, 1));
         if (rec.loaded) rec.frame.style.visibility = (p.opacity ?? 1) > 0.001 ? "visible" : "hidden";
       });
+    }
+    // Held previous frames stay on their end state until the successor loads.
+    for (const [id, rec] of compFrames) {
+      if (ids.has(id) || !rec.held) continue;
+      if (rec.loaded) {
+        try { requestCompSeek(rec, rec.cue, rec.cue?.duration_ms ?? 0); } catch {}
+        if (rec.frame.style.visibility !== "visible") rec.frame.style.visibility = "visible";
+      }
     }
     return visible;
   }
@@ -742,13 +945,21 @@ export function mount(root, ctx) {
       div.style.top = `${posY.toFixed(2)}%`;
       div.style.maxWidth = `${clamp(typo.max_width_pct ?? 80, 15, 95)}%`;
       div.style.fontFamily = `"${typo.font_family ?? "Arial"}", sans-serif`;
-      div.style.fontSize = `${Math.max(8, (typo.font_size_px ?? 42) * s * (p.scale_y || 1)).toFixed(1)}px`;
+      div.style.fontSize = `${Math.max(8, Math.round((typo.font_size_px ?? 42) * s * (p.scale_y || 1)))}px`;
       div.style.fontWeight = String(typo.font_weight ?? 700);
       div.style.textAlign = typo.align ?? "center";
       div.style.opacity = String(clamp(p.opacity ?? 1, 0, 1));
       const strokeW = (typo.stroke_width_px ?? 0) * s;
-      if (strokeW > 0.4) div.style.webkitTextStroke = `${strokeW.toFixed(1)}px ${typo.stroke_color_hex ?? "#000"}`;
-      else if (typo.stroke_color_hex) div.style.textShadow = `0 0 ${(3 * s).toFixed(1)}px ${typo.stroke_color_hex}`;
+      // Scale-aware outline mirroring the ASS output (ass_generator.ts renders
+      // Outline = max(1, stroke_width_px) at full stage resolution with
+      // ScaledBorderAndShadow): whole pixels, stroke behind the fill, and a
+      // crisp offset shadow instead of a blurred glow when no stroke applies.
+      if ((typo.stroke_width_px ?? 0) > 0 && strokeW >= 1) {
+        div.style.webkitTextStroke = `${Math.round(strokeW)}px ${typo.stroke_color_hex ?? "#000"}`;
+        div.style.paintOrder = "stroke fill";
+      } else if (typo.stroke_color_hex) {
+        div.style.textShadow = `0 ${Math.max(1, Math.round(2 * s))}px 0 ${typo.stroke_color_hex}`;
+      }
       if (typo.box_color_hex && (typo.box_opacity ?? 0) > 0) {
         div.style.background = typo.box_color_hex;
         div.style.opacity = String(clamp(p.opacity ?? 1, 0, 1) * clamp(typo.box_opacity, 0, 1));
@@ -823,7 +1034,7 @@ export function mount(root, ctx) {
         rec.el.volume = muted ? 0 : clamp(dbToLin(cueGainDb(cue, localMs)) * volume, 0, 1);
       }
       if (store.state.playing) {
-        rec.el.playbackRate = clamp(rate * uiRate, 0.1, 16);
+        rec.el.playbackRate = clamp(rate * uiRate * tempoRate, 0.1, 16);
         if (rec.el.paused && rec.el.readyState >= 2) rec.el.play().catch(() => {});
       } else if (!rec.el.paused) {
         rec.el.pause();
@@ -864,9 +1075,13 @@ export function mount(root, ctx) {
   // -- master render ------------------------------------------------------------------
   function measureStage() {
     // Fit the project aspect into the available box (explicit px: aspect-ratio
-    // alone resolves to 0 with only absolute children).
-    const availW = Math.max(1, stageOuter.clientWidth - 24);
-    const availH = Math.max(1, stageOuter.clientHeight - 24);
+    // alone resolves to 0 with only absolute children). Padding is read from
+    // the computed style so the fit tracks the stylesheet instead of a copy.
+    const cs = getComputedStyle(stageOuter);
+    const padW = (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0);
+    const padH = (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+    const availW = Math.max(1, stageOuter.clientWidth - padW);
+    const availH = Math.max(1, stageOuter.clientHeight - padH);
     const ar = stageW / Math.max(1, stageH);
     let w = availW, h = w / ar;
     if (h > availH) { h = availH; w = h * ar; }
@@ -931,6 +1146,7 @@ export function mount(root, ctx) {
 
   // -- sequence intake ----------------------------------------------------------------------
   function takeSequence(sequence, project) {
+    const firstIntake = !seq;
     seq = sequence;
     cueById = new Map();
     for (const lane of seq?.lanes ?? []) for (const cue of lane.cues ?? []) cueById.set(cue.id, cue);
@@ -941,6 +1157,8 @@ export function mount(root, ctx) {
       stageW = project.width ?? 1920;
       stageH = project.height ?? 1080;
       durationMs = project.duration_ms ?? 0;
+      tempoRate = project.tempo ?? 1;
+      if (btns.speed) { btns.speed.textContent = tempoRate !== 1 ? `${uiRate}× · ${tempoRate}×` : `${uiRate}×`; btns.speed.title = tempoRate !== 1 ? `Preview speed ${uiRate}× · sequence tempo ${tempoRate}× (set with workspace tempo)` : "Preview speed"; }
       stage.style.aspectRatio = `${stageW} / ${stageH}`;
       stage.style.background = project.backdrop ?? "#000";
       stageOuter.style.background = project.backdrop ?? "var(--bg-canvas)";
@@ -959,9 +1177,36 @@ export function mount(root, ctx) {
         cueAudio.delete(id);
       }
     }
+    // Drop composition iframes and cached sizes for cues that no longer
+    // exist, so a later cue never inherits a stale frame or size. Visible
+    // cues keep their loaded iframes (no flicker on unrelated edits).
+    for (const [id, rec] of compFrames) {
+      if (!cueById.has(id)) {
+        try { rec.frame.remove(); } catch {}
+        compFrames.delete(id);
+      }
+    }
+    pruneCompSizeCache();
     lastT = -1;
     render(clamp(nowMs(), 0, durationMs), true);
+    if (firstIntake && !initialSeekDone) requestInitialSeek();
     void refreshProxyStatus();
+  }
+
+  // The window opens at 0:00 on an unseeked composition DOM (all entry states
+  // stacked): seek every visible composition to the playhead once, right
+  // after the first snapshot. Later loads seek in their load listener and
+  // settle through settleCompSeeks.
+  function requestInitialSeek() {
+    try {
+      const t = clamp(nowMs(), 0, durationMs);
+      for (const { cue, start, tq } of visibleCompCues(t)) {
+        const rec = compFrames.get(cue.id);
+        if (!rec || !rec.loaded) continue;
+        requestCompSeek(rec, cue, clamp(tq - start, 0, cue.duration_ms));
+      }
+      if (typeof window !== "undefined") window.__cutholInitialSeek = true;
+    } catch {}
   }
 
   // -- proxy status ------------------------------------------------------------------------------
@@ -1045,7 +1290,7 @@ export function mount(root, ctx) {
   btns.speed.addEventListener("click", () => {
     const t = nowMs();
     uiRate = SPEEDS[(SPEEDS.indexOf(uiRate) + 1) % SPEEDS.length];
-    btns.speed.textContent = `${uiRate}×`;
+    btns.speed.textContent = tempoRate !== 1 ? `${uiRate}× · ${tempoRate}×` : `${uiRate}×`;
     if (store.state.playing) { anchorT = t; anchorPerf = performance.now(); }
   });
   btns.mute.addEventListener("click", () => {
@@ -1139,28 +1384,42 @@ export function mount(root, ctx) {
     gradeBtn.setAttribute("aria-pressed", String(!grader.state.bypass));
     gradeBtn.textContent = grader.state.bypass ? "Ungraded" : "Grade";
   });
-  store.on("snapshot", (s) => { takeSequence(s.sequence, s.snapshot?.project ?? s.project ?? null); maybeGrade(); });
+  store.on("snapshot", (s) => {
+    noteEvent("snapshot");
+    if (typeof s?.revision === "number") lastSeenServerRevision = s.revision;
+    takeSequence(s.sequence, s.snapshot?.project ?? s.project ?? null);
+    if (typeof s?.revision === "number") lastAppliedRevision = s.revision;
+    maybeGrade();
+  });
   store.on("delta", (d) => {
     // New revision at the same time, playback continues without a flicker.
     // Duration comes from the server (spine and lanes); never recompute it here.
+    noteEvent("delta");
+    if (typeof d?.revision === "number") lastSeenServerRevision = d.revision;
     const snapshotProject = store.state.snapshot?.project ?? null;
     const project = snapshotProject ? { ...snapshotProject } : null;
     if (project && typeof d.duration_ms === "number" && Number.isFinite(d.duration_ms)) {
       project.duration_ms = d.duration_ms;
     }
     takeSequence(d.sequence, project);
+    if (typeof d?.revision === "number") lastAppliedRevision = d.revision;
   });
   // Outside composition edits: reload only the affected iframes, then re-seek
   // to the current playhead. Cache-bust so the fresh files load, not the old ones.
   window.__cutholCompReloads = window.__cutholCompReloads ?? 0;
   store.on("comps", (msg) => {
+    noteEvent("comps");
     const dirs = new Set(msg?.dirs ?? []);
     if (dirs.size === 0 || !seq) return;
     const t = nowMs();
+    let matched = false;
     for (const lane of seq?.lanes ?? []) {
       for (const cue of lane.cues ?? []) {
         const d = cue?.composition?.composition_dir;
         if (typeof d !== "string" || !dirs.has(d.replace(/\\/g, "/"))) continue;
+        matched = true;
+        // The composition files changed: any cached size may be stale.
+        compSizeCache.delete(cue.id);
         const rec = compFrames.get(cue.id);
         if (!rec) continue;
         window.__cutholCompReloads++;
@@ -1173,6 +1432,7 @@ export function mount(root, ctx) {
           rec.frame.src = url.toString();
           rec.frame.addEventListener("load", () => {
             rec.loaded = true;
+            rec.loadedAt = performance.now();
             try {
               requestCompSeek(rec, cue, clamp(quantMs(t) - start, 0, cue.duration_ms));
             } catch {}
@@ -1182,6 +1442,17 @@ export function mount(root, ctx) {
         } catch {}
       }
     }
+    if (!matched) {
+      // Changed directories the current sequence does not reference: the
+      // window likely missed a delta (new cue added outside). Resync instead
+      // of waiting for a manual reload.
+      resyncFromServer("composition change for an unknown cue");
+      return;
+    }
+    // Cues that gained a matching directory but have no iframe yet (added
+    // while the window was open) appear on the next render pass.
+    lastT = -1;
+    render(t, true);
   });
   const onExternalSeek = (patch) => {
     if (!seq || patch?.playheadMs == null) return;
@@ -1224,6 +1495,186 @@ export function mount(root, ctx) {
   };
   requestAnimationFrame(tick);
 
+  // -- watchdog: detect a stuck preview, report it, reload it -------------------------
+  // Reasons (LiveIncidentReason in src/live/live_types.ts): a visible iframe
+  // with no readable main clock seconds after load (no_frames); playing but
+  // the main clock not advancing (clock_stalled); the applied sequence older
+  // than the newest revision the window saw (revision_behind); an iframe load
+  // error or a load that never finishes (load_failed). On detection the
+  // window posts a LiveIncidentReport to POST /api/incident (ignored 404
+  // until the server side lands), reloads only the preview (iframes
+  // re-created, snapshot re-applied), then posts the outcome with the same
+  // id. At most 3 automatic reloads per 10 minutes per cue; past that the
+  // window only warns and shows a "Preview not responding" notice.
+  const WATCHDOG_MS = 2000;
+  const NO_CLOCK_MS = 5000;
+  const STALL_MS = 3000;
+  const LOAD_TIMEOUT_MS = 15000;
+  const MAX_RELOADS = 3;
+  const RELOAD_WINDOW_MS = 600000;
+  function reloadsInWindow(key) {
+    const now = Date.now();
+    const list = (reloadLog.get(key) ?? []).filter((t) => now - t < RELOAD_WINDOW_MS);
+    reloadLog.set(key, list);
+    return list;
+  }
+  function showWatchdogNotice(text) {
+    try {
+      if (!watchdogNotice) {
+        watchdogNotice = document.createElement("div");
+        watchdogNotice.className = "pv-watchdog";
+        watchdogNotice.setAttribute("role", "status");
+        stage.appendChild(watchdogNotice);
+      }
+      watchdogNotice.textContent = text;
+      watchdogNotice.hidden = false;
+    } catch {}
+  }
+  function hideWatchdogNotice() {
+    try { if (watchdogNotice) watchdogNotice.hidden = true; } catch {}
+  }
+  function postIncident(report) {
+    try {
+      const p = api.post("/api/incident", report);
+      if (p && typeof p.catch === "function") p.catch(() => {});
+      else if (p && typeof p.then === "function") p.then(() => {}, () => {});
+    } catch {}
+  }
+  function reloadPreviewOnly() {
+    for (const [, rec] of compFrames) { try { rec.frame.remove(); } catch {} }
+    compFrames.clear();
+    for (const [, rec] of compPreload) { try { rec.frame.remove(); } catch {} }
+    compPreload.clear();
+    clockTrack.clear();
+    window.__cutholCompReloads = (window.__cutholCompReloads ?? 0) + 1;
+    takeSequence(store.state.sequence, store.state.snapshot?.project ?? null);
+  }
+  function checkWatchdog() {
+    if (!seq) return;
+    const now = performance.now();
+    const t = nowMs();
+    const problems = [];
+    // Revision applied by the window vs newest seen: a delta the preview
+    // failed to apply (its handler threw) leaves the stage behind.
+    if (typeof lastSeenServerRevision === "number" && typeof lastAppliedRevision === "number"
+        && lastAppliedRevision < lastSeenServerRevision) {
+      problems.push({ reason: "revision_behind", cue: null, rec: null });
+    }
+    for (const { cue, start } of visibleCompCues(t)) {
+      const rec = compFrames.get(cue.id);
+      if (!rec) continue;
+      if (rec.frame.__cutholLoadError) {
+        problems.push({ reason: "load_failed", cue, rec });
+        continue;
+      }
+      if (!rec.loaded) {
+        if (now - (rec.frame.__cutholCreatedAt ?? now) > LOAD_TIMEOUT_MS) {
+          problems.push({ reason: "load_failed", cue, rec });
+        }
+        continue;
+      }
+      const clock = compClockSec(rec);
+      if (clock == null) {
+        const age = now - (rec.loadedAt ?? rec.frame.__cutholCreatedAt ?? now);
+        if (age > NO_CLOCK_MS) problems.push({ reason: "no_frames", cue, rec });
+        continue;
+      }
+      const prev = clockTrack.get(cue.id);
+      clockTrack.set(cue.id, { clock, at: now });
+      if (store.state.playing && prev && Math.abs(clock - prev.clock) < 1e-6 && now - prev.at > STALL_MS) {
+        problems.push({ reason: "clock_stalled", cue, rec });
+      }
+    }
+    if (problems.length === 0) return;
+    const first = problems[0];
+    const key = first.cue?.id ?? "global";
+    const recent = reloadsInWindow(key);
+    const id = `wd_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
+    const base = {
+      id,
+      reason: first.reason,
+      at: new Date().toISOString(),
+      window_revision: lastAppliedRevision,
+      server_revision: lastSeenServerRevision,
+      playhead_ms: Math.round(t),
+      playing: !!store.state.playing,
+      recent_events: [...recentEvents],
+      console_errors: [...consoleErrors],
+    };
+    if (first.cue) {
+      base.cue_id = first.cue.id;
+      try {
+        const u = new URL(first.rec.frame.src, location.href);
+        u.searchParams.delete("t");
+        base.iframe_url = u.pathname;
+      } catch {}
+      try { base.comp_clock_sec = compClockSec(first.rec); } catch { base.comp_clock_sec = null; }
+    }
+    lastIncidentAt = Date.now();
+    if (recent.length >= MAX_RELOADS) {
+      try { console.warn(`[CUTHOL-G676] Live preview reload cap reached for '${key}' | Suggestion: reload the Live window page manually; the preview keeps running with warnings only.`); } catch {}
+      postIncident({ ...base, action: "warned_user" });
+      showWatchdogNotice("Preview not responding");
+      window.__cutholWatchdog = { lastReason: first.reason, capped: true, at: lastIncidentAt };
+      return;
+    }
+    recent.push(Date.now());
+    reloadLog.set(key, recent);
+    try { console.warn(`[CUTHOL-G673] Live preview watchdog: ${first.reason}${first.cue ? ` on '${first.cue.id}'` : ""} | Suggestion: the window reloads its preview automatically; if the notice persists, reopen the window and report the incident from 'cuthol live status'.`); } catch {}
+    postIncident({ ...base, action: "reloaded_preview" });
+    reloadPreviewOnly();
+    window.__cutholWatchdog = { lastReason: first.reason, reloadedAt: lastIncidentAt, id };
+    // Outcome follow-up: recovered when the next checks pass, still_stuck
+    // (plus a full page reload) when the problem persists.
+    const followId = id;
+    const followReason = first.reason;
+    const followCue = first.cue?.id ?? null;
+    setTimeout(() => {
+      try {
+        const still = checkWatchdogQuiet();
+        const outcome = still ? "still_stuck" : "recovered";
+        try { console.warn(`[CUTHOL-G674] Live preview reloaded (${outcome}). | Suggestion: if the preview keeps stalling, reopen the window and report the incident from 'cuthol live status'.`); } catch {}
+        postIncident({ ...base, id: followId, action: "reloaded_preview", outcome });
+        if (still) {
+          if (outcome === "still_stuck") {
+            try { console.error(`[CUTHOL-G675] The Live preview is still stuck${followCue ? ` on '${followCue}'` : ""} after an automatic reload. | Suggestion: reload the Live window page, then report the incident from 'cuthol live status' with the console errors it captured.`); } catch {}
+          }
+          showWatchdogNotice("Preview not responding");
+          window.__cutholWatchdog = { lastReason: followReason, stillStuck: true, at: Date.now() };
+          try { location.reload(); } catch {}
+        } else {
+          hideWatchdogNotice();
+        }
+      } catch {}
+    }, 8000);
+  }
+  /** Same checks without side effects, for the outcome follow-up. */
+  function checkWatchdogQuiet() {
+    if (!seq) return false;
+    const now = performance.now();
+    const t = nowMs();
+    if (typeof lastSeenServerRevision === "number" && typeof lastAppliedRevision === "number"
+        && lastAppliedRevision < lastSeenServerRevision) return true;
+    for (const { cue } of visibleCompCues(t)) {
+      const rec = compFrames.get(cue.id);
+      if (!rec || rec.frame.__cutholLoadError) return true;
+      if (!rec.loaded) {
+        if (now - (rec.frame.__cutholCreatedAt ?? now) > LOAD_TIMEOUT_MS) return true;
+        continue;
+      }
+      const clock = compClockSec(rec);
+      if (clock == null) {
+        if (now - (rec.loadedAt ?? rec.frame.__cutholCreatedAt ?? now) > NO_CLOCK_MS) return true;
+        continue;
+      }
+      const prev = clockTrack.get(cue.id);
+      if (store.state.playing && prev && Math.abs(clock - prev.clock) < 1e-6 && now - prev.at > STALL_MS) return true;
+    }
+    return false;
+  }
+  watchdogTimer = window.setInterval(() => { try { checkWatchdog(); } catch {} }, WATCHDOG_MS);
+  window.__cutholWatchdog = null;
+
   // Test hook for the headless accuracy check (seek + state readout).
   window.__livePreview = {
     applySnapshot: (s) => takeSequence(s.sequence, s.project ?? null),
@@ -1244,6 +1695,15 @@ export function mount(root, ctx) {
         videoTimeMs: Math.round((vis.el.currentTime || 0) * 1000),
         videoSrc: vis.el.currentSrc ?? "",
         comps: visibleCompCues(t).map((c) => c.cue.id),
+        preloads: [...compPreload.keys()],
+        initialSeekDone,
+        watchdog: window.__cutholWatchdog,
+        reloads: window.__cutholCompReloads ?? 0,
+        revisions: { seen: lastSeenServerRevision, applied: lastAppliedRevision },
+        recentEvents: [...recentEvents],
+        notice: !!(watchdogNotice && !watchdogNotice.hidden),
+        held: [...compFrames].filter(([, r]) => r.held).map(([id]) => id),
+        frames: [...compFrames].map(([id, r]) => ({ id, loaded: !!r.loaded, visible: r.frame.style.visibility })),
         caption: capLayer.querySelector(".pv-caption")?.dataset.cue ?? null,
         activeWord: capLayer.querySelector(".pv-active-word")?.textContent ?? null,
         approx: !badge.hidden,

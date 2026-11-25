@@ -14,6 +14,7 @@ import { checkRenderedColor } from "../color/render_check.js";
 import { CutholSequence } from "../core/schema.js";
 import { evaluateRgb24FrameBlankness } from "../monitor/preview.js";
 import { evaluateEnvelopeAt } from "../sequence/spine.js";
+import { outToSeqMs, outputDurationMs, tempoOf } from "../sequence/tempo.js";
 
 export interface BlankFrameEvent {
   start_frame: number;
@@ -210,7 +211,8 @@ export function scanRenderedMp4ForBlankFrames(
 ): PostRenderBlankScanResult {
   const t0 = Date.now();
   const fps = Math.max(1, seq.stage.fps);
-  const expectedFrames = Math.max(1, Math.round((computeRenderDurationMs(seq) / 1000) * fps));
+  const tempoRate = tempoOf(seq);
+  const expectedFrames = Math.max(1, Math.round((outputDurationMs(computeRenderDurationMs(seq), tempoRate) / 1000) * fps));
   progressBegin("blank scan", expectedFrames, { mode: "ffmpeg-frames" });
   try {
   const frameDurMs = 1000 / fps;
@@ -226,7 +228,9 @@ export function scanRenderedMp4ForBlankFrames(
   // Only non-empty for a spine-less sequence: the moments where no visual cue is on screen.
   const backdropOnlySpans = findBackdropOnlySpans(seq);
   const processFrame = (f: number, frameBuf: Buffer): void => {
-    const tMs = (f * 1000) / fps;
+    // Delivered frames are on the output clock; map back to the sequence clock
+    // before matching clip windows (single tempo mapping, no second copy).
+    const tMs = outToSeqMs((f * 1000) / fps, tempoRate);
     let activeClipIdx = -1;
     for (let i = 0; i < seq.spine.clips.length; i++) {
       const c = seq.spine.clips[i];

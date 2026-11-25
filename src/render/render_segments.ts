@@ -22,6 +22,7 @@ import {
 import { CutholSequence } from "../core/schema.js";
 import { WorkspacePaths } from "../core/workspace.js";
 import { runParallelFfmpegJobsSync } from "./render_frames.js";
+import { atempoChain, outputDurationMs, tempoOf } from "../sequence/tempo.js";
 
 export interface RenderTimeSegment {
   index: number;
@@ -199,11 +200,30 @@ export function buildOrRenderSequenceAudioForMixOrRender(
         "-/filter_complex",
         "filter.txt",
       ]);
+      const tempoRate = tempoOf(seq);
+      if (tempoRate === 1) {
+        return {
+          mode: "direct_plan",
+          directPlan,
+          audioOutPad: directPlan.audioOutPad,
+          totalDurationMs: directPlan.totalDurationMs,
+          hasActiveAudio: directPlan.hasActiveAudio,
+          maxInputsInAnyCall: inputCount,
+          maxCommandLengthChars: cmdLen,
+        };
+      }
+      const tempoPad = "[aout_tempo]";
+      const wrappedPlan = {
+        ...directPlan,
+        filterComplex: `${directPlan.filterComplex};${directPlan.audioOutPad}${atempoChain(tempoRate)}${tempoPad}`,
+        audioOutPad: tempoPad,
+        totalDurationMs: outputDurationMs(directPlan.totalDurationMs, tempoRate),
+      };
       return {
         mode: "direct_plan",
-        directPlan,
-        audioOutPad: directPlan.audioOutPad,
-        totalDurationMs: directPlan.totalDurationMs,
+        directPlan: wrappedPlan,
+        audioOutPad: tempoPad,
+        totalDurationMs: wrappedPlan.totalDurationMs,
         hasActiveAudio: directPlan.hasActiveAudio,
         maxInputsInAnyCall: inputCount,
         maxCommandLengthChars: cmdLen,
@@ -378,19 +398,22 @@ export function buildOrRenderSequenceAudioForMixOrRender(
   fs.writeFileSync(concatListPath, concatLines, "utf8");
 
   const inIdx = options?.inputIndexOffset ?? 0;
-  const audioOutPad = "[aout]";
-  const masterFilterComplex = buildMasterAudioPostConcatFilter(
+  const tempoRate = tempoOf(seq);
+  const audioOutPad = tempoRate === 1 ? "[aout]" : "[aout_tempo]";
+  const baseFilterComplex = buildMasterAudioPostConcatFilter(
     `[${inIdx}:a]`,
-    audioOutPad,
+    "[aout]",
     masterAudio
   );
+  const masterFilterComplex =
+    tempoRate === 1 ? baseFilterComplex : `${baseFilterComplex};[aout]${atempoChain(tempoRate)}[aout_tempo]`;
 
   return {
     mode: "concat_wav",
     concatListPath,
     masterFilterComplex,
     audioOutPad,
-    totalDurationMs,
+    totalDurationMs: outputDurationMs(totalDurationMs, tempoRate),
     hasActiveAudio: anyActiveAudio,
     maxInputsInAnyCall,
     maxCommandLengthChars,

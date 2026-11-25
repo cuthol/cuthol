@@ -12,6 +12,7 @@
 // The overlay position is built in overlaySpineClip: base x/y → edge hook (compile_spine_edge.ts) → still-image spec
 // → incoming transition position → outgoing transition position (compile_spine_transition.ts).
 import { CutholSequence, isStillGraphic, TransitionSpec } from "../core/schema.js";
+import { buildCueOverlayEnableExpr } from "../core/frame_time.js";
 import { buildSpineClipTimingFilters, computeSpineClipEffectiveRate } from "./compile_spine_timing.js";
 import { buildSpineClipColorFilters } from "./compile_spine_color.js";
 import { buildSpineClipFxFilters } from "./compile_spine_fx.js";
@@ -537,7 +538,7 @@ function overlaySpineClip(
   const nextPad = `[vc_${++ctx.vStepCounter}]`;
   const spineOverlayFmt = ctx.preset === "master_alpha" ? "format=auto:" : "";
   ctx.filterChains.push(
-    `${ctx.currentVideoPad}${clipPad}overlay=x='${xExpr}':y='${yExpr}':${spineOverlayFmt}eval=frame:enable='between(t,${tlInSec},${tlOutSec})':eof_action=pass,${BT709_SETPARAMS}${nextPad}`
+    `${ctx.currentVideoPad}${clipPad}overlay=x='${xExpr}':y='${yExpr}':${spineOverlayFmt}eval=frame:enable='${buildCueOverlayEnableExpr(tlInSec, tlOutSec)}':eof_action=pass,${BT709_SETPARAMS}${nextPad}`
   );
   ctx.currentVideoPad = nextPad;
 }

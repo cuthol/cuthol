@@ -25,6 +25,15 @@ After opening, stop thinking about the window.
   field (MCP). Handle those notes first: each line points at exact item refs
   (`cue_12/#title`) — use them directly instead of searching.
 - Notes arrive with your next command result; you cannot be woken while idle.
+- One packet can carry notes from several scenes: `note 3 @ s04 1:12.400 "…"`
+  names the scene (composition cue, or spine clip) and the sequence time.
+  `boundary s03→s04 @ 0:58.200` is about the cut itself — check the join on
+  both sides (last frame of `s03`, first frame of `s04`), not just one side.
+  `range s04–s13` means the same problem in every scene from `s04` to `s13`
+  inclusive: fix each scene, then report per scene what changed. `all scenes`
+  means every composition cue: apply the fix everywhere it fits and say which
+  scenes changed and which needed nothing.
+- `cuthol live status` lists pending notes (`pending_notes`) in the same form.
 - When the user presses Pause in the window, the first write command after
   Pause is still applied as the last allowed one; the second write is refused
   with `G601`. From then on every response starts with a `PAUSED:` line. Stop

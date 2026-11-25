@@ -15,6 +15,7 @@ import {
 } from "../core/env.js";
 import { CutholSequence, getCuePlaybackRate, maxSourceDurationMs, SpeedRampPoint } from "../core/schema.js";
 import { WorkspacePaths } from "../core/workspace.js";
+import { atempoChain, outputDurationMs, outToSeqMs, seqToOutMs, tempoOf } from "../sequence/tempo.js";
 import { resolveLibraryItemPath } from "../library/probe.js";
 import { compileSequenceAudioPlan } from "../compositor/compile_audio.js";
 import { integrateRampSourceOffsetToLocalMs, invertRampLocalMsToSourceOffset } from "../sequence/spine_time.js";
@@ -205,6 +206,8 @@ interface GapScanItem {
   rampSpanMs?: number;
   rampFallbackRate?: number;
   ramp?: SpeedRampPoint[] | null;
+  /** Sequence tempo the delivered audio was retimed by (absent = 1). */
+  outputTempo?: number;
 }
 
 /**
@@ -280,11 +283,11 @@ function scanRenderedOutputGaps(options: {
       const ramped = Boolean(item.ramp && item.ramp.length >= 2 && item.rampSpanMs && item.rampFallbackRate);
       const srcG0 = ramped
         ? item.srcInMs +
-          invertRampLocalMsToSourceOffset(item.rampSpanMs as number, item.rampFallbackRate as number, item.ramp ?? null, localG0)
+          invertRampLocalMsToSourceOffset(item.rampSpanMs as number, item.rampFallbackRate as number, item.ramp ?? null, outToSeqMs(localG0, item.outputTempo ?? 1))
         : item.srcInMs + localG0 * item.effectiveRate;
       const srcG1 = ramped
         ? item.srcInMs +
-          invertRampLocalMsToSourceOffset(item.rampSpanMs as number, item.rampFallbackRate as number, item.ramp ?? null, localG1)
+          invertRampLocalMsToSourceOffset(item.rampSpanMs as number, item.rampFallbackRate as number, item.ramp ?? null, outToSeqMs(localG1, item.outputTempo ?? 1))
         : item.srcInMs + localG1 * item.effectiveRate;
       if (!Number.isFinite(srcG0) || !Number.isFinite(srcG1)) continue;
       // Core mapped span only (no padding): a loud sample counts only if the
@@ -373,8 +376,11 @@ function scanRenderedOutputGaps(options: {
         const srcCenterMs = j.srcStartMs + (((cluster.start + cluster.end) / 2 / sampleRate) * 1000);
         const fwdMs = rampedItem
           ? itemStart +
-            integrateRampSourceOffsetToLocalMs(
-              j.item.rampSpanMs as number, j.item.rampFallbackRate as number, j.item.ramp ?? null, srcCenterMs - j.item.srcInMs
+            seqToOutMs(
+              integrateRampSourceOffsetToLocalMs(
+                j.item.rampSpanMs as number, j.item.rampFallbackRate as number, j.item.ramp ?? null, srcCenterMs - j.item.srcInMs
+              ),
+              j.item.outputTempo ?? 1
             )
           : itemStart + (srcCenterMs - j.item.srcInMs) / Math.max(1e-9, j.item.effectiveRate);
         if (!Number.isFinite(fwdMs) || outputRmsNear(fwdMs, 30) <= loudLin) {
@@ -413,7 +419,8 @@ export function scanRenderedMp4AudioHealth(
   try {
   const t0 = Date.now();
   const sampleRate = 16000;
-  const totalDurationMs = computeRenderDurationMs(seq);
+  const tempoRate = tempoOf(seq);
+  const totalDurationMs = outputDurationMs(computeRenderDurationMs(seq), tempoRate);
   const libMap = new Map(seq.library.map((item) => [item.handle, item]));
 
   interface ActiveAudioItemInfo {
@@ -433,6 +440,8 @@ export function scanRenderedMp4AudioHealth(
     rampSpanMs?: number;
     rampFallbackRate?: number;
     ramp?: SpeedRampPoint[] | null;
+    /** Sequence tempo the delivered audio was retimed by (absent = 1). */
+    outputTempo?: number;
   }
 
   const audioItems: ActiveAudioItemInfo[] = [];
@@ -511,6 +520,21 @@ export function scanRenderedMp4AudioHealth(
       rampFallbackRate: clip.playback.rate,
       ramp: clip.playback.speed_ramp,
     });
+  }
+
+  // Delivered audio is on the output clock: item positions move to it, and one
+  // output millisecond consumes `tempo` times more source (pitch preserved), so the
+  // source references are stretched by the tempo too. Ramp maps keep working in
+  // sequence-local time (converted at each use with the same mapping).
+  if (tempoRate !== 1) {
+    for (const item of audioItems) {
+      item.timelineStartMs = seqToOutMs(item.timelineStartMs, tempoRate);
+      item.postTrimDurationMs = seqToOutMs(item.postTrimDurationMs, tempoRate);
+      item.fadeInMs = seqToOutMs(item.fadeInMs, tempoRate);
+      item.fadeOutMs = seqToOutMs(item.fadeOutMs, tempoRate);
+      item.effectiveRate = item.effectiveRate * tempoRate;
+      item.outputTempo = tempoRate;
+    }
   }
 
   if (audioItems.length === 0) {
@@ -673,10 +697,20 @@ export function scanRenderedMp4AudioHealth(
           if (cue.id !== c.item.id && cue.audio_chain) cue.audio_chain.muted = true;
         }
       }
-      plan = compileSequenceAudioPlan(clone, paths, undefined, {
-        activeWindowMs: [c.probeStartMs, c.probeEndMs],
+      // Probe times are on the output clock; the audio compiler works on the sequence clock.
+      const outputTempo = c.item.outputTempo ?? 1;
+      const seqPlan = compileSequenceAudioPlan(clone, paths, undefined, {
+        activeWindowMs: [outToSeqMs(c.probeStartMs, outputTempo), outToSeqMs(c.probeEndMs, outputTempo)],
         applyMasterFinalize: false,
       });
+      plan =
+        outputTempo === 1
+          ? seqPlan
+          : {
+              ...seqPlan,
+              filterComplex: `${seqPlan.filterComplex};${seqPlan.audioOutPad}${atempoChain(outputTempo)}[aref_tempo]`,
+              audioOutPad: "[aref_tempo]",
+            };
     } catch (err) {
       return { skipped: `reference compile failed (${err instanceof Error ? err.message : String(err)})` };
     }
@@ -730,12 +764,15 @@ export function scanRenderedMp4AudioHealth(
       const seekSec = srcStartMs >= 3000 ? Math.floor((srcStartMs - 1000) / 1000) : 0;
       const relStartSec = Math.max(0, srcStartMs / 1000 - seekSec).toFixed(6);
       const relEndSec = Math.max(0.01, srcEndMs / 1000 - seekSec).toFixed(6);
+      // The clip's own rate (pitch may shift) and the sequence tempo (pitch kept) are separate stages.
+      const outputTempo = c.item.outputTempo ?? 1;
+      const clipRate = c.item.effectiveRate / outputTempo;
       const rateFilters =
-        c.item.preservePitch === false && Math.abs(c.item.effectiveRate - 1.0) > 0.001
+        c.item.preservePitch === false && Math.abs(clipRate - 1.0) > 0.001
           ? (() => {
               const sr = c.item.sampleRate && c.item.sampleRate > 0 ? c.item.sampleRate : 48000;
-              const pitched = Math.max(4000, Math.min(384000, Math.round(sr * c.item.effectiveRate)));
-              return [`asetrate=${pitched}`, `aresample=${sr}`, `asetpts=PTS-STARTPTS`];
+              const pitched = Math.max(4000, Math.min(384000, Math.round(sr * clipRate)));
+              return [`asetrate=${pitched}`, `aresample=${sr}`, `asetpts=PTS-STARTPTS`, ...buildHealthCheckAtempoChain(outputTempo)];
             })()
           : buildHealthCheckAtempoChain(c.item.effectiveRate);
       const af = [
@@ -774,7 +811,7 @@ export function scanRenderedMp4AudioHealth(
       !c.item.rampSpanMs ||
       !c.item.rampFallbackRate ||
       !Number.isFinite(invertRampLocalMsToSourceOffset(
-        c.item.rampSpanMs, c.item.rampFallbackRate, c.item.ramp ?? null, c.probeStartMs - c.item.timelineStartMs
+        c.item.rampSpanMs, c.item.rampFallbackRate, c.item.ramp ?? null, outToSeqMs(c.probeStartMs - c.item.timelineStartMs, c.item.outputTempo ?? 1)
       ))
     ) {
       skippedRampByIdx.set(idx, "ramp map unavailable");

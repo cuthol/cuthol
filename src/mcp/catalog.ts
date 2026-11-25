@@ -358,7 +358,15 @@ export function validateActionArgs(
         break;
       }
       default: {
-        val = typeof raw === "string" ? raw : String(raw);
+        // `time` params arrive at the CLI as strings: a JSON number is
+        // intentionally milliseconds, so stamp the unit explicitly. Unitless
+        // *strings* stay bare so the CLI can reject ambiguous fractions.
+        val =
+          prm.type === "time" && typeof raw === "number"
+            ? `${String(raw)}ms`
+            : typeof raw === "string"
+              ? raw
+              : String(raw);
         if (prm.enum && !prm.enum.includes(val as string)) {
           const near = closestName(val as string, prm.enum);
           issues.push({

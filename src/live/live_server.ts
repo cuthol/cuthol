@@ -8,10 +8,12 @@ import crypto from "node:crypto";
 import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
 import { loadJournalManifest, loadSequence } from "../core/workspace.js";
 import { readLiveLock } from "./live_lock.js";
-import { peekLiveInbox, writeLiveNotePacket } from "./live_inbox.js";
+import { formatLiveNoteLines, peekLiveInbox, writeLiveNotePacket } from "./live_inbox.js";
 import { LIVE_UI_DIR, resolveLivePaths } from "./live_paths.js";
 import { buildDelta, buildScenes, buildSnapshot, classifyCursorMove, readProgress, type RevisionSignature } from "./live_state.js";
 import { humanEditsEntriesForRange, routeLiveEditRequest, warmEditWorker } from "./live_edit_api.js";
+import { newestIncidentFile, storeIncidentReport, summarizeIncidents } from "./live_incidents.js";
+import { listLiveServers, registerLiveServer, unregisterLiveServer } from "./live_instances.js";
 import { Worker } from "node:worker_threads";
 import { computeSceneThumbKey, isCompIgnoredFile, sceneThumbFile, COMP_IGNORE_DIRS } from "./live_thumbs.js";
 import { LiveProxyManager, routeProxyRequest } from "./live_proxy.js";
@@ -29,6 +31,13 @@ export interface LiveStatus {
   server: LiveServerInfo | null;
   lock: LiveLock | null;
   pending_packets: number;
+  /** Compact pending-note lines, same form the agent reads in CLI/MCP answers. */
+  pending_notes: string[];
+  /** Windows with an open SSE stream right now (0 when the server runs but no window is connected). */
+  connected_windows: number;
+  incidents: { total: number; recovered: number; still_stuck: number; open: number; last_reason: string | null; newest: string | null };
+  newest_incident: string | null;
+  other_servers: { pid: number; port: number; project_dir: string }[];
 }
 
 const MIME: Record<string, string> = { ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg", ".json": "application/json", ".mp4": "video/mp4", ".webm": "video/webm", ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4", ".woff2": "font/woff2" };
@@ -161,23 +170,49 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
   // monitor-frame path and would otherwise block deltas for seconds.
   let thumbsJob: Promise<void> | null = null;
   let thumbsAgain = false;
-  const runThumbsWorker = (sequence: unknown): Promise<void> =>
-    new Promise<void>((resolve) => {
+  // Keys a finished pass could not render (missing media; the worker logged
+  // G607). A key lands here only after a clean pass, so a request can tell a
+  // scene that is still rendering apart from one that has no picture.
+  const thumbMissing = new Set<string>();
+  const markThumbMissing = (sequence: unknown): void => {
+    try {
+      for (const scene of buildScenes(sequence)) {
+        const key = computeSceneThumbKey(sequence, scene);
+        if (fs.existsSync(sceneThumbFile(root, key))) thumbMissing.delete(key);
+        else {
+          thumbMissing.add(key);
+          while (thumbMissing.size > 500) {
+            const oldest = thumbMissing.values().next();
+            if (oldest.done) break;
+            thumbMissing.delete(oldest.value);
+          }
+        }
+      }
+    } catch {
+      // never breaks the server
+    }
+  };
+  const runThumbsWorker = (sequence: unknown): Promise<boolean> =>
+    new Promise<boolean>((resolve) => {
       try {
+        let failed = false;
         const worker = new Worker(new URL("./live_thumbs_worker.js", import.meta.url), {
           workerData: { projectDir: root, sequence, scenes: buildScenes(sequence) },
         });
         worker.on("message", (m: { error?: string }) => {
-          if (m?.error) log(`thumbnails failed: ${m.error}`);
+          if (m?.error) {
+            failed = true;
+            log(`thumbnails failed: ${m.error}`);
+          }
         });
         worker.on("error", (e) => {
           log(`thumbnail worker failed: ${e.message}`);
-          resolve();
+          resolve(false);
         });
-        worker.on("exit", () => resolve());
+        worker.on("exit", () => resolve(!failed));
       } catch (e) {
         log(`thumbnail worker failed: ${e instanceof Error ? e.message : String(e)}`);
-        resolve();
+        resolve(false);
       }
     });
   const refreshMedia = (sequence: unknown): void => {
@@ -190,8 +225,16 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
       thumbsAgain = true;
       return;
     }
-    thumbsJob = runThumbsWorker(sequence).then(() => {
+    thumbsJob = runThumbsWorker(sequence).then((ok) => {
       thumbsJob = null;
+      if (ok) markThumbMissing(sequence);
+      // Scene URLs carry `s=1` once a picture exists; announcing them lets the
+      // window replace the pending placeholders it was answered with.
+      try {
+        broadcast("thumbs", { schema: LIVE_SCHEMA, scenes: buildScenes(lastSeq ?? sequence, token, root) });
+      } catch (e) {
+        log(`thumbs event failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
       if (thumbsAgain) {
         thumbsAgain = false;
         refreshMedia(lastSeq);
@@ -199,70 +242,58 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
     });
   };
   // Thumbnail serving: the window asks per scene (`/api/thumb/<id>?k=<key>` with
-  // the content key from the scene summary, or a bare id). A render pass that
-  // is still running is waited out in short slices, so each scene's request
-  // returns as soon as its own file lands instead of at the end of the whole
-  // pass. Once a full pass finished without producing the file, the scene
-  // genuinely has no picture (missing media; the worker logged G607) and gets
-  // a placeholder instead of a bare failure.
-  const THUMB_POLL_MS = 250;
-  const THUMB_WAIT_MS = 120_000;
+  // the content key from the scene summary, or a bare id). The file is served
+  // when ready; otherwise the request is answered at once with a placeholder
+  // image (never held open: a cold open asks for ~20 scenes while the browser
+  // allows 6 connections per host, so waiting would queue composition assets
+  // and API calls behind the thumbnails). The next snapshot/delta carries a
+  // new content-keyed `scene.thumb` URL once the picture exists, and the
+  // window's keyed reconcile reloads exactly that row's <img>.
   const THUMB_KEY_RE = /^[0-9a-f]{16}$/;
   const serveThumb = async (res: http.ServerResponse, sceneId: string, keyParam: string | null): Promise<void> => {
-    const t0 = Date.now();
-    let lastKey: string | null = null;
-    let waitedPass = false;
-    for (;;) {
-      let sequence: unknown;
-      try {
-        sequence = loadSequence(root).sequence;
-      } catch {
-        res.writeHead(500, { "Content-Type": MIME[".json"] }).end(JSON.stringify({ ok: false, note: "project state unreadable" }));
-        return;
-      }
-      const scene = buildScenes(sequence).find((s) => s.id === sceneId);
-      if (!scene) {
-        res.writeHead(404, { "Content-Type": MIME[".json"] }).end(JSON.stringify({ ok: false, note: `unknown scene '${sceneId}'` }));
-        return;
-      }
-      // A stale but existing render for an older key still shows a picture.
-      if (keyParam && THUMB_KEY_RE.test(keyParam)) {
-        const oldFile = sceneThumbFile(root, keyParam);
-        if (fs.existsSync(oldFile)) {
-          res.writeHead(200, { "Content-Type": "image/jpeg", "Cache-Control": "no-cache", ETag: `"${keyParam}"` });
-          fs.createReadStream(oldFile).pipe(res);
-          return;
-        }
-      }
-      const key = computeSceneThumbKey(sequence, scene);
-      const file = sceneThumbFile(root, key);
-      if (fs.existsSync(file)) {
-        res.writeHead(200, { "Content-Type": "image/jpeg", "Cache-Control": "no-cache", ETag: `"${key}"` });
-        fs.createReadStream(file).pipe(res);
-        return;
-      }
-      if (key !== lastKey) {
-        lastKey = key;
-        waitedPass = false;
-      }
-      if (!thumbsJob) {
-        if (waitedPass) {
-          const svg = thumbPlaceholderSvg(sceneId);
-          res.writeHead(200, { "Content-Type": "image/svg+xml", "Cache-Control": "no-store", "Content-Length": Buffer.byteLength(svg) });
-          res.end(svg);
-          return;
-        }
-        refreshMedia(sequence);
-      }
-      if (Date.now() - t0 > THUMB_WAIT_MS) {
-        log(DIAGNOSTICS.LIVE_THUMB_FAILED(sceneId, "timed out waiting for the thumbnail render").formatted);
-        res.writeHead(503, { "Content-Type": MIME[".json"] }).end(JSON.stringify({ ok: false, note: `thumbnail for '${sceneId}' is not ready yet (see G607 in the live server log)` }));
-        return;
-      }
-      if (thumbsJob) await Promise.race([thumbsJob, new Promise((r) => setTimeout(r, THUMB_POLL_MS))]);
-      else await new Promise((r) => setTimeout(r, THUMB_POLL_MS));
-      if (!thumbsJob) waitedPass = true;
+    let sequence: unknown;
+    try {
+      sequence = loadSequence(root).sequence;
+    } catch {
+      res.writeHead(500, { "Content-Type": MIME[".json"] }).end(JSON.stringify({ ok: false, note: "project state unreadable" }));
+      return;
     }
+    const scene = buildScenes(sequence).find((s) => s.id === sceneId);
+    if (!scene) {
+      res.writeHead(404, { "Content-Type": MIME[".json"] }).end(JSON.stringify({ ok: false, note: `unknown scene '${sceneId}'` }));
+      return;
+    }
+    // A stale but existing render for an older key still shows a picture.
+    if (keyParam && THUMB_KEY_RE.test(keyParam)) {
+      const oldFile = sceneThumbFile(root, keyParam);
+      if (fs.existsSync(oldFile)) {
+        res.writeHead(200, { "Content-Type": "image/jpeg", "Cache-Control": "no-cache", ETag: `"${keyParam}"` });
+        fs.createReadStream(oldFile).pipe(res);
+        return;
+      }
+    }
+    const key = computeSceneThumbKey(sequence, scene);
+    const file = sceneThumbFile(root, key);
+    if (fs.existsSync(file)) {
+      res.writeHead(200, { "Content-Type": "image/jpeg", "Cache-Control": "no-cache", ETag: `"${key}"` });
+      fs.createReadStream(file).pipe(res);
+      return;
+    }
+    // Not rendered yet: make sure a background pass is running, then answer
+    // at once. A key a finished pass could not produce (missing media; the
+    // worker logged G607) gets the final placeholder; anything else is still
+    // rendering and worth retrying after `Retry-After`.
+    if (!thumbsJob) refreshMedia(sequence);
+    const final = thumbMissing.has(key);
+    const svg = thumbPlaceholderSvg(sceneId, !final);
+    const headers: Record<string, string> = {
+      "Content-Type": "image/svg+xml",
+      "Cache-Control": "no-store",
+      "Content-Length": String(Buffer.byteLength(svg)),
+      "X-Thumbnail-Status": final ? "unavailable" : "pending",
+    };
+    if (!final) headers["Retry-After"] = "2";
+    res.writeHead(200, headers).end(svg);
   };
 
   // --- revision tracking -------------------------------------------------
@@ -479,12 +510,15 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
   // no token (fonts and images pulled in by CSS or scripts have no tokened
   // referer either). The window document sets a same-site cookie scoped to
   // /comp/ when it loads with the right token; the referer stays as a fallback.
-  const COMP_COOKIE = "cuthol_live_comp";
-  const compCookieToken = (req: http.IncomingMessage): string | null => {
+  // Browsers do not separate cookies by port, so two Live servers on 127.0.0.1 would
+  // overwrite each other's cookie: the name carries the port.
+  const compCookieName = (port: number): string => `cuthol_live_comp_${port}`;
+  const compCookieToken = (req: http.IncomingMessage, port: number): string | null => {
     const raw = req.headers.cookie ?? "";
+    const name = compCookieName(port);
     for (const part of raw.split(";")) {
       const [k, ...v] = part.trim().split("=");
-      if (k === COMP_COOKIE) return v.join("=") || null;
+      if (k === name) return v.join("=") || null;
     }
     return null;
   };
@@ -547,13 +581,18 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
         res.writeHead(403).end("forbidden");
         return;
       }
-      const tok =
-        url.searchParams.get("t") ??
-        req.headers["x-cuthol-live-token"] ??
-        (url.pathname.startsWith("/comp/") ? (compCookieToken(req) ?? refererToken(req)) : null);
+      // Every place a token can arrive from is checked against this server's token
+      // (a stale or foreign value in one does not hide a valid one in another).
+      const header = req.headers["x-cuthol-live-token"];
+      const candidates: Array<string | null | undefined> = [
+        url.searchParams.get("t"),
+        Array.isArray(header) ? header[0] : header,
+        ...(url.pathname.startsWith("/comp/") ? [compCookieToken(req, port), refererToken(req)] : []),
+      ];
+      const authorized = candidates.some((c) => typeof c === "string" && c.length > 0 && tokenMatches(c));
       // Static window files are public (they carry no project data); everything
       // else needs the per-server token.
-      if (isDataRoute(url.pathname) && !tokenMatches(tok)) {
+      if (isDataRoute(url.pathname) && !authorized) {
         res.writeHead(403).end("forbidden");
         return;
       }
@@ -571,6 +610,7 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
           send(res, "error", { message: String(e) });
         }
         clients.add(res);
+        refreshInfo();
         const keepalive = setInterval(() => {
           try {
             res.write(": keep-alive\n\n");
@@ -582,6 +622,7 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
           clearInterval(keepalive);
           clients.delete(res);
           lastDisconnectAt = Date.now();
+          refreshInfo();
         });
         return;
       }
@@ -657,6 +698,7 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
         return;
       }
       if (url.pathname === "/api/notes" && req.method === "POST") {
+        const tRecv = Date.now();
         let body: Record<string, unknown>;
         try {
           body = JSON.parse(await readBody(req)) as Record<string, unknown>;
@@ -665,15 +707,33 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
           return;
         }
         try {
+          const tQueued0 = Date.now();
           const posted = await handleLiveNotesPost(root, body, currentCursor(), log);
           lastInboxSig = peekLiveInbox(root).map((p) => p.id).join(",");
           broadcast("notes", peekLiveInbox(root));
-          log(`note packet ${posted.id} (${posted.stored}/${posted.received} notes stored)`);
+          log(`note packet ${posted.id} (${posted.stored}/${posted.received} notes): receive ${tQueued0 - tRecv} ms, queued in ${Date.now() - tRecv} ms total`);
           res
             .writeHead(200, { "Content-Type": MIME[".json"] })
             .end(JSON.stringify({ ok: true, id: posted.id, received: posted.received, stored: posted.stored, dropped_over_limit: posted.dropped_over_limit, dropped_invalid: posted.dropped_invalid }));
         } catch {
           res.writeHead(400).end("bad notes body");
+        }
+        return;
+      }
+      if (url.pathname === "/api/incident" && req.method === "POST") {
+        let body: unknown;
+        try {
+          body = JSON.parse(await readBody(req, 4 * 1024 * 1024));
+        } catch {
+          res.writeHead(400).end("bad json");
+          return;
+        }
+        try {
+          const stored = storeIncidentReport(root, body);
+          log(DIAGNOSTICS.LIVE_INCIDENT_STORED(`${(body as { id?: unknown; reason?: unknown }).id ?? "?"} (${String((body as { reason?: unknown }).reason ?? "?")}, ${stored.updated ? "outcome update" : "new"})`).formatted);
+          res.writeHead(200, { "Content-Type": MIME[".json"] }).end(JSON.stringify({ ok: true, file: stored.file, updated: stored.updated }));
+        } catch (e) {
+          res.writeHead(400, { "Content-Type": MIME[".json"] }).end(JSON.stringify({ ok: false, error: String(e instanceof Error ? e.message : e) }));
         }
         return;
       }
@@ -734,7 +794,7 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
         return;
       }
       if (url.pathname === "/" && tokenMatches(url.searchParams.get("t"))) {
-        res.setHeader("Set-Cookie", `${COMP_COOKIE}=${token}; Path=/comp/; HttpOnly; SameSite=Strict`);
+        res.setHeader("Set-Cookie", `${compCookieName(port)}=${token}; Path=/comp/; HttpOnly; SameSite=Strict`);
       }
       const rel = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
       const file = path.resolve(LIVE_UI_DIR, rel);
@@ -759,11 +819,23 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
   const port = (server.address() as { port: number }).port;
   const info: LiveServerInfo = { schema: LIVE_SCHEMA, pid: process.pid, port, token, started_at: new Date().toISOString(), project_dir: root, url: `http://127.0.0.1:${port}/?t=${token}` };
   writeJsonAtomically(lp.serverFile, info);
+  registerLiveServer({ pid: process.pid, port, project_dir: root, started_at: info.started_at });
+  const refreshInfo = (): void => {
+    try {
+      const cur = JSON.parse(fs.readFileSync(lp.serverFile, "utf8")) as Record<string, unknown>;
+      if (typeof cur.pid === "number" && cur.pid === process.pid) {
+        writeJsonAtomically(lp.serverFile, { ...cur, connected_windows: clients.size, updated_at: new Date().toISOString() });
+      }
+    } catch {
+      // info already gone
+    }
+  };
   log(`live server up on 127.0.0.1:${port} for ${root}`);
 
   const shutdown = (): void => {
     if (shuttingDown) return;
     shuttingDown = true;
+    unregisterLiveServer(process.pid, root);
     log("live server stopping");
     try {
       const cur = JSON.parse(fs.readFileSync(lp.serverFile, "utf8")) as LiveServerInfo;
@@ -871,10 +943,16 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
   await new Promise(() => {});
 }
 
-/** Inline SVG tile served (200) when a scene genuinely has no thumbnail (missing media). */
-function thumbPlaceholderSvg(sceneId: string): string {
+/**
+ * Inline SVG tile served (200) when a scene has no JPEG yet. While a render
+ * pass is still running the tile says the picture is on its way (`pending`
+ * true, served with `Retry-After`); once a full pass finished without
+ * producing the file the scene genuinely has no picture (missing media).
+ */
+function thumbPlaceholderSvg(sceneId: string, pending = false): string {
   const label = sceneId.replace(/[<>&"']/g, "");
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="135" viewBox="0 0 240 135"><rect width="240" height="135" fill="#1a1d21"/><text x="120" y="62" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#8a9099">Thumbnail unavailable</text><text x="120" y="82" text-anchor="middle" font-family="monospace" font-size="11" fill="#5a6068">${label}</text></svg>`;
+  const line = pending ? "Loading thumbnail…" : "Thumbnail unavailable";
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="135" viewBox="0 0 240 135"><rect width="240" height="135" fill="#1a1d21"/><text x="120" y="62" text-anchor="middle" font-family="sans-serif" font-size="13" fill="#8a9099">${line}</text><text x="120" y="82" text-anchor="middle" font-family="monospace" font-size="11" fill="#5a6068">${label}</text></svg>`;
 }
 
 function serveFile(req: http.IncomingMessage, res: http.ServerResponse, file: string): void {
@@ -895,12 +973,35 @@ function serveFile(req: http.IncomingMessage, res: http.ServerResponse, file: st
 
 export function getLiveStatus(projectDir: string): LiveStatus {
   const server = readServerInfo(projectDir);
-  return { running: !!server, server, lock: readLiveLock(projectDir), pending_packets: peekLiveInbox(projectDir).length };
+  let connected_windows = 0;
+  if (server) {
+    try {
+      const cur = JSON.parse(fs.readFileSync(resolveLivePaths(projectDir).serverFile, "utf8")) as { connected_windows?: unknown };
+      if (typeof cur.connected_windows === "number") connected_windows = cur.connected_windows;
+    } catch {
+      // no count yet
+    }
+  }
+  const incidents = summarizeIncidents(projectDir);
+  const others = server ? listLiveServers().filter((r) => path.resolve(r.project_dir) !== path.resolve(projectDir)) : listLiveServers();
+  const pending = peekLiveInbox(projectDir);
+  return {
+    running: !!server,
+    server,
+    lock: readLiveLock(projectDir),
+    pending_packets: pending.length,
+    pending_notes: formatLiveNoteLines(pending),
+    connected_windows,
+    incidents,
+    newest_incident: newestIncidentFile(projectDir),
+    other_servers: others.map((r) => ({ pid: r.pid, port: r.port, project_dir: r.project_dir })),
+  };
 }
 
 export async function stopLiveServer(projectDir: string): Promise<boolean> {
   const info = readServerInfo(projectDir);
   if (!info) return false;
+  unregisterLiveServer(info.pid, projectDir);
   try {
     process.kill(info.pid);
   } catch {

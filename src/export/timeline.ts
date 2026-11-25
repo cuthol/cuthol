@@ -18,6 +18,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { CutholSequence, LaneCue } from "../core/schema.js";
+import { seqToOutMs, tempoOf } from "../sequence/tempo.js";
 import { WorkspacePaths } from "../core/workspace.js";
 
 export type TimelineExportFormat = "fcpxml" | "xmeml" | "edl" | "otio";
@@ -41,6 +42,14 @@ export interface TimelineExportResult {
 
 function msToFrames(ms: number, fps: number): number {
   return Math.max(0, Math.round((ms / 1000) * fps));
+}
+
+/**
+ * Timeline position on the output clock: sequence tempo is applied at output,
+ * so exported timeline times are divided by the tempo (absent = 1).
+ */
+function tlOutMs(ms: number, seq: CutholSequence): number {
+  return seqToOutMs(ms, tempoOf(seq));
 }
 
 /** Absolute media path for a library handle (remote URIs pass through unchanged). */
@@ -84,12 +93,13 @@ function mapSpineClips(seq: CutholSequence, fps: number, libUri: Map<string, str
     mediaPath: resolveExportMediaPath(libUri.get(c.asset_handle) ?? c.asset_handle, rootDir),
     srcInF: msToFrames(c.source_in_ms, fps),
     srcOutF: msToFrames(c.source_out_ms, fps),
-    tlInF: msToFrames(c.timeline_in_ms, fps),
-    tlOutF: msToFrames(c.timeline_in_ms + c.duration_ms, fps),
-    rate: c.playback?.rate ?? 1,
+    tlInF: msToFrames(tlOutMs(c.timeline_in_ms, seq), fps),
+    tlOutF: msToFrames(tlOutMs(c.timeline_in_ms + c.duration_ms, seq), fps),
+    // The sequence tempo plays every clip faster by the same factor.
+    rate: (c.playback?.rate ?? 1) * tempoOf(seq),
     dissolveF:
       c.transition_out && c.transition_out.kind === "dissolve" && c.transition_out.duration_ms > 0
-        ? msToFrames(c.transition_out.duration_ms, fps)
+        ? msToFrames(tlOutMs(c.transition_out.duration_ms, seq), fps)
         : 0,
   }));
 }
@@ -121,9 +131,9 @@ function mapLaneCues(
       out.push({
         cue,
         mediaPath: handle ? resolveExportMediaPath(libUri.get(handle) ?? handle, rootDir) : null,
-        tlInF: msToFrames(cue.at_ms, fps),
-        tlOutF: msToFrames(cue.at_ms + cue.duration_ms, fps),
-        rate: cue.playback?.rate ?? 1,
+        tlInF: msToFrames(tlOutMs(cue.at_ms, seq), fps),
+        tlOutF: msToFrames(tlOutMs(cue.at_ms + cue.duration_ms, seq), fps),
+        rate: (cue.playback?.rate ?? 1) * tempoOf(seq),
         gainDb: laneGainDb(cue),
       });
     }
@@ -164,8 +174,8 @@ function collectCueRefs(
           cueId: cue.id,
           kind: cue.kind,
           overlayPath: overlay,
-          timelineMs: cue.at_ms,
-          durationMs: cue.duration_ms,
+          timelineMs: tlOutMs(cue.at_ms, seq),
+          durationMs: tlOutMs(cue.duration_ms, seq),
         });
         if (overlay) compAsOverlay += 1;
         else compAsMarker += 1;
@@ -234,7 +244,7 @@ function buildFcpxml(
     );
   }
   for (const m of seq.markers) {
-    lines.push(`<marker start="${f(msToFrames(m.at_ms, fps))}" duration="1/${tb}s" value="${xmlEscape(m.label)}"/>`);
+    lines.push(`<marker start="${f(msToFrames(tlOutMs(m.at_ms, seq), fps))}" duration="1/${tb}s" value="${xmlEscape(m.label)}"/>`);
   }
   lines.push(`</spine></sequence></project></event></library></fcpxml>`);
   return lines.join("\n");
@@ -246,7 +256,7 @@ function durationMs(seq: CutholSequence): number {
   for (const lane of seq.lanes) {
     for (const cue of lane.cues) end = Math.max(end, cue.at_ms + cue.duration_ms);
   }
-  return end;
+  return tlOutMs(end, seq);
 }
 
 function buildXmeml(
@@ -285,7 +295,7 @@ function buildXmeml(
   }
   for (const m of seq.markers) {
     lines.push(
-      `<marker><name>${xmlEscape(m.label)}</name><comment>marker</comment><in>${msToFrames(m.at_ms, fps)}</in><out>${msToFrames(m.at_ms, fps) + 1}</out></marker>`
+      `<marker><name>${xmlEscape(m.label)}</name><comment>marker</comment><in>${msToFrames(tlOutMs(m.at_ms, seq), fps)}</in><out>${msToFrames(tlOutMs(m.at_ms, seq), fps) + 1}</out></marker>`
     );
   }
   lines.push(`</sequence></xmeml>`);
@@ -311,9 +321,18 @@ function buildEdl(clips: MappedClip[], fps: number, title: string): string {
     lines.push(
       `${n}  AX       V     ${kind}        ${framesToTc(c.srcInF, fps)} ${framesToTc(c.srcOutF, fps)} ${framesToTc(c.tlInF, fps)} ${framesToTc(c.tlOutF, fps)}${dur}`.trimEnd()
     );
+    // CMX3600 motion effect: playback speed in frames per second for this event.
+    if (c.rate !== 1) {
+      lines.push(`M2   AX       ${(fps * c.rate).toFixed(1).padStart(5, "0")}    ${framesToTc(c.srcInF, fps)}`);
+    }
     lines.push(`* FROM CLIP NAME: ${c.name}`);
   });
   return lines.join("\n");
+}
+
+/** OpenTimelineIO speed change: the item plays its media `rate` times faster. */
+function otioTimeWarp(rate: number): Array<Record<string, unknown>> {
+  return rate !== 1 ? [{ OTIO_SCHEMA: "LinearTimeWarp.1", effect_name: "LinearTimeWarp", metadata: {}, name: "", time_scalar: rate }] : [];
 }
 
 function buildOtio(
@@ -339,12 +358,16 @@ function buildOtio(
   });
   const spineChildren = clips.map((c) => ({
     OTIO_SCHEMA: "Clip.1",
-    effects: c.dissolveF > 0 ? [{ OTIO_SCHEMA: "Effect.1", effect_name: "CrossDissolve", metadata: { duration_frames: c.dissolveF } }] : [],
+    effects: [
+      ...(c.dissolveF > 0 ? [{ OTIO_SCHEMA: "Effect.1", effect_name: "CrossDissolve", metadata: { duration_frames: c.dissolveF } }] : []),
+      ...otioTimeWarp(c.rate),
+    ],
     markers: [],
     media_reference: mediaRef(c.mediaPath),
     metadata: { cuthol_id: c.id, speed: c.rate },
     name: c.name,
-    source_range: tr(c.srcInF, c.srcOutF - c.srcInF),
+    // With a time warp the range is the item's length on the track; the warp maps it to media.
+    source_range: tr(c.srcInF, c.rate !== 1 ? c.tlOutF - c.tlInF : c.srcOutF - c.srcInF),
   }));
   const videoTracks = [
     {
@@ -354,7 +377,7 @@ function buildOtio(
       markers: seq.markers.map((m) => ({
         OTIO_SCHEMA: "Marker.1",
         color: "WHITE",
-        marked_range: tr(msToFrames(m.at_ms, fps), 1),
+        marked_range: tr(msToFrames(tlOutMs(m.at_ms, seq), fps), 1),
         metadata: {},
         name: m.label,
       })),
@@ -367,7 +390,7 @@ function buildOtio(
         ? [
             {
               OTIO_SCHEMA: "Clip.1",
-              effects: [],
+              effects: otioTimeWarp(v.rate),
               markers: [],
               media_reference: mediaRef(v.mediaPath),
               metadata: { cuthol_id: v.cue.id, speed: v.rate },

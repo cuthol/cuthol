@@ -200,12 +200,20 @@ test("all four export formats carry clip in/out frames and report gaps", () => {
       assert.equal(spineTrack.children.length, 6);
       const third = spineTrack.children[2];
       assert.equal(third.source_range.start_time.value, 60);
-      assert.equal(third.source_range.duration.value, 90);
+      // OTIO: a LinearTimeWarp does not change the item's duration, so the range is the
+      // 60 frames the clip occupies on the track; the 1.5x warp reads the 90 media frames.
+      assert.equal(third.source_range.duration.value, 60);
+      assert.deepEqual(
+        third.effects.filter((e: any) => e.OTIO_SCHEMA === "LinearTimeWarp.1").map((e: any) => e.time_scalar),
+        [1.5]
+      );
       assert.equal(third.metadata.speed, 1.5);
     }
     if (format === "edl") {
       assert.match(res.content, /FROM CLIP NAME: sp_03/);
       assert.match(res.content, /00:00:02:00 00:00:05:00 00:00:04:00 00:00:06:00/);
+      // CMX3600 motion effect for the 1.5x event: 45 fps at 30 fps.
+      assert.match(res.content, /M2 {3}AX {7}045\.0 {4}00:00:02:00/);
     }
     if (format === "fcpxml") {
       assert.match(res.content, /<clip name="sp_03"/);

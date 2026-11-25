@@ -547,6 +547,7 @@ test("2. G205 stops render with ERROR when project-scoped extension or compositi
     const g205 = verDrift.diagnostics.find((d) => d.code === "CUTHOL-G205");
     assert.ok(g205, "Expected CUTHOL-G205 diagnostic when extension source drifts");
     assert.match(g205.suggestion, /extension enable --name test_kit/);
+    assert.match(g205.suggestion, /delete your edited copy.*writes it again/);
 
     assert.throws(
       () =>

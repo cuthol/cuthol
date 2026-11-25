@@ -12,7 +12,9 @@ import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
-import puppeteer, { Browser, Page } from "puppeteer-core";
+// Types only: the browser library loads on the first launch, so a CLI start does not pay
+// for it (it was ~0.6 s of every command).
+import type { Browser, Page } from "puppeteer-core";
 import { CutholError, CutholDiagnostic, DIAGNOSTICS } from "../core/diagnostics.js";
 import { CutholSequence, LaneCue } from "../core/schema.js";
 import { spawnWatchedSync } from "../core/subprocess.js";
@@ -345,6 +347,7 @@ export async function launchScriptProbeBrowser(): Promise<Browser> {
 
 async function launchCoordsBrowser(): Promise<Browser> {
   coordsBrowserLaunchCount++;
+  const { default: puppeteer } = await import("puppeteer-core");
   return puppeteer.launch({
     executablePath: resolveCoordsChromePath(),
     headless: true,
@@ -567,8 +570,8 @@ async function closeCompositionPage(opened: OpenedComposition): Promise<void> {
   }
 }
 
-/** Serialized into the page: reports whether the main timeline registered. */
-function inpageTimelineStatus(): { expected: boolean; registered: boolean } {
+/** Serialized into the page: reports whether the main timeline registered and paused. */
+function inpageTimelineStatus(): { expected: boolean; registered: boolean; paused: boolean | null } {
   const w = window as unknown as Record<string, unknown>;
   const root =
     document.querySelector('[data-composition-id="main"]') ||
@@ -577,19 +580,39 @@ function inpageTimelineStatus(): { expected: boolean; registered: boolean } {
   const expected = root ? !root.hasAttribute("data-no-timeline") : true;
   const tls = (w.__timelines || {}) as Record<string, unknown>;
   const key = id || "main";
-  const tl = tls[key];
-  return { expected, registered: tl !== undefined && tl !== null };
+  const tl = tls[key] as { paused?: unknown } | undefined;
+  const registered = tl !== undefined && tl !== null;
+  let paused: boolean | null = null;
+  try {
+    if (registered && tl && typeof tl.paused === "function") {
+      paused = (tl.paused as () => unknown)() === true;
+    }
+  } catch {
+    paused = null;
+  }
+  return { expected, registered, paused };
 }
 
-async function readTimelineStatus(page: Page): Promise<{ expected: boolean; registered: boolean }> {
+export interface TimelineStatus {
+  expected: boolean;
+  registered: boolean;
+  paused: boolean | null;
+}
+
+async function readTimelineStatus(page: Page): Promise<TimelineStatus> {
   try {
     const res = (await page.evaluate(inpageTimelineStatus)) as {
       expected: boolean;
       registered: boolean;
+      paused: boolean | null;
     };
-    return { expected: res.expected !== false, registered: res.registered === true };
+    return {
+      expected: res.expected !== false,
+      registered: res.registered === true,
+      paused: typeof res.paused === "boolean" ? res.paused : null,
+    };
   } catch {
-    return { expected: true, registered: false };
+    return { expected: true, registered: false, paused: null };
   }
 }
 
@@ -687,6 +710,7 @@ export function writeCurrentScriptErrorRecord(
     source: CompositionScriptRecord["source"];
     timelineExpected: boolean;
     timelineRegistered: boolean;
+    timelinePaused?: boolean | null;
     errors: CompositionScriptError[];
   }
 ): CompositionScriptRecord {
@@ -698,6 +722,7 @@ export function writeCurrentScriptErrorRecord(
     source: params.source,
     timelineExpected: params.timelineExpected,
     timelineRegistered: params.timelineRegistered,
+    timelinePaused: params.timelinePaused,
     errors: params.errors,
   });
   writeScriptErrorRecord(projectDir, record, toolTag);
@@ -719,6 +744,7 @@ export interface ScriptProbeResult {
   errors: CompositionScriptError[];
   timelineExpected: boolean;
   timelineRegistered: boolean;
+  timelinePaused: boolean | null;
   ms: number;
 }
 
@@ -804,6 +830,10 @@ export async function probeCompositionScriptErrors(
       await sleep(250);
       status = await readTimelineStatus(page);
     }
+    // Pause state is judged before the seeks below: seeking pauses every
+    // timeline by design (matches the renderer), so a post-seek read would
+    // always say "paused".
+    const pausedBeforeSeek = status.paused;
     // Timeline samples fire `tl.call` callbacks like render seeks do. A throw inside
     // the evaluated seek rejects here instead of emitting `pageerror` (the exception
     // crosses the CDP bridge), so a rejected seek is itself a run-phase page error.
@@ -846,6 +876,7 @@ export async function probeCompositionScriptErrors(
       errors: collectPageScriptErrors(issues, rejections, loadEndMs),
       timelineExpected: status.expected,
       timelineRegistered: status.registered,
+      timelinePaused: pausedBeforeSeek ?? status.paused,
       ms: Date.now() - t0,
     };
   } finally {
@@ -1575,12 +1606,17 @@ async function measureMisses(
           const rejections = await drainRecordedRejections(opened.page);
           const status = await readTimelineStatus(opened.page);
           const scriptErrors = collectPageScriptErrors(opened.issues, rejections, loadEndMs);
+          // Pause state is unreadable here (measurement seeks pause every
+          // timeline by design): keep a previous probe's judgment when one
+          // exists instead of recording a false "paused".
+          const prior = readCurrentScriptErrorRecord(projectDir, m.absCompDir, m.entryHtml);
           writeCurrentScriptErrorRecord(projectDir, {
             absCompDir: m.absCompDir,
             entryHtml: m.entryHtml,
             source: "coords",
             timelineExpected: status.expected,
             timelineRegistered: status.registered,
+            timelinePaused: prior?.timeline_paused ?? null,
             errors: scriptErrors,
           });
         } catch {

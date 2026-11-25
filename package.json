@@ -23,7 +23,9 @@
     "typecheck": "tsc --noEmit",
     "test": "node scripts/test.mjs",
     "test:serial": "node --import ./dist/test/test_setup.js --test --test-concurrency=1 dist/test/*.test.js",
-    "cuthol": "node dist/cli.js"
+    "cuthol": "node dist/cli.js",
+    "test:fast": "node scripts/test.mjs --fast",
+    "test:tiers": "node scripts/test-tiers.mjs"
   },
   "engines": {
     "node": ">=22.5.0"

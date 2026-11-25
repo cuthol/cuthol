@@ -10,6 +10,11 @@ import { OPEN_STANDARDS } from "./standards.js";
 import type { ColorLookSpec, ColorSourceSpec, ColorStageSpec } from "../color/types.js";
 
 export type AspectPreset = "9:16" | "16:9" | "1:1" | "4:5";
+/**
+ * Stored stage aspect: one of the presets, or "custom" when the stage has a free
+ * width x height (then `stage.width/height` are the only source of truth).
+ */
+export type StageAspect = AspectPreset | "custom";
 
 export type AssetKind = "footage" | "audio" | "graphic" | "voiceover" | "composition";
 
@@ -367,8 +372,16 @@ export interface CutholSequence {
   stage: {
     width: number;
     height: number;
-    aspect: AspectPreset;
+    aspect: StageAspect;
+    /** True when the stage size was set explicitly (init --aspect/--size, stage command, cue sheet). */
+    set_explicit?: boolean;
     fps: number;
+    /**
+     * Sequence playback rate applied at output (1.1 = 10% faster). Absent = 1.
+     * Cue times, compositions and transcripts stay on the sequence clock; render,
+     * monitor, Live preview, timeline export and output duration apply the rate.
+     */
+    tempo?: number;
     timebase: "ms";
     color_space: "bt709";
     backdrop: {
@@ -404,6 +417,37 @@ export interface CutholSequence {
    * behaviour for this project (`live config` to change; G1 ignores it).
    */
   review?: Record<string, unknown> & { live_mode?: "ask" | "on" | "off" };
+}
+
+export const STAGE_SIZE_LIMITS = {
+  MIN_SIDE: 16,
+  MAX_SIDE: 8192,
+} as const;
+
+export function parseStageSize(raw: string): { width: number; height: number } {
+  const m = /^\s*(\d+)\s*x\s*(\d+)\s*$/i.exec(raw ?? "");
+  if (!m) {
+    throw new Error(
+      `Invalid stage size '${raw ?? ""}'. Use WIDTHxHEIGHT with even numbers, e.g. --size 1920x800.`
+    );
+  }
+  const width = Number(m[1]);
+  const height = Number(m[2]);
+  if (
+    !Number.isInteger(width) ||
+    !Number.isInteger(height) ||
+    width % 2 !== 0 ||
+    height % 2 !== 0 ||
+    width < STAGE_SIZE_LIMITS.MIN_SIDE ||
+    height < STAGE_SIZE_LIMITS.MIN_SIDE ||
+    width > STAGE_SIZE_LIMITS.MAX_SIDE ||
+    height > STAGE_SIZE_LIMITS.MAX_SIDE
+  ) {
+    throw new Error(
+      `Invalid stage size '${raw}'. Use WIDTHxHEIGHT with even numbers between ${STAGE_SIZE_LIMITS.MIN_SIDE} and ${STAGE_SIZE_LIMITS.MAX_SIDE}, e.g. --size 1920x800.`
+    );
+  }
+  return { width, height };
 }
 
 export function resolveAspectDimensions(aspect: AspectPreset): { width: number; height: number } {
@@ -491,9 +535,12 @@ export function createEmptySequence(options: {
   title: string;
   aspect?: AspectPreset;
   fps?: number;
+  size?: { width: number; height: number };
+  stageExplicit?: boolean;
 }): CutholSequence {
-  const aspect = options.aspect ?? "9:16";
-  const { width, height } = resolveAspectDimensions(aspect);
+  const size = options.size;
+  const aspect: StageAspect = size ? "custom" : (options.aspect ?? "9:16");
+  const { width, height } = size ?? resolveAspectDimensions(aspect as AspectPreset);
   const now = new Date().toISOString();
 
   return {
@@ -510,6 +557,7 @@ export function createEmptySequence(options: {
       width,
       height,
       aspect,
+      ...(options.stageExplicit ? { set_explicit: true as const } : {}),
       fps: options.fps ?? 30,
       timebase: "ms",
       color_space: "bt709",

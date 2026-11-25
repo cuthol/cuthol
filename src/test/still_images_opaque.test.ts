@@ -27,20 +27,34 @@ function cli(args: string[]): { ok: boolean; result: any; raw: string } {
   return { ok: Boolean(env?.ok), result: env?.result ?? env, raw: raw.slice(0, 2000) + (proc.stderr ?? "").slice(0, 1000) };
 }
 
+/** Identical lavfi sources for both tests: generate once per checkout, copy per test. */
+function sharedStillAndVideo(): { png: string; mp4: string } {
+  const cacheDir = path.join(TEST_ROOT, ".cache-still-shared");
+  fs.mkdirSync(cacheDir, { recursive: true });
+  const png = path.join(cacheDir, "bg.png");
+  const mp4 = path.join(cacheDir, "clip.mp4");
+  if (!fs.existsSync(png) || !fs.existsSync(mp4)) {
+    assert.equal(
+      spawnSync("ffmpeg", ["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=0xF0E8D0:s=320x320", "-frames:v", "1", png]).status,
+      0
+    );
+    assert.equal(
+      spawnSync("ffmpeg", [
+        "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=s=320x320:r=30:d=3",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", mp4,
+      ]).status,
+      0
+    );
+  }
+  return { png, mp4 };
+}
+
 function makeStillAndVideo(wsDir: string): { png: string; mp4: string } {
+  const shared = sharedStillAndVideo();
   const png = path.join(wsDir, "bg.png");
   const mp4 = path.join(wsDir, "clip.mp4");
-  assert.equal(
-    spawnSync("ffmpeg", ["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=0xF0E8D0:s=320x320", "-frames:v", "1", png]).status,
-    0
-  );
-  assert.equal(
-    spawnSync("ffmpeg", [
-      "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=s=320x320:r=30:d=3",
-      "-c:v", "libx264", "-pix_fmt", "yuv420p", mp4,
-    ]).status,
-    0
-  );
+  fs.copyFileSync(shared.png, png);
+  fs.copyFileSync(shared.mp4, mp4);
   return { png, mp4 };
 }
 

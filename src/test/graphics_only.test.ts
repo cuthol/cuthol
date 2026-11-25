@@ -14,6 +14,10 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { scaffoldHyperFramesComposition } from "../compositor/hyperframes_bridge.js";
+import { initWorkspace, loadSequence } from "../core/workspace.js";
+import { ingestAssetsIntoWorkspace } from "../library/probe.js";
+import { addLaneCue } from "../sequence/lanes.js";
 
 const TEST_ROOT = path.resolve(process.cwd(), "test-workspace");
 const CLI = path.resolve(process.cwd(), "dist/cli.js");
@@ -61,21 +65,40 @@ function countFrames(mp4: string): number {
 function setUpGraphicsOnlyWorkspace(name: string): { wsDir: string; compDir: string } {
   const wsDir = path.join(TEST_ROOT, name);
   fs.rmSync(wsDir, { recursive: true, force: true });
-  assert.ok(cli(["workspace", "init", wsDir, "--aspect", "1:1", "--fps", "30"]).ok);
+  initWorkspace({ dir: wsDir, aspect: "1:1", fps: 30, stageExplicit: true });
 
   const wav = path.join(wsDir, "vo.wav");
   assert.equal(
     spawnSync("ffmpeg", ["-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=220:sample_rate=48000:duration=4", "-ac", "2", wav]).status,
     0
   );
-  const ingest = cli(["library", "ingest", wav, "--dir", wsDir]);
-  assert.ok(ingest.ok, ingest.raw);
-  const vo = cli(["lane", "add-cue", "--lane", "ln_vo", "--kind", "voiceover", "--asset", "aud_01", "--at", "0ms", "--duration", "4000ms", "--dir", wsDir]);
-  assert.ok(vo.ok, vo.raw);
+  const ingested = ingestAssetsIntoWorkspace({ workspaceDir: wsDir, filePaths: [wav] });
+  assert.equal(ingested.length, 1);
+  assert.equal(ingested[0].handle, "aud_01");
+  const { cue: voCue } = addLaneCue({
+    workspaceDir: wsDir,
+    laneId: "ln_vo",
+    kind: "voiceover",
+    assetHandle: "aud_01",
+    atMs: 0,
+    durationMs: 4000,
+    explicitDuration: true,
+  });
+  assert.equal(voCue.asset_handle, "aud_01");
+  assert.equal(voCue.duration_ms, 4000);
 
+  const { sequence } = loadSequence(wsDir);
   const compDir = path.join(wsDir, "compositions", "card");
-  const scaffold = cli(["composition", "scaffold", "--comp-dir", compDir, "--duration", "3s", "--dir", wsDir]);
-  assert.ok(scaffold.ok, scaffold.raw);
+  scaffoldHyperFramesComposition({
+    targetDir: compDir,
+    width: sequence.stage.width,
+    height: sequence.stage.height,
+    fps: sequence.stage.fps,
+    durationMs: 3000,
+    preset: "counter",
+    props: {},
+    transparent: true,
+  });
   const indexHtml = path.join(compDir, "index.html");
   const html = fs.readFileSync(indexHtml, "utf8");
   fs.writeFileSync(
@@ -83,7 +106,30 @@ function setUpGraphicsOnlyWorkspace(name: string): { wsDir: string; compDir: str
     html.replace("</style>", `  html, body, #root { background: ${COMP_COLOR} !important; }\n</style>`),
     "utf8"
   );
+  assert.match(fs.readFileSync(indexHtml, "utf8"), new RegExp(COMP_COLOR.replace("#", "#?")));
   return { wsDir, compDir };
+}
+
+/** Mount the shared card composition on ln_motion; returns the new cue id. */
+function mountCard(wsDir: string, compDir: string, atMs: number, durationMs: number): string {
+  const { cue } = addLaneCue({
+    workspaceDir: wsDir,
+    laneId: "ln_motion",
+    kind: "composition",
+    atMs,
+    durationMs,
+    explicitDuration: true,
+    composition: {
+      composition_dir: compDir,
+      entry_html: "index.html",
+      props: {},
+      transparent: true,
+    },
+  });
+  assert.ok(cue.composition);
+  assert.equal(cue.at_ms, atMs);
+  assert.equal(cue.duration_ms, durationMs);
+  return cue.id;
 }
 
 test("1. Graphics-only project: length from lanes, clean verify, render shows the compositions", () => {
@@ -95,10 +141,8 @@ test("1. Graphics-only project: length from lanes, clean verify, render shows th
   assert.ok(codes(voOnly.result.diagnostics).includes("CUTHOL-G308"), voOnly.raw);
 
   // Two compositions back to back cover 0..4400 ms, past the 4000 ms voiceover.
-  const c1 = cli(["lane", "add-composition", "--lane", "ln_motion", "--comp-dir", compDir, "--at", "0ms", "--duration", "2000ms", "--dir", wsDir]);
-  assert.ok(c1.ok, c1.raw);
-  const c2 = cli(["lane", "add-composition", "--lane", "ln_motion", "--comp-dir", compDir, "--at", "2000ms", "--duration", "2400ms", "--dir", wsDir]);
-  assert.ok(c2.ok, c2.raw);
+  mountCard(wsDir, compDir, 0, 2000);
+  mountCard(wsDir, compDir, 2000, 2400);
 
   const verify = cli(["verify", "--dir", wsDir]);
   assert.ok(verify.ok, verify.raw);
@@ -143,7 +187,7 @@ test("1. Graphics-only project: length from lanes, clean verify, render shows th
 
 test("2. Backdrop-only stretch in a graphics-only project is reported by verify and the render scan", () => {
   const { wsDir, compDir } = setUpGraphicsOnlyWorkspace("backdrop_gap");
-  assert.ok(cli(["lane", "add-composition", "--lane", "ln_motion", "--comp-dir", compDir, "--at", "0ms", "--duration", "2000ms", "--dir", wsDir]).ok);
+  mountCard(wsDir, compDir, 0, 2000);
 
   const verify = cli(["verify", "--dir", wsDir]);
   assert.ok(verify.ok, verify.raw);
@@ -168,7 +212,8 @@ test("2. Backdrop-only stretch in a graphics-only project is reported by verify 
 test("3. An empty project is reported clearly: verify warns, render refuses", () => {
   const wsDir = path.join(TEST_ROOT, "empty");
   fs.rmSync(wsDir, { recursive: true, force: true });
-  assert.ok(cli(["workspace", "init", wsDir, "--aspect", "16:9", "--fps", "30"]).ok);
+  initWorkspace({ dir: wsDir, aspect: "16:9", fps: 30, stageExplicit: true });
+  assert.ok(fs.existsSync(path.join(wsDir, "cuthol.sequence.json")));
 
   const verify = cli(["verify", "--dir", wsDir]);
   assert.ok(verify.ok, verify.raw);
@@ -190,7 +235,7 @@ test("3. An empty project is reported clearly: verify warns, render refuses", ()
 
 test("4. workspace backdrop sets the base colour (journaled, undoable) and render, monitor and blank scan use it", () => {
   const { wsDir, compDir } = setUpGraphicsOnlyWorkspace("backdrop_color");
-  assert.ok(cli(["lane", "add-composition", "--lane", "ln_motion", "--comp-dir", compDir, "--at", "0ms", "--duration", "2000ms", "--dir", wsDir]).ok);
+  mountCard(wsDir, compDir, 0, 2000);
   const seqFile = path.join(wsDir, "cuthol.sequence.json");
   const readColor = (): string => JSON.parse(fs.readFileSync(seqFile, "utf8")).stage.backdrop.color;
   const before = readColor();

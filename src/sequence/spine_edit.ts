@@ -1,6 +1,6 @@
 // Spine edit operations: append, split, trim, excise, remove, reorder, transform, speed, transition, envelope, mute (split out of spine.ts).
 import { resolveCueStartMs } from "../core/timeline.js";
-import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
+import { CutholDiagnostic, CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
 import {
   allocateNextHandle,
   createDefaultAudioChain,
@@ -18,6 +18,8 @@ import { commitVerifiedMutation, VerificationReport } from "../verify/gates.js";
 import { getSequenceEffectRegistry, isExtensionEffectRef } from "../extensions/ext_effects.js";
 import { resolveTransitionParams } from "../extensions/ext_transitions.js";
 import { sliceEnvelopes, sliceReframeFocalPoints } from "./spine_envelope.js";
+import { isKnownEnvelopeParameter, suggestEnvelopeParameter } from "./envelope_params.js";
+import { isProjectEmptyForAdoption, maybeAdoptStageFromFirstSource } from "./stage_adopt.js";
 import { reflowSpine, clipLocalMsToSourceMs, sliceSpeedRamp, computeClipDurationMs, sourceMsToClipLocalMs, TimeCoordinateSpace, sequenceMsToSourceMs, invertClipLocalMsToSourceOffset, integrateSourceOffsetToClipLocalMs } from "./spine_time.js";
 
 export function appendSpineClip(options: {
@@ -27,6 +29,7 @@ export function appendSpineClip(options: {
   sourceOutMs?: number;
   explicitId?: string;
 }): { clip: SpineClip; revision: number; verification: VerificationReport } {
+  let stageNote: CutholDiagnostic | null = null;
   const { result, revision, verification } = commitVerifiedMutation(
     options.workspaceDir,
     `spine.append(${options.assetHandle})`,
@@ -35,6 +38,7 @@ export function appendSpineClip(options: {
       if (!asset) {
         throw new CutholError(DIAGNOSTICS.UNKNOWN_HANDLE(options.assetHandle));
       }
+      const emptyBefore = isProjectEmptyForAdoption(seq);
 
       const sourceInMs = options.sourceInMs ?? 0;
       const sourceOutMs = options.sourceOutMs ?? asset.probe.duration_ms;
@@ -64,10 +68,18 @@ export function appendSpineClip(options: {
 
       seq.spine.clips.push(newClip);
       reflowSpine(seq);
+      if (emptyBefore && asset.probe.has_video) {
+        stageNote = maybeAdoptStageFromFirstSource(
+          seq,
+          { width: asset.probe.width, height: asset.probe.height },
+          "cuthol workspace journal undo"
+        );
+      }
       return newClip;
     }
   );
 
+  if (stageNote) verification.diagnostics.push(stageNote);
   return { clip: result, revision, verification };
 }
 
@@ -862,6 +874,15 @@ export function setItemEnvelope(options: {
   parameter: ParameterEnvelope["parameter"];
   points: ParameterEnvelopePoint[];
 }): { envelope: ParameterEnvelope; revision: number; verification: VerificationReport } {
+  if (!isKnownEnvelopeParameter(options.parameter)) {
+    throw new CutholError(
+      DIAGNOSTICS.ENVELOPE_UNKNOWN_PARAMETER(
+        options.parameter,
+        options.targetId,
+        suggestEnvelopeParameter(options.parameter)
+      )
+    );
+  }
   const { result, revision, verification } = commitVerifiedMutation(
     options.workspaceDir,
     `envelope.set(${options.targetId},${options.parameter})`,

@@ -180,6 +180,12 @@ export interface CutholGlobalRuntimeApi {
   ): T;
 }
 
+export interface CutholSeqClock {
+  start: Sec;
+  toLocal(seqSec: Sec): Sec;
+  toSequence(localSec: Sec): Sec;
+}
+
 export interface CutholRuntimeApi {
   ok: boolean;
   schema: string;
@@ -213,6 +219,7 @@ export interface CutholRuntimeApi {
   frame(t: Sec): Sec;
   toGlobal(localSec: Sec): Sec;
   toLocal(globalSec: Sec): Sec;
+  seq: CutholSeqClock;
   word(
     query: string,
     opts?: {
@@ -250,11 +257,11 @@ export interface CutholRuntimeApi {
   drive<T extends GsapLikeTimeline>(
     tl: T,
     fn: (tSec: Sec) => void,
-    opts?: { start?: Sec; end?: Sec }
+    opts?: { start?: Sec; end?: Sec; clock?: "local" | "sequence" }
   ): T;
   value<T extends GsapLikeTimeline>(
     tl: T,
-    spec: { from?: number; to: number; at?: Sec; duration?: Sec; ease?: string },
+    spec: { from?: number; to: number; at?: Sec; duration?: Sec; ease?: string; clock?: "local" | "sequence" },
     fn: (val: number) => void
   ): T;
 }
@@ -312,6 +319,33 @@ function clamp(v: number, min: number, max: number): number {
 
 function isFiniteNum(x: unknown): x is number {
   return typeof x === "number" && Number.isFinite(x);
+}
+
+function fmtSec(t: number): string {
+  return `${Number(t.toFixed(4))}s`;
+}
+
+/**
+ * Interprets a time on the requested clock and reports (instead of silently
+ * clamping) when it falls outside the composition window.
+ */
+function resolveClockTime(
+  raw: number,
+  clock: "local" | "sequence" | undefined,
+  cueStart: Sec,
+  D: Sec,
+  warnings: string[],
+  helper: string,
+  arg: string
+): number {
+  const local = clock === "sequence" ? raw - cueStart : raw;
+  if (local < 0 || (D > 0 && local > D)) {
+    const shown = clock === "sequence" ? `${fmtSec(raw)} sequence` : fmtSec(raw);
+    warnings.push(
+      `${helper} ${arg} ${shown} is outside the composition window [0, ${fmtSec(D)}] and was clamped`
+    );
+  }
+  return clamp(local, 0, D);
 }
 
 export function createCutholRuntime(
@@ -930,8 +964,9 @@ export function createCutholRuntime(
     },
     drive(tl, fn, opts) {
       const o = opts ?? {};
-      const s = clamp(o.start ?? 0, 0, globalD);
-      const e = clamp(o.end ?? globalD, s, globalD);
+      const s = resolveClockTime(o.start ?? 0, undefined, 0, globalD, warnings, "C.global.drive", "start");
+      const eRaw = resolveClockTime(o.end ?? globalD, undefined, 0, globalD, warnings, "C.global.drive", "end");
+      const e = Math.max(eRaw, s);
       let cur = s;
       const proxy: Record<string, unknown> = {
         t(v?: number) {
@@ -958,7 +993,7 @@ export function createCutholRuntime(
     value(tl, spec, fn) {
       const fromVal = spec.from ?? 0;
       const toVal = spec.to;
-      const atSec = clamp(spec.at ?? 0, 0, globalD);
+      const atSec = resolveClockTime(spec.at ?? 0, undefined, 0, globalD, warnings, "C.global.value", "at");
       const durSec = Math.max(spec.duration ?? 0.6, 1 / FPS);
       let cur = fromVal;
       const proxy: Record<string, unknown> = {
@@ -1034,6 +1069,11 @@ export function createCutholRuntime(
     },
     toGlobal,
     toLocal,
+    seq: {
+      start: cueStart,
+      toLocal: (seqSec: Sec): Sec => toLocal(seqSec),
+      toSequence: (localSec: Sec): Sec => toGlobal(localSec),
+    },
 
     // 1. Word / Phrase Lookup
     word(query, opts) {
@@ -1179,8 +1219,12 @@ export function createCutholRuntime(
     // 5. GSAP seek()-safe Continuous Driver
     drive(tl, fn, opts) {
       const o = opts ?? {};
-      const s = clamp(o.start ?? 0, 0, D);
-      const e = clamp(o.end ?? D, s, D);
+      const onSeqClock = o.clock === "sequence";
+      const startRaw = o.start ?? (onSeqClock ? cueStart : 0);
+      const endRaw = o.end ?? (onSeqClock ? cueEnd : D);
+      const s = resolveClockTime(startRaw, o.clock, cueStart, D, warnings, "C.drive", "start");
+      const eRaw = resolveClockTime(endRaw, o.clock, cueStart, D, warnings, "C.drive", "end");
+      const e = Math.max(eRaw, s);
       let cur = s;
       const proxy: Record<string, unknown> = {
         t(v?: number) {
@@ -1209,7 +1253,7 @@ export function createCutholRuntime(
     value(tl, spec, fn) {
       const fromVal = spec.from ?? 0;
       const toVal = spec.to;
-      const atSec = clamp(spec.at ?? 0, 0, D);
+      const atSec = resolveClockTime(spec.at ?? 0, spec.clock, cueStart, D, warnings, "C.value", "at");
       const durSec = Math.max(spec.duration ?? 0.6, 1 / FPS);
       let cur = fromVal;
       const proxy: Record<string, unknown> = {
@@ -1276,6 +1320,19 @@ export function getCutholRuntimeJsSource(): string {
 
   function clamp(v, min, max) {
     return v < min ? min : v > max ? max : v;
+  }
+
+  function fmtSec(t) {
+    return (+t.toFixed(4)) + "s";
+  }
+
+  function resolveClockTime(raw, clock, cueStartSec, dur, warningsArr, helper, arg) {
+    var local = clock === "sequence" ? raw - cueStartSec : raw;
+    if (local < 0 || (dur > 0 && local > dur)) {
+      var shown = clock === "sequence" ? fmtSec(raw) + " sequence" : fmtSec(raw);
+      warningsArr.push(helper + " " + arg + " " + shown + " is outside the composition window [0, " + fmtSec(dur) + "] and was clamped");
+    }
+    return clamp(local, 0, dur);
   }
 
   function isFiniteNum(x) {
@@ -1721,8 +1778,9 @@ export function getCutholRuntimeJsSource(): string {
       },
       drive: function (tl, fn, opts) {
         var o = opts || {};
-        var s = clamp(o.start != null ? o.start : 0, 0, globalD);
-        var e = clamp(o.end != null ? o.end : globalD, s, globalD);
+        var s = resolveClockTime(o.start != null ? o.start : 0, undefined, 0, globalD, warnings, "C.global.drive", "start");
+        var eRaw = resolveClockTime(o.end != null ? o.end : globalD, undefined, 0, globalD, warnings, "C.global.drive", "end");
+        var e = Math.max(eRaw, s);
         var cur = s;
         var proxy = {
           t: function (v) {
@@ -1736,7 +1794,7 @@ export function getCutholRuntimeJsSource(): string {
       value: function (tl, spec, fn) {
         var fromVal = spec.from != null ? spec.from : 0;
         var toVal = spec.to;
-        var atSec = clamp(spec.at != null ? spec.at : 0, 0, globalD);
+        var atSec = resolveClockTime(spec.at != null ? spec.at : 0, undefined, 0, globalD, warnings, "C.global.value", "at");
         var durSec = Math.max(spec.duration != null ? spec.duration : 0.6, 1 / FPS);
         var cur = fromVal;
         var proxy = {
@@ -1799,6 +1857,11 @@ export function getCutholRuntimeJsSource(): string {
       frame: function (t) { return Math.round(t * FPS) / FPS; },
       toGlobal: toGlobal,
       toLocal: toLocal,
+      seq: {
+        start: cueStart,
+        toLocal: function (seqSec) { return toLocal(seqSec); },
+        toSequence: function (localSec) { return toGlobal(localSec); }
+      },
 
       word: function (query, opts) {
         var o = opts || {};
@@ -1909,8 +1972,12 @@ export function getCutholRuntimeJsSource(): string {
 
       drive: function (tl, fn, opts) {
         var o = opts || {};
-        var s = clamp(o.start != null ? o.start : 0, 0, D);
-        var e = clamp(o.end != null ? o.end : D, s, D);
+        var onSeqClock = o.clock === "sequence";
+        var startRaw = o.start != null ? o.start : (onSeqClock ? cueStart : 0);
+        var endRaw = o.end != null ? o.end : (onSeqClock ? cueEnd : D);
+        var s = resolveClockTime(startRaw, o.clock, cueStart, D, warnings, "C.drive", "start");
+        var eRaw = resolveClockTime(endRaw, o.clock, cueStart, D, warnings, "C.drive", "end");
+        var e = Math.max(eRaw, s);
         var cur = s;
         var proxy = {
           t: function (v) {
@@ -1925,7 +1992,7 @@ export function getCutholRuntimeJsSource(): string {
       value: function (tl, spec, fn) {
         var fromVal = spec.from != null ? spec.from : 0;
         var toVal = spec.to;
-        var atSec = clamp(spec.at != null ? spec.at : 0, 0, D);
+        var atSec = resolveClockTime(spec.at != null ? spec.at : 0, spec.clock, cueStart, D, warnings, "C.value", "at");
         var durSec = Math.max(spec.duration != null ? spec.duration : 0.6, 1 / FPS);
         var cur = fromVal;
         var proxy = {

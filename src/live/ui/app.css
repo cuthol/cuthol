@@ -22,8 +22,12 @@ button { font: inherit; color: inherit; }
 
 /* tall project (9:16): preview is a full-height column, everything else stacks right */
 body.tall .mid { overflow: hidden; }
-body.tall .pvwrap { flex: none; }
-body.tall .pvwrap > [data-region="preview"] { width: var(--pv-tall-w); }
+body.tall .pvwrap { flex: none; min-width: 0; }
+body.tall .pvwrap > [data-region="preview"] { width: var(--pv-tall-w); max-width: 100%; min-width: 0; }
+/* The tall preview column is only 420 px wide: the time readout would push the
+   volume end of the bar out of view, so it gives way here at every size. */
+body.tall .pv-time { display: none; }
+body.tall .pv-vol { width: 56px; }
 body.tall .right { flex: 1 1 auto; width: auto; overflow: hidden; }
 body.tall .right > [data-region="scenes"] { flex: none; max-height: 220px; }
 body.tall .right > [data-region="activity"] { flex: 1.2 1 120px; }

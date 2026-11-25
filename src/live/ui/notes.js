@@ -49,6 +49,63 @@ export function groupNotesByFrame(items) {
   return groups;
 }
 
+/** All drafts flat, ordered for stable packet numbering (time, then creation). */
+export function orderedDrafts(drafts) {
+  const all = [];
+  for (const list of drafts?.values?.() ?? []) for (const d of list) all.push(d);
+  all.sort((a, b) => (a.at_ms - b.at_ms) || (a.uid - b.uid));
+  return all;
+}
+
+/** Number drafts 1..N across the whole packet, stable in pins, list and lines. */
+export function renumberAll(drafts) {
+  for (const [i, d] of orderedDrafts(drafts).entries()) d.n = i + 1;
+}
+
+/** Composition cue ids in sequence order (for range from/to picks). */
+export function cueOptions(sequence) {
+  const out = [];
+  for (const lane of sequence?.lanes ?? []) for (const cue of lane?.cues ?? []) out.push(cue.id);
+  return out;
+}
+
+/** Topmost composition cue at a sequence time, else the spine clip (the scene). */
+export function cueAtTimeSeq(sequence, atMs) {
+  const lanes = [...(sequence?.lanes ?? [])].sort((a, b) => (a.z_index ?? 0) - (b.z_index ?? 0));
+  let best;
+  for (const lane of lanes) {
+    const cues = [...(lane?.cues ?? [])].sort((a, b) => (a.z_index ?? 0) - (b.z_index ?? 0));
+    for (const cue of cues) {
+      const start = cue.at_ms ?? 0;
+      if (atMs >= start && atMs < start + (cue.duration_ms ?? 0)) best = cue.id;
+    }
+  }
+  if (best) return best;
+  for (const c of sequence?.spine?.clips ?? []) {
+    if (atMs >= (c.at_ms ?? 0) && atMs < (c.at_ms ?? 0) + (c.duration_ms ?? 0)) return c.id;
+  }
+  return undefined;
+}
+
+/** Cuts between consecutive cues (end of one ≈ start of the next). */
+export function cueBoundaries(sequence, fps) {
+  const frameMs = 1000 / Math.max(1, fps ?? 30);
+  const cues = [];
+  for (const lane of sequence?.lanes ?? []) {
+    for (const cue of lane?.cues ?? []) cues.push({ id: cue.id, start: cue.at_ms ?? 0, end: (cue.at_ms ?? 0) + (cue.duration_ms ?? 0) });
+  }
+  cues.sort((a, b) => a.start - b.start);
+  const out = [];
+  for (let i = 0; i + 1 < cues.length; i++) {
+    const gap = cues[i + 1].start - cues[i].end;
+    if (Math.abs(gap) <= frameMs * 1.5 + 1) {
+      const at = Math.round((cues[i].end + cues[i + 1].start) / 2);
+      if (!out.some((b) => b.from === cues[i].id && b.to === cues[i + 1].id)) out.push({ at_ms: at, from: cues[i].id, to: cues[i + 1].id });
+    }
+  }
+  return out;
+}
+
 /** Compact note timestamp `MM:SS.cc` for packet lines. */
 export function formatNoteTime(atMs) {
   const ms = Math.max(0, Math.round(Number(atMs) || 0));
@@ -80,6 +137,7 @@ export function packetToSentEntry(packet) {
   return {
     id: packet?.id ?? "",
     frame: first.frame ?? 0,
+    frames: new Set(notes.map((n) => n.frame)).size || 1,
     count: notes.length,
     lines: notes.map(formatNoteLine),
     status: "waiting",
@@ -111,7 +169,7 @@ export function mergeRestoredSent(inboxPackets, candidates) {
 // -- region ---------------------------------------------------------------
 
 const COORDS_RETRY_MS = 2000;
-const COORDS_MAX_RETRIES = 6;
+const COORDS_MAX_RETRIES = 3;
 
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 
@@ -121,15 +179,18 @@ export function mount(root, ctx) {
   const store = ctx.store;
   const api = ctx.api;
 
-  /** @type {Map<number, any[]>} frame -> drafts on that frame */
+  /** @type {Map<number, any[]>} frame -> drafts on that frame (one packet = all frames) */
   const drafts = new Map();
   /** @type {Array<{id:string, frame:number, count:number, lines:string[], status:string, sentAt:string, deliveredAt:string|null}>} */
   const sent = [];
-  let selectedN = null;
+  let uidCounter = 0;
+  let selectedUid = null;
   let sending = false;
   let pinEls = new Map();
   let pinSignature = "";
   let rafId = 0;
+  const seqDoc = () => store.state.snapshot?.sequence ?? store.state.sequence ?? null;
+  const allDrafts = () => orderedDrafts(drafts);
 
   const stageSize = () => {
     const p = store.state.snapshot?.project ?? {};
@@ -200,8 +261,12 @@ export function mount(root, ctx) {
     return r;
   };
 
-  const renumber = (frame) => {
-    for (const [i, d] of (drafts.get(frame) ?? []).entries()) d.n = i + 1;
+  const findDraft = (uid) => {
+    for (const list of drafts.values()) {
+      const d = list.find((x) => x.uid === uid);
+      if (d) return d;
+    }
+    return null;
   };
 
   const setDraftElements = (frame, n, patch) => {
@@ -209,15 +274,15 @@ export function mount(root, ctx) {
     const d = list.find((x) => x.n === n);
     if (!d) return;
     Object.assign(d, patch);
-    const row = listEl.querySelector(`[data-n="${n}"] .nt-els`);
-    if (row && frame === currentFrame()) row.innerHTML = elementsHtml(d);
-    const pin = pinEls.get(n);
+    const row = listEl.querySelector(`[data-uid="${d.uid}"] .nt-els`);
+    if (row) row.innerHTML = elementsHtml(d);
+    const pin = pinEls.get(d.n);
     if (pin) pin.classList.toggle("is-pending", d.elState === "pending" || d.elState === "loading");
   };
 
   const elementsHtml = (d) => {
     if (!d.point) return `<span class="nt-noels">general note</span>`;
-    if (d.elState === "loading" || d.elState === "pending") return `<span class="nt-measuring">measuring…</span>`;
+    if (d.elState === "loading" || d.elState === "pending") return `<span class="nt-measuring">measuring elements…</span>`;
     if (d.elState === "error") return `<span class="nt-noels">elements unavailable</span>`;
     if (!d.elements || d.elements.length === 0) return `<span class="nt-noels">no elements</span>`;
     const names = d.elements.slice(0, 3).map((e) => `<span class="nt-el">${escapeHtml(e.ref)}</span>`).join(`<span class="nt-sep"> · </span>`);
@@ -265,14 +330,16 @@ export function mount(root, ctx) {
     const atMs = Math.round(store.state.playheadMs ?? 0);
     const list = drafts.get(frame) ?? [];
     const general = point == null;
-    const d = { n: list.length + 1, text: "", at_ms: atMs, frame, point: point ?? null, area, elements: [], overlap_px2: undefined, elState: general ? "ready" : "loading" };
+    const seq = seqDoc();
+    const d = { uid: ++uidCounter, n: 0, text: "", at_ms: atMs, frame, point: point ?? null, area, elements: [], overlap_px2: undefined, elState: general ? "ready" : "loading", cue: seq ? cueAtTimeSeq(seq, atMs) : undefined, scope: null };
     list.push(d);
     drafts.set(frame, list);
-    selectedN = d.n;
+    renumberAll(drafts);
+    selectedUid = d.uid;
     if (!general) void fetchElements(frame, d.n);
     renderPanel();
     rebuildPins(true);
-    const ta = listEl.querySelector(`.nt-text[data-n="${d.n}"]`);
+    const ta = listEl.querySelector(`.nt-text[data-uid="${d.uid}"]`);
     if (ta) ta.focus();
   };
 
@@ -282,16 +349,17 @@ export function mount(root, ctx) {
     addDraft(null, undefined);
   };
 
-  const deleteDraft = (n) => {
-    const frame = currentFrame();
-    const list = (drafts.get(frame) ?? []).filter((d) => d.n !== n);
-    if (list.length) {
-      drafts.set(frame, list);
-      renumber(frame);
-    } else {
-      drafts.delete(frame);
+  const deleteDraft = (uid) => {
+    for (const [frame, list] of drafts) {
+      const next = list.filter((d) => d.uid !== uid);
+      if (next.length !== list.length) {
+        if (next.length) drafts.set(frame, next);
+        else drafts.delete(frame);
+        break;
+      }
     }
-    if (selectedN === n) selectedN = null;
+    renumberAll(drafts);
+    if (selectedUid === uid) selectedUid = null;
     renderPanel();
     rebuildPins(true);
   };
@@ -300,10 +368,41 @@ export function mount(root, ctx) {
     return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   }
 
+  const scopeLabel = (d) => {
+    if (!d.scope) return d.cue ? `@ ${d.cue} ${formatNoteTime(d.at_ms)}` : formatNoteTime(d.at_ms);
+    if (d.scope.kind === "boundary") return `boundary ${d.scope.from}→${d.scope.to} @ ${formatNoteTime(d.at_ms)}`;
+    if (d.scope.kind === "range") return `range ${d.scope.from}–${d.scope.to}`;
+    return "all scenes";
+  };
+
+  const scopeControls = (d) => {
+    const seq = seqDoc();
+    const kind = d.scope?.kind ?? "frame";
+    let html = `<select class="nt-scope" data-uid="${d.uid}" title="What this note applies to">` +
+      `<option value="frame"${kind === "frame" ? " selected" : ""}>this frame</option>` +
+      `<option value="boundary"${kind === "boundary" ? " selected" : ""}>boundary</option>` +
+      `<option value="range"${kind === "range" ? " selected" : ""}>scene range</option>` +
+      `<option value="all"${kind === "all" ? " selected" : ""}>all scenes</option></select>`;
+    if (kind === "boundary") {
+      const bounds = seq ? cueBoundaries(seq, stageSize().fps) : [];
+      const val = d.scope ? `${d.scope.from}→${d.scope.to}` : "";
+      html += `<select class="nt-bound" data-uid="${d.uid}" title="Which cut">` +
+        bounds.map((b) => `<option value="${escapeHtml(b.from)}→${escapeHtml(b.to)}"${`${b.from}→${b.to}` === val ? " selected" : ""}>${escapeHtml(b.from)}→${escapeHtml(b.to)}</option>`).join("") +
+        `</select>`;
+    } else if (kind === "range") {
+      const cues = seq ? cueOptions(seq) : [];
+      const from = d.scope?.from ?? d.cue ?? cues[0] ?? "";
+      const to = d.scope?.to ?? d.cue ?? cues[cues.length - 1] ?? "";
+      const opts = (sel) => cues.map((c) => `<option${c === sel ? " selected" : ""}>${escapeHtml(c)}</option>`).join("");
+      html += `<select class="nt-from" data-uid="${d.uid}" title="Range start">${opts(from)}</select><span class="nt-dash">–</span><select class="nt-to" data-uid="${d.uid}" title="Range end">${opts(to)}</select>`;
+    }
+    return html;
+  };
+
   const renderPanel = () => {
     const frame = currentFrame();
-    const list = currentDrafts();
-    frameEl.textContent = list.length || store.state.snapshot ? `@ ${frameLabel(frame)}` : "";
+    const list = allDrafts();
+    frameEl.textContent = store.state.snapshot ? `@ ${frameLabel(frame)}` : "";
     const annotate = !!store.state.annotate;
     emptyEl.textContent = !store.state.snapshot
       ? "Waiting for the project…"
@@ -311,54 +410,131 @@ export function mount(root, ctx) {
         ? (annotate ? "Click the frame for a point, drag for an area." : "Press N, then click the frame — or add a general note.")
         : "";
     emptyEl.hidden = emptyEl.textContent === "";
-    listEl.innerHTML = list.map((d) => `
-      <li class="nt-row${d.n === selectedN ? " is-selected" : ""}" data-n="${d.n}">
+    let lastGroup = null;
+    listEl.innerHTML = list.map((d) => {
+      const group = d.scope?.kind === "all" ? "all scenes" : d.scope?.kind === "range" ? `range ${d.scope.from}–${d.scope.to}` : d.cue ?? "no scene";
+      const head = group !== lastGroup ? `<li class="nt-group" data-at="${d.at_ms}" data-frame="${d.frame}" title="Seek here"><span>${escapeHtml(group)}</span></li>` : "";
+      lastGroup = group;
+      return head + `
+      <li class="nt-row${d.uid === selectedUid ? " is-selected" : ""}" data-uid="${d.uid}">
         <span class="nt-num">${d.n}</span>
         <div class="nt-main">
-          <textarea class="nt-text" rows="2" placeholder="Note ${d.n}…" data-n="${d.n}">${escapeHtml(d.text)}</textarea>
+          <textarea class="nt-text" rows="2" placeholder="Note ${d.n}…" data-uid="${d.uid}">${escapeHtml(d.text)}</textarea>
           <div class="nt-els">${elementsHtml(d)}</div>
+          <div class="nt-meta"><span class="nt-where mono">${escapeHtml(scopeLabel(d))}</span>${scopeControls(d)}</div>
         </div>
-        <button class="icon-btn nt-del" type="button" data-n="${d.n}" title="Delete note ${d.n}" aria-label="Delete note ${d.n}">
+        <button class="icon-btn nt-del" type="button" data-uid="${d.uid}" title="Delete note ${d.n}" aria-label="Delete note ${d.n}">
           <svg class="icon" viewBox="0 0 24 24"><path d="M6 6 L18 18 M18 6 L6 18"/></svg>
         </button>
-      </li>`).join("");
+      </li>`;
+    }).join("");
     for (const t of listEl.querySelectorAll(".nt-text")) {
       t.addEventListener("input", () => {
-        const d = list.find((x) => x.n === Number(t.dataset.n));
+        const d = findDraft(Number(t.dataset.uid));
         if (d) d.text = t.value;
         syncSendState();
       });
       t.addEventListener("focus", () => {
-        selectedN = Number(t.dataset.n);
-        for (const r of listEl.querySelectorAll(".nt-row")) r.classList.toggle("is-selected", Number(r.dataset.n) === selectedN);
-        for (const [n, pin] of pinEls) pin.classList.toggle("is-selected", n === selectedN);
+        selectedUid = Number(t.dataset.uid);
+        for (const r of listEl.querySelectorAll(".nt-row")) r.classList.toggle("is-selected", Number(r.dataset.uid) === selectedUid);
+        for (const pin of pinEls.values()) pin.classList.toggle("is-selected", Number(pin.dataset.uid) === selectedUid);
       });
     }
     for (const b of listEl.querySelectorAll(".nt-del")) {
-      b.addEventListener("click", () => deleteDraft(Number(b.dataset.n)));
+      b.addEventListener("click", () => deleteDraft(Number(b.dataset.uid)));
     }
-    const otherFrames = [...drafts.keys()].filter((f) => f !== frame).length;
+    for (const g of listEl.querySelectorAll(".nt-group")) {
+      g.addEventListener("click", () => store.set({ playheadMs: Number(g.dataset.at) }));
+    }
+    for (const s of listEl.querySelectorAll(".nt-scope")) {
+      s.addEventListener("change", () => {
+        const d = findDraft(Number(s.dataset.uid));
+        if (!d) return;
+        const kind = s.value;
+        const seq = seqDoc();
+        if (kind === "frame") d.scope = null;
+        else if (kind === "all") d.scope = { kind: "all" };
+        else if (kind === "range") {
+          const cues = seq ? cueOptions(seq) : [];
+          const cur = d.cue ?? cues[0] ?? "";
+          d.scope = { kind: "range", from: cur, to: cur };
+        } else if (kind === "boundary") {
+          const bounds = seq ? cueBoundaries(seq, stageSize().fps) : [];
+          const near = bounds.find((b) => Math.abs(b.at_ms - d.at_ms) <= 1000 / Math.max(1, stageSize().fps) + 1) ?? bounds[0];
+          if (near) {
+            d.scope = { kind: "boundary", from: near.from, to: near.to };
+            d.at_ms = near.at_ms;
+            d.frame = frameAtMs(near.at_ms, stageSize().fps);
+          } else d.scope = null;
+          reframeDraft(d);
+        }
+        renumberAll(drafts);
+        renderPanel();
+        rebuildPins(true);
+      });
+    }
+    for (const s of listEl.querySelectorAll(".nt-bound")) {
+      s.addEventListener("change", () => {
+        const d = findDraft(Number(s.dataset.uid));
+        const seq = seqDoc();
+        if (!d || !seq) return;
+        const [from, to] = String(s.value).split("→");
+        const b = cueBoundaries(seq, stageSize().fps).find((x) => x.from === from && x.to === to);
+        if (b) {
+          d.scope = { kind: "boundary", from, to };
+          d.at_ms = b.at_ms;
+          d.frame = frameAtMs(b.at_ms, stageSize().fps);
+          reframeDraft(d);
+        }
+        renumberAll(drafts);
+        renderPanel();
+        rebuildPins(true);
+      });
+    }
+    for (const sel of listEl.querySelectorAll(".nt-from,.nt-to")) {
+      sel.addEventListener("change", () => {
+        const d = findDraft(Number(sel.dataset.uid));
+        if (!d || d.scope?.kind !== "range") return;
+        if (sel.classList.contains("nt-from")) d.scope.from = sel.value;
+        else d.scope.to = sel.value;
+        renderPanel();
+      });
+    }
     syncSendState();
-    renderSent(otherFrames);
+    renderSent();
+  };
+
+  // Move a draft to its frame bucket after a boundary pick changed its time.
+  const reframeDraft = (d) => {
+    for (const [frame, list] of drafts) {
+      const i = list.indexOf(d);
+      if (i >= 0) {
+        list.splice(i, 1);
+        if (!list.length) drafts.delete(frame);
+        break;
+      }
+    }
+    const list = drafts.get(d.frame) ?? [];
+    list.push(d);
+    drafts.set(d.frame, list);
   };
 
   const syncSendState = () => {
-    const list = currentDrafts();
+    const list = allDrafts();
     const ready = !sending && list.length > 0 && list.every((d) => d.text.trim().length > 0);
     sendBtn.disabled = !ready;
     discardBtn.disabled = sending || list.length === 0;
-    sendBtn.textContent = sending ? "Sending…" : `Send notes${list.length > 1 ? ` (${list.length})` : ""}`;
+    sendBtn.textContent = sending ? "Sending…" : `Send notes (${list.length})`;
   };
 
-  const renderSent = (otherFrames = 0) => {
+  const renderSent = () => {
     const rows = sent.map((p) => `
       <li class="nt-packet" data-status="${p.status}">
-        <span class="nt-pcount mono">${p.count} note${p.count > 1 ? "s" : ""} · f${p.frame}</span>
+        <span class="nt-pcount mono">${p.count} note${p.count > 1 ? "s" : ""} · ${p.frames} frame${p.frames > 1 ? "s" : ""}</span>
         <span class="nt-status">${p.status === "waiting" ? "waiting for agent" : `delivered ${p.deliveredAt ?? ""}`}</span>
         ${p.status === "waiting" ? `<button class="nt-copy" type="button" data-id="${p.id}">Copy as text</button>` : ""}
       </li>`).join("");
-    const extra = otherFrames > 0 ? `<li class="nt-other">${otherFrames} other frame${otherFrames > 1 ? "s" : ""} with drafts — seek there to send.</li>` : "";
-    sentEl.innerHTML = rows + extra;
+    sentEl.innerHTML = rows;
     for (const b of sentEl.querySelectorAll(".nt-copy")) {
       b.addEventListener("click", () => copyPacketText(b.dataset.id, b));
     }
@@ -402,12 +578,14 @@ export function mount(root, ctx) {
       ...(d.area ? { area: [Math.round(d.area[0] * 10) / 10, Math.round(d.area[1] * 10) / 10, Math.round(d.area[2] * 10) / 10, Math.round(d.area[3] * 10) / 10] } : {}),
       elements: d.elements ?? [],
       ...(d.overlap_px2 ? { overlap_px2: d.overlap_px2 } : {}),
+      ...(d.cue ? { cue: d.cue } : {}),
+      ...(d.scope ? { scope: d.scope } : {}),
     };
   };
 
-  const sendCurrentFrame = async () => {
-    const frame = currentFrame();
-    const list = currentDrafts();
+  // One packet = every draft on every frame, numbered 1..N across the packet.
+  const sendAll = async () => {
+    const list = allDrafts();
     if (sending || list.length === 0 || !list.every((d) => d.text.trim().length > 0)) return;
     sending = true;
     syncSendState();
@@ -425,7 +603,8 @@ export function mount(root, ctx) {
     }
     sent.unshift({
       id: res.id,
-      frame,
+      frame: notes[0].frame,
+      frames: new Set(notes.map((n) => n.frame)).size,
       count: notes.length,
       lines: notes.map(formatNoteLine),
       status: "waiting",
@@ -433,13 +612,13 @@ export function mount(root, ctx) {
       deliveredAt: null,
     });
     saveStoredSent();
-    drafts.delete(frame);
-    selectedN = null;
+    drafts.clear();
+    selectedUid = null;
     renderPanel();
     rebuildPins(true);
   };
 
-  // -- pins -----------------------------------------------------------------
+  // -- pins (current frame only; numbers are packet-wide) ----------------------
   const rebuildPins = (force = false) => {
     const sig = `${currentFrame()}:${currentDrafts().map((d) => d.n).join(",")}`;
     if (!force && sig === pinSignature) return;
@@ -452,23 +631,23 @@ export function mount(root, ctx) {
       if (d.area) {
         const box = document.createElement("div");
         box.className = "nt-area";
-        box.dataset.n = String(d.n);
+        box.dataset.uid = String(d.uid);
         layer.appendChild(box);
       }
       const pin = document.createElement("button");
       pin.type = "button";
       pin.className = "nt-pin";
-      pin.dataset.n = String(d.n);
+      pin.dataset.uid = String(d.uid);
       pin.textContent = String(d.n);
       pin.title = `Note ${d.n} — select`;
       pin.classList.toggle("is-pending", d.elState === "pending" || d.elState === "loading");
-      pin.classList.toggle("is-selected", d.n === selectedN);
+      pin.classList.toggle("is-selected", d.uid === selectedUid);
       pin.addEventListener("click", (e) => {
         e.stopPropagation();
-        selectedN = d.n;
-        for (const [, p] of pinEls) p.classList.toggle("is-selected", Number(p.dataset.n) === selectedN);
+        selectedUid = d.uid;
+        for (const p of pinEls.values()) p.classList.toggle("is-selected", Number(p.dataset.uid) === selectedUid);
         renderPanel();
-        const ta = listEl.querySelector(`.nt-text[data-n="${d.n}"]`);
+        const ta = listEl.querySelector(`.nt-text[data-uid="${d.uid}"]`);
         if (ta) ta.focus();
       });
       layer.appendChild(pin);
@@ -492,7 +671,7 @@ export function mount(root, ctx) {
         pin.style.top = `${p.y}px`;
       }
       if (d.area) {
-        const box = layer.querySelector(`.nt-area[data-n="${d.n}"]`);
+        const box = layer.querySelector(`.nt-area[data-uid="${d.uid}"]`);
         if (box) {
           const a = stageToClient(d.area[0], d.area[1], local, w, h);
           const b = stageToClient(d.area[0] + d.area[2], d.area[1] + d.area[3], local, w, h);
@@ -578,10 +757,10 @@ export function mount(root, ctx) {
     if (e.target?.closest?.("textarea,input,button")) return;
     if (!store.state.annotate) store.set({ annotate: true });
   }, true);
-  sendBtn.addEventListener("click", () => void sendCurrentFrame());
+  sendBtn.addEventListener("click", () => void sendAll());
   discardBtn.addEventListener("click", () => {
-    drafts.delete(currentFrame());
-    selectedN = null;
+    drafts.clear();
+    selectedUid = null;
     renderPanel();
     rebuildPins(true);
   });
@@ -598,7 +777,7 @@ export function mount(root, ctx) {
   root.addEventListener("keydown", (e) => {
     if (eventChord(e) === shortcutMap["send-notes"]) {
       e.preventDefault();
-      void sendCurrentFrame();
+      void sendAll();
     }
   });
   window.addEventListener("keydown", (e) => {
@@ -676,7 +855,7 @@ export function mount(root, ctx) {
     const frame = currentFrame();
     if (frame !== lastFrame) {
       lastFrame = frame;
-      selectedN = null;
+      selectedUid = null;
       renderPanel();
       rebuildPins(true);
     }
@@ -708,7 +887,7 @@ export function mount(root, ctx) {
   window.__liveNotes = {
     drafts: () => [...drafts.entries()].map(([frame, list]) => ({ frame, notes: list.map((d) => ({ ...d })) })),
     sent: () => sent.map((p) => ({ ...p })),
-    send: () => sendCurrentFrame(),
+    send: () => sendAll(),
   };
 
   renderPanel();

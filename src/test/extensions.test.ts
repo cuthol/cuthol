@@ -11,7 +11,6 @@
  */
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -22,24 +21,31 @@ import { loadSequence } from "../core/workspace.js";
 import { CutholMcpServer } from "../mcp/server.js";
 
 function makeTestAudioWav(outPath: string, durationSec = 3.0): void {
+  // Same bytes as `sine=frequency=440:sample_rate=48000`, written directly
+  // (one fewer ffmpeg subprocess per run).
   fs.mkdirSync(path.dirname(outPath), { recursive: true });
-  const proc = spawnSync(
-    "ffmpeg",
-    [
-      "-y",
-      "-v",
-      "error",
-      "-f",
-      "lavfi",
-      "-i",
-      `sine=frequency=440:sample_rate=48000:duration=${durationSec}`,
-      "-c:a",
-      "pcm_s16le",
-      outPath,
-    ],
-    { encoding: "utf8" }
-  );
-  assert.equal(proc.status, 0, proc.stderr);
+  const sampleRate = 48000;
+  const totalSamples = Math.round(durationSec * sampleRate);
+  const pcmBuf = Buffer.alloc(44 + totalSamples * 2);
+  pcmBuf.write("RIFF", 0);
+  pcmBuf.writeUInt32LE(36 + totalSamples * 2, 4);
+  pcmBuf.write("WAVE", 8);
+  pcmBuf.write("fmt ", 12);
+  pcmBuf.writeUInt32LE(16, 16);
+  pcmBuf.writeUInt16LE(1, 20);
+  pcmBuf.writeUInt16LE(1, 22);
+  pcmBuf.writeUInt32LE(sampleRate, 24);
+  pcmBuf.writeUInt32LE(sampleRate * 2, 28);
+  pcmBuf.writeUInt16LE(2, 32);
+  pcmBuf.writeUInt16LE(16, 34);
+  pcmBuf.write("data", 36);
+  pcmBuf.writeUInt32LE(totalSamples * 2, 40);
+  for (let i = 0; i < totalSamples; i++) {
+    const s16 = Math.max(-32767, Math.min(32767, Math.round(28000 * Math.sin((2 * Math.PI * 440 * i) / sampleRate))));
+    pcmBuf.writeInt16LE(s16, 44 + i * 2);
+  }
+  fs.writeFileSync(outPath, pcmBuf);
+  assert.equal(fs.statSync(outPath).size, 44 + totalSamples * 2);
 }
 
 function safeRm(dir: string): void {

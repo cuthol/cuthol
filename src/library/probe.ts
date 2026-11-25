@@ -37,6 +37,46 @@ function parseRationalFps(raw?: string): number {
   return Math.round(exact * 100) / 100;
 }
 
+/**
+ * Display rotation of a video stream in degrees, from the `rotate`/`rotation`
+ * stream tags or the display-matrix side data. A phone video recorded
+ * portrait is stored landscape with a 90° (or 270°) rotation tag; players
+ * (and ffmpeg's default autorotate) present it rotated, so the probed
+ * dimensions must be the presented ones.
+ */
+export function videoStreamRotationDegrees(
+  videoStream?: Record<string, unknown> | null
+): number | null {
+  if (!videoStream) return null;
+  const tags = (videoStream.tags ?? {}) as Record<string, unknown>;
+  for (const key of ["rotate", "rotation"]) {
+    const raw = tags[key];
+    if (raw !== undefined && raw !== null && String(raw).trim() !== "") {
+      const deg = Number(String(raw).trim());
+      if (Number.isFinite(deg)) return deg;
+    }
+  }
+  const sideData = videoStream.side_data_list;
+  if (Array.isArray(sideData)) {
+    for (const entry of sideData) {
+      if (entry && typeof entry === "object") {
+        const deg = Number((entry as Record<string, unknown>).rotation);
+        if (Number.isFinite(deg) && deg !== 0) return deg;
+      }
+    }
+  }
+  return null;
+}
+
+/** True when the display rotation swaps width and height (90° or 270°). */
+export function videoStreamRotationSwapsDimensions(
+  videoStream?: Record<string, unknown> | null
+): boolean {
+  const deg = videoStreamRotationDegrees(videoStream);
+  if (deg === null) return false;
+  return Math.abs((((deg % 180) + 180) % 180) - 90) < 1e-6;
+}
+
 export function isVariableFrameRate(
   rFrameRateRaw?: string | null,
   avgFrameRateRaw?: string | null
@@ -295,8 +335,14 @@ export function probeLocalMediaFile(
   const formatDurationSec = Number(parsed.format?.duration ?? videoStream?.duration ?? audioStream?.duration ?? 0);
   const duration_ms = Math.max(0, Math.round(formatDurationSec * 1000));
 
-  const width = Number(videoStream?.width ?? 0);
-  const height = Number(videoStream?.height ?? 0);
+  const storedWidth = Number(videoStream?.width ?? 0);
+  const storedHeight = Number(videoStream?.height ?? 0);
+  // A rotated phone video is stored landscape: probe the presented dimensions.
+  const swapDims = videoStreamRotationSwapsDimensions(
+    (videoStream ?? null) as Record<string, unknown> | null
+  );
+  const width = swapDims ? storedHeight : storedWidth;
+  const height = swapDims ? storedWidth : storedHeight;
   const rawAvgRate = videoStream?.avg_frame_rate ? String(videoStream.avg_frame_rate) : null;
   const rawRRate = videoStream?.r_frame_rate ? String(videoStream.r_frame_rate) : null;
   const fps = videoStream
@@ -456,10 +502,42 @@ export function ingestAssetsIntoWorkspace(options: {
   explicitHandle?: string;
   explicitKind?: AssetKind;
 }): LibraryItem[] {
-  const { paths } = loadSequence(options.workspaceDir);
+  const { paths, sequence } = loadSequence(options.workspaceDir);
   const ledger = new MediaLedger(paths.ledgerFile);
 
   try {
+    // Re-ingesting unchanged files is a no-op: every file already resolves to
+    // its library entry (no new handle, no probe refresh), so skip the journal
+    // revision entirely and return the existing handles.
+    let allNoop = options.filePaths.length > 0;
+    const noopItems: LibraryItem[] = [];
+    for (let i = 0; allNoop && i < options.filePaths.length; i++) {
+      const rawFile = options.filePaths[i];
+      const absFile = path.resolve(rawFile);
+      if (!fs.existsSync(absFile)) {
+        allNoop = false;
+        break;
+      }
+      const { sha256, kind: detectedKind } = probeLocalMediaFile(absFile, ledger);
+      const kind = options.explicitKind ?? detectedKind;
+      const requestedHandle = i === 0 ? options.explicitHandle : undefined;
+      const existing = sequence.library.find(
+        (item) => item.digest_sha256 === sha256 && (!options.explicitKind || item.kind === kind)
+      );
+      if (
+        !existing ||
+        (requestedHandle && existing.handle !== requestedHandle) ||
+        (existing.probe.has_video && !isProbeMetadataComplete(existing.probe))
+      ) {
+        allNoop = false;
+        break;
+      }
+      noopItems.push(existing);
+    }
+    if (allNoop) {
+      return noopItems;
+    }
+
     const { result } = commitSequenceMutation(options.workspaceDir, "library.ingest", (seq) => {
       const added: LibraryItem[] = [];
 

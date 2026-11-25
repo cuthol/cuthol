@@ -44,6 +44,8 @@ export interface CompositionScriptRecord {
   timeline_expected: boolean;
   /** True when `window.__timelines[<composition-id>]` existed after load/seeks. */
   timeline_registered: boolean;
+  /** Paused state of the registered timeline (null when unknown or not a GSAP timeline). */
+  timeline_paused?: boolean | null;
   /** Deduplicated by kind+text (location ignored), capped at 8 entries. */
   errors: CompositionScriptError[];
   severity: "ERROR" | "WARN" | "NONE";
@@ -129,6 +131,7 @@ export function buildScriptErrorRecord(params: {
   source: CompositionScriptRecord["source"];
   timelineExpected: boolean;
   timelineRegistered: boolean;
+  timelinePaused?: boolean | null;
   errors: CompositionScriptError[];
 }): CompositionScriptRecord {
   const errors = dedupeScriptErrors(params.errors);
@@ -141,6 +144,7 @@ export function buildScriptErrorRecord(params: {
     source: params.source,
     timeline_expected: params.timelineExpected,
     timeline_registered: params.timelineRegistered,
+    ...(params.timelinePaused !== undefined ? { timeline_paused: params.timelinePaused } : {}),
     errors,
     severity: classifyScriptErrors(errors, params.timelineExpected, params.timelineRegistered),
   };

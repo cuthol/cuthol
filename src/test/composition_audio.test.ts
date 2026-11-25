@@ -26,8 +26,10 @@ import { ingestAssetsIntoWorkspace } from "../library/probe.js";
 import { duckMusicUnderDialogue } from "../mix/mix_duck.js";
 import { normalizeSequenceAudio } from "../mix/mix_normalize.js";
 import { buildOrRenderSequenceAudioForMixOrRender } from "../render/renderer.js";
+import { renderHyperFramesCompositionToMp4 } from "../compositor/hyperframes_bridge.js";
 import { addLaneCue, updateLaneCue } from "../sequence/lanes.js";
 import { verifySequence } from "../verify/gates.js";
+import { runCliFast } from "./c_helpers.js";
 
 const CLI = path.resolve(process.cwd(), "dist/cli.js");
 const GSAP_MIN_JS = path.resolve("node_modules/gsap/dist/gsap.min.js");
@@ -67,7 +69,7 @@ function writeClickWav(outPath: string, freq = 880, seconds = 0.2): void {
   ]);
 }
 
-function writeToneWav(outPath: string, seconds: number, freq = 880): void {
+function writeToneWavDirect(outPath: string, seconds: number, freq = 880): void {
   runFfmpeg([
     "-y",
     "-v",
@@ -80,6 +82,19 @@ function writeToneWav(outPath: string, seconds: number, freq = 880): void {
     "pcm_s16le",
     outPath,
   ]);
+}
+
+/** Shared tone fixtures, generated once per file instead of per test. */
+const SHARED_FIX_DIR = makeTempDir("cuthol-compaudio-shared-");
+function writeToneWav(outPath: string, seconds: number, freq = 880): void {
+  const shared = path.join(SHARED_FIX_DIR, `tone-${freq}hz-${seconds}s.wav`);
+  if (!fs.existsSync(shared)) {
+    writeToneWavDirect(shared, seconds, freq);
+  }
+  if (outPath !== shared) {
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+    fs.copyFileSync(shared, outPath);
+  }
 }
 
 function compHtml(bodyInner: string, durationSec = 3): string {
@@ -223,6 +238,16 @@ function runCli(wsDir: string, args: string[]): { status: number | null; stdout:
   });
   return { status: proc.status, stdout: String(proc.stdout ?? ""), stderr: String(proc.stderr ?? "") };
 }
+
+/** Payload-only CLI calls go in-process; the failure-envelope case keeps a subprocess. */
+async function runCliJsonFast(wsDir: string, args: string[]): Promise<void> {
+  const res = await runCliFast([...args, "--dir", wsDir]);
+  assert.equal(res.status, 0, `${args.join(" ")}\n${res.stdout}\n${res.stderr}`);
+}
+
+test.after(() => {
+  safeRm(SHARED_FIX_DIR);
+});
 
 test("1. composition_audio defaults to mix; G1 rejects bad values and non-composition cues", () => {
   const wsDir = initSmallWorkspace("compaudio-g1");
@@ -561,7 +586,6 @@ test("8. opaque overlay blob supplies the stem without a dedicated render", asyn
     const cue = loaded.sequence.lanes.flatMap((l) => l.cues).find((c) => c.id === cueId)!;
 
     // Render the overlay blob exactly as the video path would for an opaque cue.
-    const { renderHyperFramesCompositionToMp4 } = await import("../compositor/hyperframes_bridge.js");
     const blob = renderHyperFramesCompositionToMp4({
       compositionDir: path.join(wsDir, "compositions/opaque"),
       entryHtml: "index.html",
@@ -598,7 +622,7 @@ test("8. opaque overlay blob supplies the stem without a dedicated render", asyn
   }
 });
 
-test("9. CLI switch is journaled and undoable; bad values fail", () => {
+test("9. CLI switch is journaled and undoable; bad values fail", async () => {
   const wsDir = initSmallWorkspace("compaudio-cli");
   try {
     const cueId = mountAudioComp(
@@ -610,12 +634,10 @@ test("9. CLI switch is journaled and undoable; bad values fail", () => {
       loadSequence(wsDir).sequence.lanes.flatMap((l) => l.cues).find((c) => c.id === cueId)!
         .composition_audio;
 
-    const off = runCli(wsDir, ["lane", "update-cue", "--cue", cueId, "--composition-audio", "off"]);
-    assert.equal(off.status, 0, `update-cue off failed: ${off.stdout}\n${off.stderr}`);
+    await runCliJsonFast(wsDir, ["lane", "update-cue", "--cue", cueId, "--composition-audio", "off"]);
     assert.equal(readMode(), "off");
 
-    const undo = runCli(wsDir, ["workspace", "journal", "undo"]);
-    assert.equal(undo.status, 0, `journal undo failed: ${undo.stdout}\n${undo.stderr}`);
+    await runCliJsonFast(wsDir, ["workspace", "journal", "undo"]);
     assert.equal(readMode(), undefined);
 
     const bad = runCli(wsDir, ["lane", "update-cue", "--cue", cueId, "--composition-audio", "loud"]);

@@ -9,6 +9,10 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { scaffoldHyperFramesComposition } from "../compositor/hyperframes_bridge.js";
+import { initWorkspace, loadSequence } from "../core/workspace.js";
+import { addLaneCue } from "../sequence/lanes.js";
+import { setStageBackdropColor } from "../sequence/stage.js";
 
 const TEST_ROOT = path.resolve(process.cwd(), "test-workspace");
 const CLI = path.resolve(process.cwd(), "dist/cli.js");
@@ -337,20 +341,31 @@ function assertWebmFrame(
 test("fonts.ready underline matches the title, and a short alpha webm holds its last frame", { timeout: 900_000, skip: fs.existsSync(FONT_SRC) ? false : `fixture not present: ${FONT_SRC}` }, () => {
   const wsDir = path.join(TEST_ROOT, "fonts_ready");
   fs.rmSync(wsDir, { recursive: true, force: true });
-  assert.ok(cli(["workspace", "init", wsDir, "--aspect", "1:1", "--fps", "30"]).ok);
-  const backdrop = cli(["workspace", "backdrop", "--color", BACKDROP, "--dir", wsDir]);
-  assert.ok(backdrop.ok, backdrop.raw);
+  initWorkspace({ dir: wsDir, aspect: "1:1", fps: 30, stageExplicit: true });
+  assert.ok(fs.existsSync(path.join(wsDir, "cuthol.sequence.json")));
+  const backdropRes = setStageBackdropColor({ workspaceDir: wsDir, color: BACKDROP });
+  assert.equal(backdropRes.backdrop.color, BACKDROP);
 
   const readyDir = path.join(wsDir, "compositions", "fonts_ready");
   const syncDir = path.join(wsDir, "compositions", "fonts_sync");
   const webmDir = path.join(wsDir, "compositions", "alpha_webm");
-  for (const [dir, dur] of [
-    [readyDir, "1s"],
-    [syncDir, "1s"],
-    [webmDir, "2s"],
+  const { sequence: stageSeq } = loadSequence(wsDir);
+  for (const [dir, durationMs] of [
+    [readyDir, 1000],
+    [syncDir, 1000],
+    [webmDir, 2000],
   ] as const) {
-    const scaffold = cli(["composition", "scaffold", "--comp-dir", dir, "--preset", "blank", "--duration", dur, "--dir", wsDir]);
-    assert.ok(scaffold.ok, scaffold.raw);
+    scaffoldHyperFramesComposition({
+      targetDir: dir,
+      width: stageSeq.stage.width,
+      height: stageSeq.stage.height,
+      fps: stageSeq.stage.fps,
+      durationMs,
+      preset: "blank",
+      props: {},
+      transparent: true,
+    });
+    assert.ok(fs.existsSync(path.join(dir, "index.html")));
   }
   fs.copyFileSync(FONT_SRC, path.join(readyDir, "assets", "inter-latin-wght-normal.woff2"));
   fs.copyFileSync(FONT_SRC, path.join(syncDir, "assets", "inter-latin-wght-normal.woff2"));
@@ -359,28 +374,30 @@ test("fonts.ready underline matches the title, and a short alpha webm holds its 
   writeAlphaWebm(path.join(webmDir, "assets", "mark.webm"));
   fs.writeFileSync(path.join(webmDir, "index.html"), webmHtml(), "utf8");
 
-  const mount = (id: string, dir: string, at: string, duration: string) => {
-    const res = cli([
-      "lane",
-      "add-composition",
-      "--lane",
-      "ln_motion",
-      "--id",
-      id,
-      "--comp-dir",
-      dir,
-      "--at",
-      at,
-      "--duration",
-      duration,
-      "--dir",
-      wsDir,
-    ]);
-    assert.ok(res.ok, res.raw);
+  const mount = (id: string, dir: string, atMs: number, durationMs: number) => {
+    const { cue } = addLaneCue({
+      workspaceDir: wsDir,
+      laneId: "ln_motion",
+      kind: "composition",
+      explicitId: id,
+      atMs,
+      durationMs,
+      explicitDuration: true,
+      composition: {
+        composition_dir: dir,
+        entry_html: "index.html",
+        props: {},
+        transparent: true,
+      },
+    });
+    assert.ok(cue.composition);
+    assert.equal(cue.id, id);
+    assert.equal(cue.at_ms, atMs);
+    assert.equal(cue.duration_ms, durationMs);
   };
-  mount("fonts_ready", readyDir, "0ms", "1000ms");
-  mount("fonts_sync", syncDir, "1000ms", "1000ms");
-  mount("alpha_webm", webmDir, "2000ms", "2000ms");
+  mount("fonts_ready", readyDir, 0, 1000);
+  mount("fonts_sync", syncDir, 1000, 1000);
+  mount("alpha_webm", webmDir, 2000, 2000);
 
   const shots = path.join(wsDir, "shots");
   fs.mkdirSync(shots, { recursive: true });

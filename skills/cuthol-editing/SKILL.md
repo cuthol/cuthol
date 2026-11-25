@@ -17,9 +17,15 @@ Notation: `tool.action(args)` is an MCP call; the CLI form is
 
 - `workspace.init(dir, aspect, fps, title)` creates `cuthol.sequence.json` plus
   a `.cuthol/` cache folder. Aspect `9:16`, `16:9`, `1:1`, `4:5`. Default 9:16
-  @ 30 fps — set it explicitly. `workspace.open(dir, verbose?)` selects an
+  @ 30 fps — set it explicitly. Free size: `workspace.init(dir, size="1920x800")`
+  (even numbers; overrides aspect with a custom stage). Without `--aspect`/`--size`
+  the first visual source sets the stage (INFO names the undo); with an explicit
+  stage you only get a suggestion. `workspace.open(dir, verbose?)` selects an
   existing project and returns a compact summary (`verbose=true` for full
-  tables). `workspace.backdrop(color="#RRGGBB")` sets the stage colour showing
+  tables). `workspace.stage(size | aspect | from)` resizes the stage later and
+  rescales caption font sizes and strokes (positions are percentages, placement
+  scales follow the new stage fit) in one journaled step (undo restores).
+  `workspace.backdrop(color="#RRGGBB")` sets the stage colour showing
   wherever nothing covers it (default `#0D0F12`); journaled.
 - `library.ingest(files=[...], handle?)` probes and hashes files → `vid_XX`,
   `aud_XX`, `img_XX` (cached; re-ingesting is free). Variable-frame-rate
@@ -109,10 +115,14 @@ preview). Locked lanes block undo/redo touching them (G111) unless you pass
 `allow_protected=[ids]`. Plus `workspace.redo`, `workspace.tag(name)`,
 `workspace.journal`. Edits breaking G1–G3 roll back automatically.
 
-Composition files and hand edits to `cuthol.sequence.json` are not revisions
-until journaled: `changes_show` reports them (JSON-path diff for the project
-file, e.g. `spine.clips[1].placement.opacity: 1 → 0.5`), then `changes_adopt`
-journals them or `changes_revert` restores the journal state.
+Hand edits to `cuthol.sequence.json` are not revisions until journaled:
+`changes_show` reports them (JSON-path diff, e.g.
+`spine.clips[1].placement.opacity: 1 → 0.5`), then `changes_adopt` journals
+them or `changes_revert` restores the journal state. Hand edits inside a
+mounted composition folder are adopted automatically by the next command that
+reads the project (the response carries
+`adopted outside composition edits: <folders>`, G460, still undoable);
+sequence-file edits still need the explicit adopt/revert.
 
 ## Cue sheets (bulk edits)
 

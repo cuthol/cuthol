@@ -17,6 +17,8 @@
 .ac-dot[data-acstate="paused"] .ac-bars { display: block; stroke: var(--bg-panel); stroke-width: 1.6; }
 .ac-dot[data-acstate="error"] .ac-tri { display: block; fill: var(--danger); }
 .ac-dot[data-acstate="idle"] .ac-ring { display: block; fill: none; stroke: var(--text-3); stroke-width: 1.5; }
+.ac-dot[data-acstate="connecting"] .ac-ring { display: block; fill: none; stroke: var(--text-2); stroke-width: 1.5; animation: ac-blink 1.2s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) { .ac-dot[data-acstate="connecting"] .ac-ring { animation: none; } }
 @keyframes ac-blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 @media (prefers-reduced-motion: reduce) { .ac-dot[data-acstate="paused"] .ac-glyph { animation: none; } }
 /* gray blinking circle over the latest row while paused */

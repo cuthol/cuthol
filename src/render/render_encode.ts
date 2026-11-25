@@ -32,6 +32,7 @@ import {
 } from "../core/diagnostics.js";
 import { CutholSequence } from "../core/schema.js";
 import { WorkspacePaths } from "../core/workspace.js";
+import { tempoOf } from "../sequence/tempo.js";
 import { VerificationReport } from "../verify/gates.js";
 import { runParallelFfmpegJobsSync } from "./render_frames.js";
 import {
@@ -115,6 +116,7 @@ function buildSingleSegmentFfmpegArgs(params: {
   tmpOut: string;
   encoder: VideoEncoderCodec;
   useStreamCopy: boolean;
+  tempoRate?: number;
 }): string[] {
   const {
     plan,
@@ -124,7 +126,9 @@ function buildSingleSegmentFfmpegArgs(params: {
     tmpOut,
     encoder,
     useStreamCopy,
+    tempoRate,
   } = params;
+  const tempoActive = (tempoRate ?? 1) !== 1;
   const vaapiDeviceArgs =
     !useStreamCopy && encoder === "h264_vaapi"
       ? ["-vaapi_device", process.env.CUTHOL_VAAPI_DEVICE || "/dev/dri/renderD128"]
@@ -221,6 +225,9 @@ function buildSingleSegmentFfmpegArgs(params: {
     effectiveVideoOutPad,
     "-map",
     plan.audioOutPad,
+    ...(tempoActive
+      ? ["-frames:v", String(Math.max(1, Math.round((plan.totalDurationMs / 1000) * plan.fps)))]
+      : []),
     "-t",
     (plan.totalDurationMs / 1000).toFixed(3),
     ...buildVideoCodecArgs(encoder, preset),
@@ -319,6 +326,7 @@ export function renderSingleSegmentPath(prep: PreparedSequenceRender): RenderEnc
       tmpOut,
       encoder,
       useStreamCopy,
+      tempoRate: tempoOf(sequence),
     });
 
   progressFinish("overlay");

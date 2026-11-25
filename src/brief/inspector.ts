@@ -6,10 +6,12 @@
  */
 
 import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
+import path from "node:path";
 import { activeCliGroup, activeCliWorkspaceDir } from "../cli_output.js";
+import { detectCompositionAudioNotInMix } from "../verify/gates_hf_audio.js";
 import { drainLiveInbox, formatLiveNotesBlock } from "../live/live_inbox.js";
 import { CutholSequence, LaneCue, SpineClip } from "../core/schema.js";
-import { OPEN_STANDARDS } from "../core/standards.js";
+import { isVerticalStage, OPEN_STANDARDS } from "../core/standards.js";
 import { formatTimecode } from "../core/time.js";
 import {
   computeSequenceDurationMs,
@@ -29,6 +31,18 @@ export interface BriefOptions {
   windowEndMs?: number;
   /** Prepended verbatim as the top line when set (external-change notice). */
   noticeLine?: string;
+  /**
+   * Project root the cue `composition_dir` values resolve against. When set,
+   * a default (absent) `composition_audio` switch is shown only for
+   * compositions that actually hold audible elements; without it the
+   * configured default is shown as before (the files cannot be located).
+   */
+  compositionRootDir?: string;
+}
+
+/** Per-render cache for composition audio scans (shared ffprobe results). */
+export interface CompositionAudioScanCache {
+  probeCache: Map<string, boolean>;
 }
 
 function describeSpinelessExtent(seq: CutholSequence): string {
@@ -57,10 +71,40 @@ function isAudioOnlyKind(kind: string): boolean {
   return kind === "music" || kind === "sfx" || kind === "voiceover";
 }
 
-/** Composition cue one-liner with its stem switch (`mix` is the default when absent). */
-function describeCompositionCueSummary(cue: LaneCue): string {
-  const mode = cue.composition_audio ?? "mix";
-  return `HyperFrames(${sanitizeMdCell(cue.composition!.composition_dir)}, comp-audio: ${mode})`;
+/**
+ * Composition cue one-liner with its stem switch (`mix` is the default when
+ * absent). An explicit switch is always shown; a default switch is shown only
+ * when the composition actually holds audible elements (same static scan as
+ * the G416 gate), so silent compositions stay quiet in the brief.
+ */
+function describeCompositionCueSummary(
+  cue: LaneCue,
+  rootDir?: string,
+  cache?: CompositionAudioScanCache
+): string {
+  const dir = sanitizeMdCell(cue.composition!.composition_dir);
+  const explicit = cue.composition_audio;
+  if (explicit === "off") return `HyperFrames(${dir}, comp-audio: off)`;
+  if (explicit === "mix") return `HyperFrames(${dir}, comp-audio: mix)`;
+  if (rootDir !== undefined) {
+    const compDir = path.isAbsolute(cue.composition!.composition_dir)
+      ? cue.composition!.composition_dir
+      : path.resolve(rootDir, cue.composition!.composition_dir);
+    const probeCache = cache?.probeCache ?? new Map<string, boolean>();
+    let audible = false;
+    try {
+      audible =
+        detectCompositionAudioNotInMix(
+          compDir,
+          cue.composition!.entry_html,
+          probeCache
+        ).length > 0;
+    } catch {
+      audible = true;
+    }
+    if (!audible) return `HyperFrames(${dir})`;
+  }
+  return `HyperFrames(${dir}, comp-audio: mix)`;
 }
 
 /** Short ramp shape for lenses (`ramp 1->3x, 2 pts`), or null when unramped. */
@@ -79,13 +123,23 @@ function describeSpeedRamp(clip: SpineClip): string | null {
 
 export function renderSequenceBrief(seq: CutholSequence, options: BriefOptions = {}): string {
   const lens = options.lens ?? "overview";
+  // A real `brief` CLI run resolves composition dirs against its workspace;
+  // library callers either pass `compositionRootDir` or get legacy output.
+  const compositionRootDir =
+    options.compositionRootDir ??
+    (activeCliGroup === "brief" ? activeCliWorkspaceDir : undefined);
   let md: string;
   switch (lens) {
     case "overview":
       md = renderOverviewLens(seq);
       break;
     case "flow":
-      md = renderFlowLens(seq, options.windowStartMs, options.windowEndMs);
+      md = renderFlowLens(
+        seq,
+        options.windowStartMs,
+        options.windowEndMs,
+        compositionRootDir
+      );
       break;
     case "canvas":
       md = renderCanvasLens(seq, options.windowStartMs, options.windowEndMs);
@@ -141,8 +195,9 @@ function renderOverviewLens(seq: CutholSequence): string {
     `- Stage: \`${seq.stage.width}x${seq.stage.height}\` (\`${seq.stage.aspect}\`) @ \`${seq.stage.fps}fps\` | Backdrop: \`${seq.stage.backdrop.kind}(${seq.stage.backdrop.color})\``
   );
   lines.push(`- Colour: \`${describeSequenceColour(seq)}\``);
+  const tempoRate = seq.stage.tempo ?? 1;
   lines.push(
-    `- Sequence Duration: \`${totalMs}ms\` (\`${formatTimecode(totalMs)}\`) | Magnetic Spine: \`${seq.spine.magnetic ? "ON" : "OFF"}\`${describeSpinelessExtent(seq)}`
+    `- Sequence Duration: \`${totalMs}ms\` (\`${formatTimecode(totalMs)}\`) | Magnetic Spine: \`${seq.spine.magnetic ? "ON" : "OFF"}\`${describeSpinelessExtent(seq)}${tempoRate !== 1 ? ` | Tempo: \`${tempoRate}x\` (output \`${Math.max(1, Math.round(totalMs / tempoRate))}ms\`)` : ""}`
   );
   lines.push("");
 
@@ -199,9 +254,15 @@ function renderOverviewLens(seq: CutholSequence): string {
   return lines.join("\n");
 }
 
-function renderFlowLens(seq: CutholSequence, winStart?: number, winEnd?: number): string {
+function renderFlowLens(
+  seq: CutholSequence,
+  winStart?: number,
+  winEnd?: number,
+  compositionRootDir?: string
+): string {
   const startFilter = winStart ?? 0;
   const endFilter = winEnd ?? Number.MAX_SAFE_INTEGER;
+  const audioScanCache: CompositionAudioScanCache = { probeCache: new Map<string, boolean>() };
   const lines: string[] = [];
 
   lines.push(`# CUTHOL BRIEF [LENS: FLOW]`);
@@ -255,7 +316,7 @@ function renderFlowLens(seq: CutholSequence, winStart?: number, winEnd?: number)
             const summary = cue.typography
               ? `"${sanitizeMdCell(cue.typography.text)}"`
               : cue.composition
-              ? describeCompositionCueSummary(cue)
+              ? describeCompositionCueSummary(cue, compositionRootDir, audioScanCache)
               : cue.asset_handle ?? cue.kind;
             lines.push(
               `  - Anchored \`${cue.id}\` on \`${lane.id}\`${muteTag} (+${cue.anchor.offset_ms}ms => ${cueStart}..${cueEnd}ms): ${summary}`
@@ -289,7 +350,7 @@ function renderFlowLens(seq: CutholSequence, winStart?: number, winEnd?: number)
       const summary = cue.typography
         ? `"${sanitizeMdCell(cue.typography.text)}"`
         : cue.composition
-        ? describeCompositionCueSummary(cue)
+        ? describeCompositionCueSummary(cue, compositionRootDir, audioScanCache)
         : cue.asset_handle ?? cue.kind;
       lines.push(
         `- [WARN: DANGLING ANCHOR \`${cue.anchor?.ref}\`] \`${cue.id}\` (\`${laneId}\`, z=${zIndex}${muted ? ", MUTED" : ""}): \`${cueStart}..${cueEnd}ms\` | ${summary}`
@@ -311,7 +372,7 @@ function renderFlowLens(seq: CutholSequence, winStart?: number, winEnd?: number)
       const summary = cue.typography
         ? `"${sanitizeMdCell(cue.typography.text)}"`
         : cue.composition
-        ? describeCompositionCueSummary(cue)
+        ? describeCompositionCueSummary(cue, compositionRootDir, audioScanCache)
         : cue.asset_handle ?? cue.kind;
       lines.push(`- \`${cue.id}\` (\`${lane.id}\`, z=${lane.z_index}${muteTag}): \`${cueStart}..${cueEnd}ms\` | ${summary}`);
     }
@@ -330,14 +391,13 @@ function renderCanvasLens(seq: CutholSequence, winStart?: number, winEnd?: numbe
 
   const titleMarginX = Math.round(seq.stage.width * (OPEN_STANDARDS.SAFE_ZONES.TITLE_MARGIN_PCT / 100));
   const titleMarginY = Math.round(seq.stage.height * (OPEN_STANDARDS.SAFE_ZONES.TITLE_MARGIN_PCT / 100));
-  const rightSafeX =
-    seq.stage.aspect === "9:16"
-      ? Math.round(seq.stage.width * (1 - OPEN_STANDARDS.SAFE_ZONES.VERTICAL_9_16_RIGHT_CHROME_PCT / 100))
-      : seq.stage.width - titleMarginX;
-  const bottomSafeY =
-    seq.stage.aspect === "9:16"
-      ? Math.round(seq.stage.height * (1 - OPEN_STANDARDS.SAFE_ZONES.VERTICAL_9_16_BOTTOM_CHROME_PCT / 100))
-      : seq.stage.height - titleMarginY;
+  const verticalStage = isVerticalStage(seq.stage);
+  const rightSafeX = verticalStage
+    ? Math.round(seq.stage.width * (1 - OPEN_STANDARDS.SAFE_ZONES.VERTICAL_9_16_RIGHT_CHROME_PCT / 100))
+    : seq.stage.width - titleMarginX;
+  const bottomSafeY = verticalStage
+    ? Math.round(seq.stage.height * (1 - OPEN_STANDARDS.SAFE_ZONES.VERTICAL_9_16_BOTTOM_CHROME_PCT / 100))
+    : seq.stage.height - titleMarginY;
 
   lines.push(`# CUTHOL BRIEF [LENS: CANVAS GEOMETRY]`);
   lines.push(

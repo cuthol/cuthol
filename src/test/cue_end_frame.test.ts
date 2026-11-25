@@ -11,12 +11,17 @@
  * agreement check, and compiled-plan text assertions.
  */
 import test from "node:test";
+import { sharedColorMp4 } from "./shared_media.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { compileSequenceRenderPlan } from "../compositor/compiler.js";
-import { loadSequence } from "../core/workspace.js";
+import { scaffoldHyperFramesComposition } from "../compositor/hyperframes_bridge.js";
+import { initWorkspace, loadSequence } from "../core/workspace.js";
+import { ingestAssetsIntoWorkspace } from "../library/probe.js";
+import { addLaneCue } from "../sequence/lanes.js";
+import { appendSpineClip } from "../sequence/spine.js";
 
 const TEST_ROOT = path.resolve(process.cwd(), "test-workspace");
 const CLI = path.resolve(process.cwd(), "dist/cli.js");
@@ -96,24 +101,39 @@ function countFrames(mp4: string): number {
 const isOverlayGreen = (c: [number, number, number]): boolean => c[1] > 150 && c[0] < 100;
 const isSpineRed = (c: [number, number, number]): boolean => c[0] > 150 && c[1] < 100 && c[2] < 100;
 
+/** Red spine source shared by every workspace at one fps (one lavfi encode per fps). */
+function sharedRedVideo(fps: number): string {
+  return sharedColorMp4("red", fps, 3);
+}
+
 /** Workspace with a 3 s red spine clip at `fps`. */
 function setUpSpineWorkspace(name: string, fps: number): string {
   const wsDir = path.join(TEST_ROOT, name);
   fs.rmSync(wsDir, { recursive: true, force: true });
-  assert.ok(cli(["workspace", "init", wsDir, "--aspect", "16:9", "--fps", String(fps)]).ok);
-  lavfiColorMp4(path.join(wsDir, "red.mp4"), "red", 3, fps);
-  const ingest = cli(["library", "ingest", path.join(wsDir, "red.mp4"), "--dir", wsDir]);
-  assert.ok(ingest.ok, ingest.raw);
-  const append = cli(["spine", "append", "--asset", "vid_01", "--in", "0s", "--out", "3s", "--dir", wsDir]);
-  assert.ok(append.ok, append.raw);
+  initWorkspace({ dir: wsDir, aspect: "16:9", fps, stageExplicit: true });
+  fs.copyFileSync(sharedRedVideo(fps), path.join(wsDir, "red.mp4"));
+  const ingested = ingestAssetsIntoWorkspace({ workspaceDir: wsDir, filePaths: [path.join(wsDir, "red.mp4")] });
+  assert.equal(ingested.length, 1);
+  assert.equal(ingested[0].handle, "vid_01");
+  const { clip } = appendSpineClip({ workspaceDir: wsDir, assetHandle: "vid_01", sourceInMs: 0, sourceOutMs: 3000 });
+  assert.equal(clip.asset_handle, "vid_01");
   return wsDir;
 }
 
 /** Fullscreen flat-green composition cue `[atMs, atMs + durMs)`. */
 function addFlatGreenComposition(wsDir: string, compName: string, atMs: number, durMs: number): string {
+  const { sequence } = loadSequence(wsDir);
   const compDir = path.join(wsDir, "compositions", compName);
-  const scaffold = cli(["composition", "scaffold", "--comp-dir", compDir, "--duration", "2s", "--dir", wsDir]);
-  assert.ok(scaffold.ok, scaffold.raw);
+  scaffoldHyperFramesComposition({
+    targetDir: compDir,
+    width: sequence.stage.width,
+    height: sequence.stage.height,
+    fps: sequence.stage.fps,
+    durationMs: 2000,
+    preset: "counter",
+    props: {},
+    transparent: true,
+  });
   const indexHtml = path.join(compDir, "index.html");
   const html = fs.readFileSync(indexHtml, "utf8");
   fs.writeFileSync(
@@ -124,10 +144,24 @@ function addFlatGreenComposition(wsDir: string, compName: string, atMs: number, 
     ),
     "utf8"
   );
-  const add = cli(["lane", "add-composition", "--lane", "ln_motion", "--comp-dir", compDir, "--at", `${atMs}ms`, "--duration", `${durMs}ms`, "--dir", wsDir]);
-  assert.ok(add.ok, add.raw);
-  const cue = loadSequence(wsDir).sequence.lanes.flatMap((l) => l.cues).find((c) => c.composition);
-  assert.ok(cue, add.raw);
+  const { cue } = addLaneCue({
+    workspaceDir: wsDir,
+    laneId: "ln_motion",
+    kind: "composition",
+    atMs,
+    durationMs: durMs,
+    explicitDuration: true,
+    composition: {
+      composition_dir: compDir,
+      entry_html: "index.html",
+      props: {},
+      transparent: true,
+    },
+  });
+  assert.ok(cue.composition);
+  assert.equal(cue.at_ms, atMs);
+  assert.equal(cue.duration_ms, durMs);
+  assert.match(fs.readFileSync(indexHtml, "utf8"), new RegExp(OVERLAY_CSS.replace("#", "#?")));
   return cue.id;
 }
 
@@ -170,9 +204,10 @@ test("image cue [1000,2000) at 30 fps ends before its end frame", () => {
   const wsDir = setUpSpineWorkspace("cue_end_image", 30);
   const png = path.join(wsDir, "green.png");
   lavfiColorPng(png, "0x20E020");
-  assert.ok(cli(["library", "ingest", png, "--dir", wsDir]).ok);
-  const add = cli(["lane", "add-cue", "--lane", "ln_broll", "--kind", "broll", "--asset", "img_01", "--at", "1000ms", "--duration", "1000ms", "--dir", wsDir]);
-  assert.ok(add.ok, add.raw);
+  const imgItems = ingestAssetsIntoWorkspace({ workspaceDir: wsDir, filePaths: [png] });
+  assert.equal(imgItems[0].handle, "img_01");
+  const { cue: imgCue } = addLaneCue({ workspaceDir: wsDir, laneId: "ln_broll", kind: "broll", assetHandle: "img_01", atMs: 1000, durationMs: 1000, explicitDuration: true });
+  assert.equal(imgCue.asset_handle, "img_01");
   const mp4 = renderDraft(wsDir, "cue_image.mp4");
   assert.equal(countFrames(mp4), 90);
   for (const [n, want] of [[29, "red"], [30, "green"], [59, "green"], [60, "red"]] as Array<[number, string]>) {
@@ -184,9 +219,10 @@ test("image cue [1000,2000) at 30 fps ends before its end frame", () => {
 test("video cue [1000,2000) at 30 fps ends before its end frame", () => {
   const wsDir = setUpSpineWorkspace("cue_end_video", 30);
   lavfiColorMp4(path.join(wsDir, "green.mp4"), "0x20E020", 3, 30);
-  assert.ok(cli(["library", "ingest", path.join(wsDir, "green.mp4"), "--dir", wsDir]).ok);
-  const add = cli(["lane", "add-cue", "--lane", "ln_broll", "--kind", "broll", "--asset", "vid_02", "--at", "1000ms", "--duration", "1000ms", "--dir", wsDir]);
-  assert.ok(add.ok, add.raw);
+  const vidItems = ingestAssetsIntoWorkspace({ workspaceDir: wsDir, filePaths: [path.join(wsDir, "green.mp4")] });
+  assert.equal(vidItems[0].handle, "vid_02");
+  const { cue: vidCue } = addLaneCue({ workspaceDir: wsDir, laneId: "ln_broll", kind: "broll", assetHandle: "vid_02", atMs: 1000, durationMs: 1000, explicitDuration: true });
+  assert.equal(vidCue.asset_handle, "vid_02");
   const mp4 = renderDraft(wsDir, "cue_video.mp4");
   assert.equal(countFrames(mp4), 90);
   for (const [n, want] of [[29, "red"], [30, "green"], [59, "green"], [60, "red"]] as Array<[number, string]>) {
@@ -197,8 +233,8 @@ test("video cue [1000,2000) at 30 fps ends before its end frame", () => {
 
 test("ASS title cue [1000,2000) at 30 fps ends before its end frame", () => {
   const wsDir = setUpSpineWorkspace("cue_end_ass", 30);
-  const add = cli(["lane", "add-cue", "--lane", "ln_titles", "--kind", "title", "--text", "MMMMMMMMMM", "--size", "120", "--color", "#FFFFFF", "--at", "1000ms", "--duration", "1000ms", "--dir", wsDir]);
-  assert.ok(add.ok, add.raw);
+  const { cue: titleCue } = addLaneCue({ workspaceDir: wsDir, laneId: "ln_titles", kind: "title", text: "MMMMMMMMMM", fontSizePx: 120, colorHex: "#FFFFFF", atMs: 1000, durationMs: 1000, explicitDuration: true });
+  assert.equal(titleCue.typography?.text, "MMMMMMMMMM");
   const mp4 = renderDraft(wsDir, "cue_ass.mp4");
   assert.equal(countFrames(mp4), 90);
   const isTexty = (c: [number, number, number]): boolean => c[0] > 150 && c[1] > 20;
@@ -231,9 +267,10 @@ test("compiled plan gates lane overlays half-open and skips the cue past its end
   const wsDir = setUpSpineWorkspace("cue_end_plan", 30);
   const png = path.join(wsDir, "green.png");
   lavfiColorPng(png, "0x20E020");
-  assert.ok(cli(["library", "ingest", png, "--dir", wsDir]).ok);
-  const add = cli(["lane", "add-cue", "--lane", "ln_broll", "--kind", "broll", "--asset", "img_01", "--at", "1000ms", "--duration", "1000ms", "--dir", wsDir]);
-  assert.ok(add.ok, add.raw);
+  const planItems = ingestAssetsIntoWorkspace({ workspaceDir: wsDir, filePaths: [png] });
+  assert.equal(planItems[0].handle, "img_01");
+  const { cue: planCue } = addLaneCue({ workspaceDir: wsDir, laneId: "ln_broll", kind: "broll", assetHandle: "img_01", atMs: 1000, durationMs: 1000, explicitDuration: true });
+  assert.equal(planCue.asset_handle, "img_01");
 
   const { paths, sequence } = loadSequence(wsDir);
   const cueId = sequence.lanes.flatMap((l) => l.cues).find((c) => c.asset_handle)?.id;

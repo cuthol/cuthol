@@ -12,6 +12,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { snapAssEndMs, snapAssStartMs } from "../core/frame_time.js";
 import { resolveCueStartMs } from "../core/timeline.js";
 import { CutholSequence, LaneCue } from "../core/schema.js";
 
@@ -33,8 +34,13 @@ export function hexToAssColor(hex: string, opacity = 1.0): string {
  * Formats integer milliseconds into ASS timestamp `H:MM:SS.cc` (centiseconds).
  */
 export function formatAssTime(ms: number): string {
+  // Ceiling to centiseconds: the ASS event shows on output frame `n`
+  // (frame time `n * 1000 / fps`) iff start <= t < end, so rounding the
+  // start down would show the caption one frame early and rounding the end
+  // down would hide the last frame. Ceiling both ends covers exactly the
+  // frames `cueCoversTimeMs` gives (see `src/core/frame_time.ts`).
   const clamped = Math.max(0, Math.round(ms));
-  const totalCs = Math.floor(clamped / 10);
+  const totalCs = Math.ceil(clamped / 10);
   const cs = totalCs % 100;
   const totalSec = Math.floor(totalCs / 100);
   const sec = totalSec % 60;
@@ -150,6 +156,9 @@ export function compileTypographyAssFile(
 
       const startMs = resolveCueStartMs(seq, cue);
       const endMs = startMs + cue.duration_ms;
+      const fps = Math.max(1, Math.round(seq.stage.fps));
+      const fmtStart = (ms: number): string => formatAssTime(snapAssStartMs(ms, fps));
+      const fmtEnd = (ms: number): string => formatAssTime(snapAssEndMs(ms, fps));
       const posX = Math.round(seq.stage.width * 0.5 + (cue.placement.x_pct / 100) * seq.stage.width);
       const posY = Math.round(seq.stage.height * 0.5 + (cue.placement.y_pct / 100) * seq.stage.height);
       const layer = Math.max(0, lane.z_index + 50);
@@ -196,7 +205,7 @@ export function compileTypographyAssFile(
         const firstWordStart = Math.max(startMs, activeWords[0].sequence_start_ms);
         if (firstWordStart > startMs) {
           dialogueEvents.push(
-            `Dialogue: ${layer},${formatAssTime(startMs)},${formatAssTime(firstWordStart)},${styleName},,0,0,0,,{\\an5\\pos(${posX},${posY})}${plainJoined}`
+            `Dialogue: ${layer},${fmtStart(startMs)},${fmtEnd(firstWordStart)},${styleName},,0,0,0,,{\\an5\\pos(${posX},${posY})}${plainJoined}`
           );
         }
 
@@ -219,7 +228,7 @@ export function compileTypographyAssFile(
           });
 
           dialogueEvents.push(
-            `Dialogue: ${layer},${formatAssTime(wStart)},${formatAssTime(wEnd)},${styleName},,0,0,0,,{\\an5\\pos(${posX},${posY})}${joinWithWrappedBreaks(renderedTokens)}`
+            `Dialogue: ${layer},${fmtStart(wStart)},${fmtEnd(wEnd)},${styleName},,0,0,0,,{\\an5\\pos(${posX},${posY})}${joinWithWrappedBreaks(renderedTokens)}`
           );
           lastRenderedEnd = wEnd;
         }
@@ -227,7 +236,7 @@ export function compileTypographyAssFile(
         // If cue continues past the last word's end, hold unhighlighted phrase until endMs
         if (lastRenderedEnd < endMs) {
           dialogueEvents.push(
-            `Dialogue: ${layer},${formatAssTime(lastRenderedEnd)},${formatAssTime(endMs)},${styleName},,0,0,0,,{\\an5\\pos(${posX},${posY})}${plainJoined}`
+            `Dialogue: ${layer},${fmtStart(lastRenderedEnd)},${fmtEnd(endMs)},${styleName},,0,0,0,,{\\an5\\pos(${posX},${posY})}${plainJoined}`
           );
         }
       } else {
@@ -239,7 +248,7 @@ export function compileTypographyAssFile(
         );
         const safeText = wrapped.map((l) => escapeAssText(l)).join("\\N");
         dialogueEvents.push(
-          `Dialogue: ${layer},${formatAssTime(startMs)},${formatAssTime(endMs)},${styleName},,0,0,0,,{\\an5\\pos(${posX},${posY})}${safeText}`
+          `Dialogue: ${layer},${fmtStart(startMs)},${fmtEnd(endMs)},${styleName},,0,0,0,,{\\an5\\pos(${posX},${posY})}${safeText}`
         );
       }
     }

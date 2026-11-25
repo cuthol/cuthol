@@ -20,10 +20,12 @@ import {
   LaneCue,
   LaneKind,
   ParameterEnvelope,
+  parseStageSize,
   resolveAspectDimensions,
   SpatialPlacement,
   SpeedRampPoint,
   SpineClip,
+  StageAspect,
   syncSequenceHandleCounters,
   TransitionSpec,
   TypographySpec,
@@ -80,7 +82,10 @@ export interface CueSheetCueEntry {
 export interface CutholCueSheet {
   title?: string;
   stage?: {
-    aspect?: AspectPreset;
+    aspect?: AspectPreset | "custom";
+    width?: number;
+    height?: number;
+    size?: string;
     fps?: number;
     backdrop_color?: string;
     magnetic_spine?: boolean;
@@ -156,11 +161,26 @@ export function mergeCueSheetIntoSequence(
   }
 
   if (sheet.stage) {
-    if (sheet.stage.aspect && sheet.stage.aspect !== seq.stage.aspect) {
-      const dims = resolveAspectDimensions(sheet.stage.aspect);
+    const sheetSizeRaw = sheet.stage.size;
+    const sheetDims =
+      sheetSizeRaw !== undefined
+        ? parseStageSize(sheetSizeRaw)
+        : sheet.stage.width !== undefined && sheet.stage.height !== undefined
+          ? { width: sheet.stage.width, height: sheet.stage.height }
+          : undefined;
+    if (sheetDims) {
+      const aspect: StageAspect = sheet.stage.aspect ?? "custom";
+      seq.stage.width = sheetDims.width;
+      seq.stage.height = sheetDims.height;
+      seq.stage.aspect = aspect;
+      seq.stage.set_explicit = true;
+      diff.stage_changed = true;
+    } else if (sheet.stage.aspect && sheet.stage.aspect !== seq.stage.aspect) {
+      const dims = resolveAspectDimensions(sheet.stage.aspect as AspectPreset);
       seq.stage.aspect = sheet.stage.aspect;
       seq.stage.width = dims.width;
       seq.stage.height = dims.height;
+      seq.stage.set_explicit = true;
       diff.stage_changed = true;
     }
     if (
@@ -556,6 +576,9 @@ export function exportSequenceToCueSheet(seq: CutholSequence): CutholCueSheet {
     title: seq.meta.title,
     stage: {
       aspect: seq.stage.aspect,
+      ...(seq.stage.aspect === "custom"
+        ? { width: seq.stage.width, height: seq.stage.height }
+        : {}),
       fps: seq.stage.fps,
       backdrop_color: seq.stage.backdrop.color,
       magnetic_spine: seq.spine.magnetic,

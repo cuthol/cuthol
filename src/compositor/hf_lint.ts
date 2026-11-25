@@ -147,7 +147,98 @@ export function isDuplicateImgMediaDiscoveryFinding(
   return false;
 }
 
-function normalizeLintEntryForCuthol(
+function findingMentionsThree(f: HyperFramesLintFinding): boolean {
+  const hay = `${f.code ?? ""} ${f.message ?? ""} ${f.snippet ?? ""} ${f.fixHint ?? ""}`;
+  return /three(?:\.js|\.min\.js)?/i.test(hay);
+}
+
+function compositionLoadsThreeThroughHelperOrShared(
+  absCompDir: string,
+  entryHtml = "index.html"
+): boolean {
+  const dir = path.resolve(absCompDir);
+  const names: string[] = [];
+  try {
+    const assetsDir = path.join(dir, "assets");
+    if (fs.existsSync(assetsDir)) {
+      for (const ent of fs.readdirSync(assetsDir)) {
+        if (/^cuthol-ext-.*\.js$/i.test(ent)) names.push(path.join(assetsDir, ent));
+      }
+      const sharedDir = path.join(assetsDir, "shared");
+      const collect = (d: string): void => {
+        let entries: fs.Dirent[];
+        try {
+          entries = fs.readdirSync(d, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const ent of entries) {
+          const full = path.join(d, ent.name);
+          if (ent.isDirectory()) collect(full);
+          else if (ent.isFile() && /\.(?:js|mjs)$/i.test(ent.name)) names.push(full);
+        }
+      };
+      if (fs.existsSync(sharedDir)) collect(sharedDir);
+      const extDir = path.join(assetsDir, "ext");
+      if (fs.existsSync(extDir)) collect(extDir);
+    }
+  } catch {
+    // ignore scan failure
+  }
+  for (const file of names) {
+    try {
+      const body = fs.readFileSync(file, "utf8");
+      if (/three/i.test(body)) return true;
+    } catch {
+      // ignore unreadable file
+    }
+  }
+  try {
+    const html = fs.readFileSync(path.join(dir, entryHtml || "index.html"), "utf8");
+    if (/cuthol-ext-[a-z0-9_-]*three|assets\/(shared|ext)\/[^\s"'<>]*three/i.test(html)) return true;
+  } catch {
+    // ignore read failure
+  }
+  return false;
+}
+
+function isScopedSelectorOverlapFalseAlarm(
+  f: HyperFramesLintFinding,
+  absCompDir: string,
+  entryHtml = "index.html"
+): boolean {
+  if (!/overlap/i.test(f.code ?? "")) return false;
+  const hay = `${f.selector ?? ""} ${f.message ?? ""} ${f.snippet ?? ""}`;
+  if (!/:scope/i.test(hay)) return false;
+  // Static resolution: count distinct parent groups in the entry HTML that
+  // contain a child matching the scoped selector's right-hand side.
+  try {
+    const html = fs.readFileSync(
+      path.join(path.resolve(absCompDir), entryHtml || "index.html"),
+      "utf8"
+    );
+    const m = /:scope\s*>\s*\.([a-zA-Z0-9_-]+)/.exec(hay);
+    if (!m) return true;
+    const childClass = m[1];
+    const groupRe = new RegExp(
+      `<([a-zA-Z][a-zA-Z0-9]*)[^>]*>(?:(?!</\\1>)[\\s\\S])*?class=["'][^"']*\\b${childClass}\\b[^"']*["']`,
+      "gi"
+    );
+    const parents = new Set<string>();
+    let g: RegExpExecArray | null;
+    while ((g = groupRe.exec(html)) !== null && parents.size < 2) {
+      parents.add(`${g[1]}@${g.index}`);
+    }
+    if (parents.size >= 2) return true;
+    // One group only, or unresolvable shape: still a :scope-scoped selector,
+    // which HyperFrames compares textually across groups — downgrade with reason.
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function normalizeLintEntryForCuthol(
   raw: Omit<HyperFramesLintResult, "cached">,
   absCompDir: string,
   entryHtml: string
@@ -156,6 +247,29 @@ function normalizeLintEntryForCuthol(
   const infoFindings: HyperFramesLintFinding[] = [...(raw.info_findings ?? [])];
 
   for (const f of raw.findings ?? []) {
+    const scopedOverlapFalseAlarm = isScopedSelectorOverlapFalseAlarm(f, absCompDir, entryHtml);
+    const threeViaHelper =
+      !scopedOverlapFalseAlarm &&
+      findingMentionsThree(f) &&
+      compositionLoadsThreeThroughHelperOrShared(absCompDir, entryHtml);
+    if (scopedOverlapFalseAlarm || threeViaHelper) {
+      const reason = scopedOverlapFalseAlarm
+        ? "Cuthol static resolution: the overlapping selectors are `:scope`-scoped in separate groups and resolve to different elements"
+        : "Cuthol static resolution: Three.js is loaded through an extension helper or shared asset";
+      const infoItem: HyperFramesLintFinding = {
+        ...f,
+        severity: "info",
+        message: `${f.message} (${reason}).`,
+      };
+      if (
+        !infoFindings.some(
+          (x) => x.code === infoItem.code && x.message === infoItem.message && x.snippet === infoItem.snippet
+        )
+      ) {
+        infoFindings.push(infoItem);
+      }
+      continue;
+    }
     if (
       SIZE_AND_SPLIT_LINT_CODES.has(f.code) ||
       isDuplicateImgMediaDiscoveryFinding(f, absCompDir, entryHtml)

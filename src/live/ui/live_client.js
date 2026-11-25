@@ -222,6 +222,16 @@ export function connect(store, api) {
         console.error("[live] bad comps", e);
       }
     });
+    // Background thumbnail pass finished: scene URLs that turned ready (`s=1`)
+    // replace the pending placeholders.
+    es.addEventListener("thumbs", (ev) => {
+      try {
+        const msg = JSON.parse(ev.data);
+        if (Array.isArray(msg.scenes)) store.set({ scenes: msg.scenes });
+      } catch (e) {
+        console.error("[live] bad thumbs", e);
+      }
+    });
     es.addEventListener("progress", (ev) => {
       try {
         store.set({ progress: JSON.parse(ev.data) }, "progress");

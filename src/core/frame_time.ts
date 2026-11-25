@@ -51,6 +51,33 @@ export function buildCueOverlayEnableExpr(startSec: string, endSec: string): str
 }
 
 /**
+ * ASS subtitle times have centisecond (10 ms) resolution while output frames
+ * sit on the `n * 1000 / fps` grid, so naive rounding can show a caption one
+ * frame early or hide its last frame. These helpers snap a cue edge to a
+ * centisecond value that covers exactly the frames `cueCoversTimeMs` gives:
+ * the start snaps to a centisecond in `(previous frame time, first shown
+ * frame time]`, the end to one in `(last shown frame time, next frame time]`.
+ * Such a multiple of 10 always exists at 24/25/30/60 fps (the frame interval
+ * exceeds 10 ms). Cue times are integer milliseconds in practice.
+ */
+export function snapAssStartMs(startMs: number, fps: number): number {
+  const s = Math.max(0, Math.round(startMs));
+  const rate = Math.max(1, Math.round(fps));
+  const firstIdx = Math.max(0, Math.ceil((s * rate) / 1000 - 1e-9));
+  const firstTime = (firstIdx * 1000) / rate;
+  return Math.floor(firstTime / 10 + 1e-9) * 10;
+}
+
+/** Centisecond snap for a cue end edge; see `snapAssStartMs`. */
+export function snapAssEndMs(endMs: number, fps: number): number {
+  const e = Math.max(0, Math.round(endMs));
+  const rate = Math.max(1, Math.round(fps));
+  const nextIdx = Math.max(0, Math.ceil((e * rate) / 1000 - 1e-9));
+  const nextTime = (nextIdx * 1000) / rate;
+  return Math.floor(nextTime / 10 + 1e-9) * 10;
+}
+
+/**
  * True when the single-frame fast path applies at `singleFrameAtMs`: the
  * instant is inside `[cueStartMs, cueEndMs)`, with one frame of pre-roll
  * tolerance before the start (served from the cue's first frame and hidden

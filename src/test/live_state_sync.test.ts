@@ -359,7 +359,7 @@ test("server: snapshot thumb URLs load as-is, with no extra auth step", async ()
     ]);
     assert.ok(snap.scenes.length > 0);
     const thumb = snap.scenes[0].thumb ?? "";
-    assert.match(thumb, /^\/api\/thumb\/sc_1\?k=[0-9a-f]{16}&t=[0-9a-f]+$/);
+    assert.match(thumb, /^\/api\/thumb\/sc_1\?k=[0-9a-f]{16}&s=[01]&t=[0-9a-f]+$/);
     // The window drops the URL into an <img> untouched: it must answer alone.
     const img = await httpRequest(info.port, thumb);
     assert.equal(img.status, 200);
@@ -375,7 +375,16 @@ test("server: missing media answers a placeholder, not a bare failure", { timeou
   fs.rmSync(media, { force: true });
   const info = await ensureLiveServer(dir);
   try {
-    const res = await httpRequest(info.port, `/api/thumb/sc_1?t=${info.token}`);
+    // Answered at once while the thumbnail pass runs (a pending placeholder),
+    // then the final placeholder once the pass found no picture.
+    let res = await httpRequest(info.port, `/api/thumb/sc_1?t=${info.token}`);
+    const deadline = Date.now() + 100_000;
+    while (!/Thumbnail unavailable/.test(res.body) && Date.now() < deadline) {
+      assert.equal(res.status, 200);
+      assert.match(res.headers["content-type"] ?? "", /svg/);
+      await new Promise((r) => setTimeout(r, 500));
+      res = await httpRequest(info.port, `/api/thumb/sc_1?t=${info.token}`);
+    }
     assert.equal(res.status, 200);
     assert.match(res.headers["content-type"] ?? "", /svg/);
     assert.match(res.body, /Thumbnail unavailable/);

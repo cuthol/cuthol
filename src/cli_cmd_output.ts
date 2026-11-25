@@ -1,8 +1,12 @@
 // CLI 'verify', 'monitor', 'render', and 'brief' command group handlers (split out of cli.ts).
 import { BriefLens, renderSequenceBrief } from "./brief/inspector.js";
-import { detectExternalChanges, formatExternalNotice } from "./core/external_changes.js";
+import {
+  adoptExternalCompositionEdits,
+  detectExternalChanges,
+  formatExternalNotice,
+} from "./core/external_changes.js";
 import { RenderPreset } from "./compositor/compiler.js";
-import { CutholDiagnostic, DIAGNOSTICS, VerificationGateId } from "./core/diagnostics.js";
+import { CutholDiagnostic, CutholError, DIAGNOSTICS, VerificationGateId } from "./core/diagnostics.js";
 import { parseTimeMs } from "./core/time.js";
 import { computeSequenceDurationMs } from "./core/timeline.js";
 import { loadSequence, toExternalChangesSummary } from "./core/workspace.js";
@@ -19,7 +23,16 @@ import {
 } from "./cli_output.js";
 
 const BARE_NUMBER = /^[+-]?\d+(?:\.\d+)?$/;
+const BARE_FRACTION = /^[+-]?\d+\.\d+$/;
 const NUMBER_WITH_UNIT = /^[+-]?\d+(?:\.\d+)?\s*(?:ms|s|sec|min|us)$/i;
+
+/** A unitless fraction (`21.1`) would read as 21ms; require an explicit unit. */
+export function parseMonitorAtMs(raw: string): number {
+  if (BARE_FRACTION.test(raw.trim())) {
+    throw new CutholError(DIAGNOSTICS.UNITLESS_FRACTION_TIME(raw.trim()));
+  }
+  return parseTimeMs(raw);
+}
 
 /** Warn when several bare numbers are all under 1000 ms on a sequence of at least 10s. */
 function unitlessAtWarning(atRaw: string | undefined, sequenceDurationMs: number): CutholDiagnostic | null {
@@ -52,7 +65,8 @@ export function runVerifyCommand(ctx: CliCommandContext): CliCommandResult {
     gatesRaw && gatesRaw !== "all"
       ? (gatesRaw.split(",").map((s) => s.trim()) as VerificationGateId[])
       : undefined;
-  // Verify never touches coordinates: no measuring, no browser, no flags.
+  // Verify never measures coordinates; it runs one shared script probe for
+  // compositions that have no cached probe record (cached on the second run).
   const report = runWorkspaceVerification(workspaceDir, gates);
   emitEnvelopeJson(workspaceDir, "verify", { ...report, ok: report.ok });
   if (!report.ok) {
@@ -61,17 +75,50 @@ export function runVerifyCommand(ctx: CliCommandContext): CliCommandResult {
   return;
 }
 
+/**
+ * Adopts outside edits that touch only composition folders (the sequence file
+ * untouched) before a read command, so the agent's natural "write the file,
+ * then look" loop needs no explicit `changes adopt`. Returns the INFO line or null.
+ */
+function autoAdoptCompositionEdits(workspaceDir: string): { diagnostic: CutholDiagnostic; line: string } | null {
+  try {
+    const adopted = adoptExternalCompositionEdits(workspaceDir, { automatic: true });
+    if (!adopted) return null;
+    return {
+      diagnostic: DIAGNOSTICS.EXTERNAL_COMPOSITION_EDITS_AUTO_ADOPTED(adopted.adopted_comps),
+      line: adopted.summary_line,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function withAdoptNotice<T extends object>(
+  result: T,
+  adopted: { diagnostic: CutholDiagnostic } | null
+): T {
+  if (!adopted) return result;
+  const prev = (result as { diagnostics?: unknown }).diagnostics;
+  const list = Array.isArray(prev) ? (prev as CutholDiagnostic[]) : [];
+  return { ...result, diagnostics: [...list, adopted.diagnostic] };
+}
+
 export function runMonitorCommand(ctx: CliCommandContext): CliCommandResult {
   const { action, rest, flags, workspaceDir } = ctx;
+  const adopted = action === "frame" || action === "sheet" || action === "timeline"
+    ? autoAdoptCompositionEdits(workspaceDir)
+    : null;
   if (action === "frame") {
     const atRaw = strFlag(flags, "at") ?? rest[0] ?? "0ms";
     const res = captureMonitorFrame({
       workspaceDir,
-      atMs: parseTimeMs(atRaw),
+      atMs: parseMonitorAtMs(atRaw),
       showBoxes: boolFlag(flags, "boxes", true),
       outputPath: strFlag(flags, "out"),
     });
-    emitEnvelopeJson(workspaceDir, "monitor.frame", { ...attachAtWarning(workspaceDir, atRaw, res) });
+    emitEnvelopeJson(workspaceDir, "monitor.frame", {
+      ...withAdoptNotice(attachAtWarning(workspaceDir, atRaw, res), adopted),
+    });
     return;
   }
 
@@ -84,13 +131,30 @@ export function runMonitorCommand(ctx: CliCommandContext): CliCommandResult {
     const startRaw = strFlag(flags, "start");
     const endRaw = strFlag(flags, "end");
     const atRaw = strFlag(flags, "at");
-    const atMs = atRaw
+    const atTokens = atRaw
       ? atRaw
           .split(",")
           .map((s) => s.trim())
           .filter(Boolean)
-          .map((s) => parseTimeMs(s))
-      : undefined;
+      : [];
+    if (atTokens.length === 1 && (startRaw !== undefined || endRaw !== undefined)) {
+      throw new CutholError(
+        DIAGNOSTICS.SHEET_AT_WITH_WINDOW(
+          `single at '${atTokens[0]}'` +
+            (startRaw !== undefined ? ` with start '${startRaw}'` : "") +
+            (endRaw !== undefined ? ` with end '${endRaw}'` : "")
+        )
+      );
+    }
+    const atWindowWarn =
+      atTokens.length > 1 && (startRaw !== undefined || endRaw !== undefined)
+        ? DIAGNOSTICS.SHEET_AT_WITH_WINDOW_WARN(
+            `${atTokens.length} at values` +
+              (startRaw !== undefined ? ` with start '${startRaw}'` : "") +
+              (endRaw !== undefined ? ` with end '${endRaw}'` : "")
+          )
+        : null;
+    const atMs = atTokens.length > 0 ? atTokens.map((s) => parseMonitorAtMs(s)) : undefined;
     const res = captureMonitorSheet({
       workspaceDir,
       startMs: startRaw ? parseTimeMs(startRaw) : undefined,
@@ -101,7 +165,11 @@ export function runMonitorCommand(ctx: CliCommandContext): CliCommandResult {
       showBoxes: boolFlag(flags, "boxes", true),
       outputPath: strFlag(flags, "out"),
     });
-    emitEnvelopeJson(workspaceDir, "monitor.sheet", { ...attachAtWarning(workspaceDir, atRaw, res) });
+    const warned = withAdoptNotice(attachAtWarning(workspaceDir, atRaw, res), adopted);
+    emitEnvelopeJson(workspaceDir, "monitor.sheet", {
+      ...warned,
+      ...(atWindowWarn ? { diagnostics: [...warned.diagnostics, atWindowWarn] } : {}),
+    });
     return;
   }
 
@@ -112,7 +180,7 @@ export function runMonitorCommand(ctx: CliCommandContext): CliCommandResult {
       includeEmptyLanes: boolFlag(flags, "include-empty", false),
       outputPath: strFlag(flags, "out"),
     });
-    emitEnvelopeJson(workspaceDir, "monitor.timeline", { ...res });
+    emitEnvelopeJson(workspaceDir, "monitor.timeline", { ...withAdoptNotice(res, adopted) });
     return;
   }
   return CLI_NOT_HANDLED;
@@ -132,6 +200,7 @@ export function runRenderCommand(ctx: CliCommandContext): CliCommandResult {
   const workers = numFlag(flags, "workers");
   const encoderRaw = strFlag(flags, "encoder") as "auto" | "nvenc" | "libx264" | undefined;
   const overlayRes = strFlag(flags, "overlay-res");
+  const adopted = autoAdoptCompositionEdits(workspaceDir);
   const res = renderSequenceToMp4({
     workspaceDir,
     preset,
@@ -140,12 +209,13 @@ export function runRenderCommand(ctx: CliCommandContext): CliCommandResult {
     encoder: encoderRaw,
     overlayRes,
   });
-  emitEnvelopeJson(workspaceDir, "render", { ...res });
+  emitEnvelopeJson(workspaceDir, "render", { ...withAdoptNotice(res, adopted) });
   return;
 }
 
 export function runBriefCommand(ctx: CliCommandContext): CliCommandResult {
   const { action, flags, workspaceDir, formatFlag } = ctx;
+  // Brief stays read-only: it reports outside edits (file names) instead of adopting them.
   const { sequence } = loadSequence(workspaceDir);
   // External-change top line (null when clean: outputs stay byte-identical).
   let extChanges: ReturnType<typeof detectExternalChanges> | null = null;
@@ -156,8 +226,7 @@ export function runBriefCommand(ctx: CliCommandContext): CliCommandResult {
   } catch {
     extChanges = null;
     extNotice = null;
-  }
-  const lens = (strFlag(flags, "lens", (action as BriefLens) || "overview") as BriefLens) ?? "overview";
+  }  const lens = (strFlag(flags, "lens", (action as BriefLens) || "overview") as BriefLens) ?? "overview";
   const idRaw = strFlag(flags, "id");
   const targetIds = idRaw ? idRaw.split(",").map((s) => s.trim()).filter(Boolean) : [];
 

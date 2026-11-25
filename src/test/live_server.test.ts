@@ -59,13 +59,19 @@ function ffmpegTone(outPath: string, seconds: number): void {
   assert.equal(proc.status, 0, proc.stderr || proc.stdout);
 }
 
+/** One shared tone for all workspaces: identical bytes, encoded once per run. */
+function sharedTone(): string {
+  const media = path.join(ROOT, "shared_tone.mp4");
+  if (!fs.existsSync(media)) ffmpegTone(media, 4);
+  return media;
+}
+
 /** Workspace with one ingested clip on the spine (rev 3: init, ingest, append). */
 function makeWorkspace(name: string): string {
   const dir = path.join(ROOT, name);
   fs.rmSync(dir, { recursive: true, force: true });
   initWorkspace({ dir, title: name, aspect: "16:9", fps: 30 });
-  const media = path.join(ROOT, `${name}.mp4`);
-  if (!fs.existsSync(media)) ffmpegTone(media, 4);
+  const media = sharedTone();
   const [item] = ingestAssetsIntoWorkspace({ workspaceDir: dir, filePaths: [media] });
   appendSpineClip({ workspaceDir: dir, assetHandle: item.handle });
   WORKSPACES.push(dir);
@@ -243,6 +249,42 @@ test("rejects missing token and forged Host/Origin", async () => {
     const again = await ensureLiveServer(dir);
     assert.equal(again.pid, info.pid);
     assert.equal(again.port, info.port);
+  } finally {
+    await stopLiveServer(dir);
+  }
+});
+
+test("composition requests: a foreign or stale cookie never hides a valid token; the cookie is per port", async () => {
+  const dir = makeWorkspace("ws_comp_auth");
+  const info = await ensureLiveServer(dir);
+  try {
+    // Authorization runs before routing: refused = 403, allowed but missing cue = 404.
+    const asset = "/comp/cue_missing/assets/x.js";
+    const goodRef = `http://127.0.0.1:${info.port}/comp/cue_missing/?t=${info.token}`;
+    const stale = (info.token[0] === "a" ? "b" : "a") + info.token.slice(1);
+    // The window document sets a cookie whose name carries this server's port.
+    const doc = await httpRequest(info.port, `/?t=${info.token}`);
+    const setCookie = String(doc.headers["set-cookie"] ?? "");
+    assert.match(setCookie, new RegExp(`cuthol_live_comp_${info.port}=${info.token};`));
+    // Another server's cookie (same host, other port) plus a valid referer: allowed.
+    const foreign = await httpRequest(info.port, asset, {
+      headers: { Cookie: `cuthol_live_comp_${info.port + 1}=${stale}`, Referer: goodRef },
+    });
+    assert.notEqual(foreign.status, 403);
+    // A stale value under this server's own cookie name does not hide a valid referer.
+    const staleOwn = await httpRequest(info.port, asset, {
+      headers: { Cookie: `cuthol_live_comp_${info.port}=${stale}`, Referer: goodRef },
+    });
+    assert.notEqual(staleOwn.status, 403);
+    // Valid cookie alone: allowed.
+    const cookieOnly = await httpRequest(info.port, asset, { headers: { Cookie: `cuthol_live_comp_${info.port}=${info.token}` } });
+    assert.notEqual(cookieOnly.status, 403);
+    // Nothing valid anywhere: refused.
+    const none = await httpRequest(info.port, asset, {
+      headers: { Cookie: `cuthol_live_comp_${info.port}=${stale}`, Referer: `http://127.0.0.1:${info.port}/comp/cue_missing/?t=${stale}` },
+    });
+    assert.equal(none.status, 403);
+    assert.equal((await httpRequest(info.port, asset)).status, 403);
   } finally {
     await stopLiveServer(dir);
   }
@@ -427,29 +469,25 @@ test("attaches notes to error and markdown responses", async () => {
     const errNotes = errEnv.live_notes as { lines: string[] } | undefined;
     assert.ok(errNotes, "error envelope must carry live_notes");
     assert.ok(errNotes.lines.some((l) => l.includes("on the error path")));
-  } finally {
-    await stopLiveServer(dir);
-  }
 
-  const dir2 = makeWorkspace("ws_notes3");
-  const info2 = await ensureLiveServer(dir2);
-  try {
-    const post = await httpRequest(info2.port, `/api/notes?t=${info2.token}`, {
+    // Same server, next packet: the failed call above already drained the
+    // first packet, so the markdown path starts from a clean inbox.
+    const post2 = await httpRequest(info.port, `/api/notes?t=${info.token}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         notes: [{ n: 1, text: "on the markdown path", at_ms: 500, frame: 15, point: { x: 1, y: 1, nx: 0, ny: 0 }, elements: [] }],
       }),
     });
-    assert.equal(post.status, 200);
-    const md = runCli(["brief", "--dir", dir2]);
+    assert.equal(post2.status, 200);
+    const md = runCli(["brief", "--dir", dir]);
     assert.equal(md.status, 0);
     assert.ok(md.stdout.includes("Live notes from the user (handle these first):"));
     assert.ok(md.stdout.includes("on the markdown path"));
-    const md2 = runCli(["brief", "--dir", dir2]);
+    const md2 = runCli(["brief", "--dir", dir]);
     assert.ok(!md2.stdout.includes("Live notes from the user"));
   } finally {
-    await stopLiveServer(dir2);
+    await stopLiveServer(dir);
   }
 });
 
@@ -484,7 +522,8 @@ test("MCP responses carry note lines and sheet images", async () => {
   );
 });
 
-test("idles near zero CPU", async function () {
+// "load: " tests measure wall time or CPU: scripts/test.mjs runs them alone, after the other stages.
+test("load: idles near zero CPU", async function () {
   const probe = process.platform === "win32" || process.platform === "linux";
   if (!probe) {
     console.log("skip: no per-process CPU readout on this platform");

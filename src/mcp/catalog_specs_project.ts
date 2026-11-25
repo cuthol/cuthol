@@ -11,6 +11,7 @@ export const PROJECT_ACTION_SPECS: ActionSpec[] = [
     mutates: true,
     params: [
       { name: "aspect", type: "string", description: "Stage aspect ratio (default '9:16').", enum: ["9:16", "16:9", "1:1", "4:5"] },
+      { name: "size", type: "string", description: "Free stage size WIDTHxHEIGHT with even numbers (e.g. '1920x800'); overrides aspect with a custom stage." },
       { name: "fps", type: "number", description: "Stage frame rate (default 30)." },
       { name: "title", type: "string", description: "Project title." },
     ],
@@ -26,11 +27,31 @@ export const PROJECT_ACTION_SPECS: ActionSpec[] = [
   },
   {
     tool: "workspace",
+    action: "stage",
+    argv: ["workspace", "stage"],
+    summary: "Change the stage size and rescale lane placements and caption positions (journaled; undo restores).",
+    mutates: true,
+    params: [
+      { name: "size", type: "string", description: "New stage size WIDTHxHEIGHT with even numbers (e.g. '1920x800')." },
+      { name: "aspect", type: "string", description: "New stage aspect preset.", enum: ["9:16", "16:9", "1:1", "4:5"] },
+      { name: "from", type: "string", description: "Library asset handle to adopt the size from." },
+    ],
+  },
+  {
+    tool: "workspace",
     action: "backdrop",
     argv: ["workspace", "backdrop"],
     summary: "Set the stage backdrop colour: the base of every frame wherever no clip or cue covers it (the background of a graphics-only video). Journaled; undo restores the previous colour.",
     mutates: true,
     params: [{ name: "color", type: "string", description: "Colour as '#RRGGBB' (e.g. '#F7C531').", required: true }],
+  },
+  {
+    tool: "workspace",
+    action: "tempo",
+    argv: ["workspace", "tempo"],
+    summary: "Set the sequence tempo (stage.tempo): output rate applied at render/monitor/export; cue times stay on the sequence clock. Journaled; --rate 1 clears.",
+    mutates: true,
+    params: [{ name: "rate", type: "number", description: "Tempo 0.5..2.0 (1 clears).", required: true }],
   },
   {
     tool: "workspace",

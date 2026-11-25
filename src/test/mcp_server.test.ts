@@ -18,6 +18,7 @@ import { resolveGuideTopic } from "../core/skills_install.js";
 const TEST_ROOT = path.resolve(process.cwd(), "test-workspace", "mcp_server_tests");
 
 function makeClip(file: string): void {
+  if (fs.existsSync(file)) return;
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const proc = spawnSync(
     "ffmpeg",
@@ -34,6 +35,19 @@ function makeClip(file: string): void {
 
 function text(res: { content: Array<{ type: string; text?: string }> }): string {
   return res.content.filter((c) => c.type === "text").map((c) => c.text).join("\n");
+}
+
+/** Retry Windows transient file locks (AV/indexer/HyperFrames orphans); still throws if truly stuck. */
+function safeRm(dir: string): void {
+  for (let i = 0; i < 10; i++) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      if (i === 9) throw err;
+      spawnSync(process.execPath, ["-e", "setTimeout(()=>{},500)"], { stdio: "ignore" });
+    }
+  }
 }
 
 test("1. Catalog: every action maps to a CLI command or an MCP-only handler, schemas are closed", () => {
@@ -64,7 +78,7 @@ test("1. Catalog: every action maps to a CLI command or an MCP-only handler, sch
 
 test("2. Session project, image results, dry-run / no-change reporting, guide and composition sandbox", async () => {
   const ws = path.join(TEST_ROOT, "ws");
-  fs.rmSync(TEST_ROOT, { recursive: true, force: true });
+  safeRm(ws);
   const clip = path.join(TEST_ROOT, "media", "clip.mp4");
   makeClip(clip);
 
@@ -151,9 +165,12 @@ test("3. Cleanup dry-run candidates table & pagination, accurate dry-run Would c
   assert.match(sensParam.description, /higher\s*=.*more beats/i);
 
   const ws = path.join(TEST_ROOT, "ws_live_fixes");
-  fs.rmSync(ws, { recursive: true, force: true });
+  safeRm(ws);
   const talkClip = path.join(TEST_ROOT, "media", "talk_long.mp4");
   fs.mkdirSync(path.dirname(talkClip), { recursive: true });
+  if (fs.existsSync(talkClip)) {
+    assert.ok(fs.statSync(talkClip).size > 1000, "cached talk_long.mp4 must be a real clip");
+  } else {
   const ffProc = spawnSync(
     "ffmpeg",
     [
@@ -166,6 +183,7 @@ test("3. Cleanup dry-run candidates table & pagination, accurate dry-run Would c
     { encoding: "utf8" }
   );
   assert.equal(ffProc.status, 0, ffProc.stderr);
+  }
 
   // Build a sidecar transcript with 180 words and 55+ pause/filler candidates (mix of >=400ms and 280..350ms pauses)
   const words: Array<{

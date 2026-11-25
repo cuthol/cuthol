@@ -67,10 +67,23 @@ export function formatLiveNoteLines(packets: LiveNotePacket[]): string[] {
       // A point-less note is a general note: mark it so the agent sees there
       // is no pin. Pinned notes keep the old shape (no suffix without elements).
       const where = els.length ? ` → ${els.join(" ∩ ")}${n.overlap_px2 ? ` ${Math.round(n.overlap_px2)} px²` : ""}` : (n.point ? "" : " (general note, no pin)");
-      lines.push(`#${n.n} ${fmtNoteTime(n.at_ms)} "${text}"${where}`);
+      const scope = n.scope;
+      if (!scope && !n.cue) {
+        // Old single-frame packets keep the original shape.
+        lines.push(`#${n.n} ${fmtNoteTime(n.at_ms)} "${text}"${where}`);
+      } else if (scope?.kind === "boundary") {
+        lines.push(`note ${n.n} boundary ${scope.from}→${scope.to} @ ${fmtSeqTime(n.at_ms)} "${text}"${where}`);
+      } else if (scope?.kind === "range") {
+        lines.push(`note ${n.n} range ${scope.from}–${scope.to} "${text}"${where}`);
+      } else if (scope?.kind === "all") {
+        lines.push(`note ${n.n} all scenes "${text}"${where}`);
+      } else {
+        lines.push(`note ${n.n} @ ${n.cue ?? "unknown"} ${fmtSeqTime(n.at_ms)} "${text}"${where}`);
+      }
     }
     if (p.setting) lines.push(`human changed setting ${p.setting.key}: ${p.setting.old_value} → ${p.setting.new_value}`);
     if (p.sheet) lines.push(`sheet: ${p.sheet}`);
+    if (p.sheet_note) lines.push(p.sheet_note);
   }
   return lines;
 }
@@ -82,6 +95,15 @@ function fmtNoteTime(ms: number): string {
   const ss = String(Math.floor(t / 1000) % 60).padStart(2, "0");
   const cc = String(Math.floor((t % 1000) / 10)).padStart(2, "0");
   return `${mm}:${ss}.${cc}`;
+}
+
+/** `m:ss.mmm` sequence time for multi-scene note lines. */
+function fmtSeqTime(ms: number): string {
+  const t = Math.max(0, Math.round(ms));
+  const m = Math.floor(t / 60000);
+  const s = String(Math.floor(t / 1000) % 60).padStart(2, "0");
+  const mmm = String(t % 1000).padStart(3, "0");
+  return `${m}:${s}.${mmm}`;
 }
 
 /** Most human-edit lines one response carries; the rest collapse into `+N more`. */
@@ -127,6 +149,13 @@ export function drainLiveInbox(projectDir: string): LiveNotesPayload | null {
       const abs = fs.existsSync(moved) ? moved : path.resolve(projectDir, p.sheet);
       if (fs.existsSync(abs)) images.push(abs);
       p.sheet = path.relative(path.resolve(projectDir), abs).split(path.sep).join("/");
+      try {
+        const { schema: _drop, ...rest } = p as unknown as Record<string, unknown>;
+        void _drop;
+        fs.writeFileSync(path.join(delivered, `${p.id}.json`), JSON.stringify({ schema: LIVE_SCHEMA, ...rest }, null, 2));
+      } catch {
+        // delivered copy stays as-is; the in-memory packet carries the fixed path
+      }
     }
   }
   const lines = formatLiveNoteLines(packets);

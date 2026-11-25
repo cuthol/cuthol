@@ -115,9 +115,19 @@ automatic `libx264` retry if a hardware encoder stalled).
 Long multi-clip timelines (> 24 clips per segment, `CUTHOL_RENDER_SEGMENT_
 MAX_CLIPS`) compile and render in frame-exact time segments and concatenate
 without re-encoding video, preserving transitions, compositions, envelopes,
-subtitles and loudness calibration across boundaries. A whole-video pace change
-(e.g. 1.1x delivery) has no in-app path: re-encode the master outside and
-re-check loudness on the delivered file.
+subtitles and loudness calibration across boundaries.
+
+## Sequence tempo vs spine speed
+
+`workspace tempo --rate <0.5..2.0>` sets `stage.tempo`: a whole-edit rate
+applied once at output (video `setpts`, audio pitch-preserving `atempo`,
+chained when outside 0.5–2.0). Cue times, compositions, transcripts and every
+`--at` stay on the **sequence clock**; render, monitor timeline, the Live
+preview, timeline export and the reported output duration use the **output
+clock** (sequence / tempo). Use tempo for a faster/slower delivery of the
+whole edit; use `spine speed` (per-clip rate or ramp) for pacing inside the
+edit. `--rate 1` clears the field (absent = 1). Changing tempo re-renders
+zero composition overlays (the overlay cache key excludes tempo).
 
 ## How long it takes (orientation, one machine)
 

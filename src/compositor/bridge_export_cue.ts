@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { resolveCueStartMs } from "../core/timeline.js";
 import { CutholSequence, LaneCue, LibraryItem } from "../core/schema.js";
-import { OPEN_STANDARDS } from "../core/standards.js";
+import { isVerticalStage, OPEN_STANDARDS } from "../core/standards.js";
 import { WorkspacePaths } from "../core/workspace.js";
 import { analyzeAssetBeats, BeatAnalysisResult } from "../library/beats.js";
 import { MediaLedger } from "../library/ledger.js";
@@ -62,7 +62,7 @@ function computeSafeZonePx(seq: CutholSequence): { x: number; y: number; w: numb
   let rightMarginPx = leftPx;
   let bottomMarginPx = topPx;
 
-  if (seq.stage.aspect === "9:16") {
+  if (isVerticalStage(seq.stage)) {
     rightMarginPx = Math.round(W * (OPEN_STANDARDS.SAFE_ZONES.VERTICAL_9_16_RIGHT_CHROME_PCT / 100));
     bottomMarginPx = Math.round(H * (OPEN_STANDARDS.SAFE_ZONES.VERTICAL_9_16_BOTTOM_CHROME_PCT / 100));
   }

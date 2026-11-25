@@ -4,7 +4,7 @@ import { diffSequenceJson } from "../core/external_changes.js";
 import { computeSequenceDurationMs } from "../core/timeline.js";
 import { loadJournalManifest, loadSequence, type JournalEntry } from "../core/workspace.js";
 import { readLiveLock, resolveRevisionActor } from "./live_lock.js";
-import { computeSceneThumbKey, setSceneThumbProjectDir } from "./live_thumbs.js";
+import { computeSceneThumbKey, sceneThumbFile, setSceneThumbProjectDir } from "./live_thumbs.js";
 import { resolveLivePaths } from "./live_paths.js";
 import { LIVE_SCHEMA, type LiveActivityEntry, type LiveDelta, type LiveProgress, type LiveSceneSummary, type LiveSnapshot } from "./live_types.js";
 
@@ -210,17 +210,30 @@ export function activityEntriesForRange(projectDir: string, fromRev: number, toR
 export function buildScenes(seq: any, token?: string, projectDir?: string): LiveSceneSummary[] {
   setSceneThumbProjectDir(projectDir);
   const clips: any[] = seq?.spine?.clips ?? [];
-  return clips.map((c, i) => {
-    const scene: LiveSceneSummary = {
-      id: `sc_${i + 1}`,
-      start_ms: c.timeline_in_ms ?? 0,
-      end_ms: (c.timeline_in_ms ?? 0) + (c.duration_ms ?? 0),
-      label: c.asset_handle ?? c.id,
-      members: [c.id],
-    };
-    scene.thumb = `/api/thumb/${scene.id}?k=${computeSceneThumbKey(seq, scene, projectDir)}${token ? `&t=${token}` : ""}`;
+  const toScene = (id: string, startMs: number, endMs: number, label: string, members: string[]): LiveSceneSummary => {
+    const scene: LiveSceneSummary = { id, start_ms: startMs, end_ms: endMs, label, members };
+    const key = computeSceneThumbKey(seq, scene, projectDir);
+    // `s=1` once the picture file exists: the server answers a missing one at
+    // once with a pending placeholder, and the URL change makes the window
+    // fetch the real picture when the background pass announces it.
+    const ready = projectDir ? (fs.existsSync(sceneThumbFile(projectDir, key)) ? "&s=1" : "&s=0") : "";
+    scene.thumb = `/api/thumb/${scene.id}?k=${key}${ready}${token ? `&t=${token}` : ""}`;
     return scene;
-  });
+  };
+  if (clips.length > 0) {
+    return clips.map((c, i) =>
+      toScene(`sc_${i + 1}`, c.timeline_in_ms ?? 0, (c.timeline_in_ms ?? 0) + (c.duration_ms ?? 0), c.asset_handle ?? c.id, [c.id]));
+  }
+  const cues: any[] = [];
+  for (const lane of seq?.lanes ?? []) {
+    for (const cue of lane?.cues ?? []) {
+      if (cue && typeof cue.id === "string" && cue.composition) cues.push(cue);
+    }
+  }
+  cues.sort((a, b) => (a.at_ms ?? 0) - (b.at_ms ?? 0) || String(a.id).localeCompare(String(b.id)));
+  return cues.map((cue, i) =>
+    toScene(`sc_${i + 1}`, cue.at_ms ?? 0, (cue.at_ms ?? 0) + (cue.duration_ms ?? 0),
+      cue.composition?.composition_dir ?? cue.id, [cue.id]));
 }
 
 export function buildActivity(projectDir: string, limit = 50): LiveActivityEntry[] {
@@ -257,6 +270,7 @@ export function buildSnapshot(projectDir: string, token?: string): LiveSnapshot 
       aspect: stage.aspect ?? "16:9",
       duration_ms: computeSequenceDurationMs(sequence),
       backdrop: stage.backdrop?.color ?? "#0D0F12",
+      ...(typeof stage.tempo === "number" && stage.tempo !== 1 ? { tempo: stage.tempo } : {}),
     },
     sequence,
     scenes: buildScenes(seq, token, projectDir),
@@ -311,6 +325,29 @@ export function buildDelta(args: {
   token?: string;
 }): LiveDelta {
   const { summary, changed } = summarizeRevision(args.oldSequence, args.newSequence, args.operation);
+  // An undo/redo cursor move is itself a new event in time order: name the
+  // revision(s) it undid or redid instead of the revision the cursor returned
+  // to (the entry keeps the cursor revision, the summary names the cause).
+  let finalSummary = summary;
+  const op = shortOperation(args.operation);
+  if (op === "undo" || op === "redo") {
+    const shown = changed.slice(0, 3).join(" ");
+    const more = changed.length > 3 ? ` +${changed.length - 3} more` : "";
+    const tail = shown ? ` ${shown}${more}` : "";
+    if (op === "undo") {
+      const range =
+        args.fromRevision === args.toRevision + 1
+          ? `r${args.fromRevision}`
+          : `r${args.fromRevision}..r${args.toRevision + 1}`;
+      finalSummary = `undo ${range}${tail}`;
+    } else {
+      const range =
+        args.toRevision === args.fromRevision + 1
+          ? `r${args.toRevision}`
+          : `r${args.fromRevision + 1}..r${args.toRevision}`;
+      finalSummary = `redo ${range}${tail}`;
+    }
+  }
   return {
     schema: LIVE_SCHEMA,
     from_revision: args.fromRevision,
@@ -319,7 +356,7 @@ export function buildDelta(args: {
       revision: args.toRevision,
       timestamp: args.timestamp,
       operation: args.operation,
-      summary,
+      summary: finalSummary,
       changed,
       actor: resolveRevisionActor(args.projectDir, args.operation, args.timestamp, args.toRevision, args.fromRevision),
     },

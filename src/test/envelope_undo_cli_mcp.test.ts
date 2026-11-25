@@ -174,13 +174,23 @@ function ensureOfflineFixtureMedia(dir: string): {
   return { speechVidPath, brollVidPath, musicPath };
 }
 
+const GOLDEN_INGEST_DIR = path.join(TEST_ROOT, "golden-ingested");
+
+/** Init + ingest of the speech fixture once (r1..r2); undo/stack tests copy it. */
+function ensureGoldenIngested(mediaDir: string): string {
+  const { speechVidPath } = ensureOfflineFixtureMedia(mediaDir);
+  if (!fs.existsSync(path.join(GOLDEN_INGEST_DIR, "cuthol.sequence.json"))) {
+    initWorkspace({ dir: GOLDEN_INGEST_DIR, title: "golden", aspect: "16:9", fps: 30 }); // r1
+    ingestAssetsIntoWorkspace({ workspaceDir: GOLDEN_INGEST_DIR, filePaths: [speechVidPath] }); // r2
+  }
+  return GOLDEN_INGEST_DIR;
+}
+
 test("1. cuthol.envelope/1 State Delta, Targeted Undo (--to, --expect-rev, --dry-run) & Protected Title Lock (CUTHOL-G111)", () => {
   const wsDir = path.join(TEST_ROOT, "ws_undo_protection");
   fs.rmSync(wsDir, { recursive: true, force: true });
-  const { speechVidPath } = ensureOfflineFixtureMedia(path.join(TEST_ROOT, "media"));
+  fs.cpSync(ensureGoldenIngested(path.join(TEST_ROOT, "media")), wsDir, { recursive: true });
 
-  initWorkspace({ dir: wsDir, title: "Undo Protection Test", aspect: "16:9", fps: 30 }); // r1
-  ingestAssetsIntoWorkspace({ workspaceDir: wsDir, filePaths: [speechVidPath] }); // r2
   appendSpineClip({ workspaceDir: wsDir, assetHandle: "vid_01", sourceInMs: 0, sourceOutMs: 4000 }); // r3
 
   // r4: Add title cue ("Kapadokya'da 3 Gün") on ln_titles
@@ -463,10 +473,7 @@ test("3. Self-Describing CLI (UNKNOWN_FLAG CUTHOL-G110, help --json) & CutholMcp
   assert.equal(briefRes.isError, false);
   assert.ok(String(briefRes.content[0].text).includes("vid_01"));
 
-  const outside = spawnSync(process.execPath, [cliJs, "spine", "append", "--asset", "vid_01", "--in", "0s", "--out", "3s", "--dir", wsDir], {
-    encoding: "utf8",
-  });
-  assert.equal(outside.status, 0);
+  appendSpineClip({ workspaceDir: wsDir, assetHandle: "vid_01", sourceInMs: 0, sourceOutMs: 3000 });
   const afterOutside = await mcp.callTool("spine", { action: "trim", clip: "sp_01", out: "2500ms" });
   assert.equal(afterOutside.isError, false);
   assert.ok(String(afterOutside.content[0].text).startsWith("NOTE the project changed outside this session"));

@@ -56,8 +56,11 @@ import { CutholSequence } from "../core/schema.js";
 import { loadSequence, WorkspacePaths } from "../core/workspace.js";
 import { ffmpegVersionWarningDiagnostics } from "../core/ffmpeg_version.js";
 import { verifySequence, VerificationReport } from "../verify/gates.js";
+import { verifyCompositionAudio } from "../verify/gates_hf_audio.js";
+import { probeUncachedCompositionScripts } from "../verify/gates_script_errors.js";
 import { PostRenderAudioHealthResult, scanRenderedMp4AudioHealth } from "./render_audio_health.js";
 import { PostRenderBlankScanResult, scanRenderedMp4ForBlankFrames, scanRenderedMp4ForEdgeStrips } from "./render_scan.js";
+import { outputDurationMs, outputFrameAtSeqMs, tempoOf, tempoOutputSegments } from "../sequence/tempo.js";
 import { computeRenderTimeSegments } from "./render_segments.js";
 import {
   PreparedSequenceRender,
@@ -123,6 +126,9 @@ function prepareSequenceRender(options: {
   const tTotal0 = Date.now();
   const { paths, sequence } = loadSequence(options.workspaceDir);
   const tVerify0 = Date.now();
+  // A render that was not preceded by `verify` still judges every composition
+  // script at run time (one shared browser run; cached records cost nothing).
+  probeUncachedCompositionScripts(sequence, paths);
   const verification = verifySequence(sequence, paths);
   const verifyMs = Date.now() - tVerify0;
   if (!verification.ok) {
@@ -169,23 +175,34 @@ function prepareSequenceRender(options: {
   fs.mkdirSync(paths.blobsDir, { recursive: true });
   const tmpOut = `${resolvedOut}.${process.pid}.${Date.now()}.tmp${defaultExt}`;
 
-  const totalDurationMs = computeRenderDurationMs(sequence);
+  // Segments are built on the sequence clock (clip/cue windows); each segment plan
+  // retimes to the output clock in the compositor output stage, so frame counts
+  // below are scaled to output frames while startMs/endMs stay sequence-clock.
+  const seqDurationMs = computeRenderDurationMs(sequence);
+  const tempoRate = tempoOf(sequence);
+  const totalDurationMs = outputDurationMs(seqDurationMs, tempoRate);
   const maxItemsPerSegment = resolveMaxClipsPerRenderSegment();
   // The transparent master keeps one uninterrupted alpha pipeline: per-segment
   // intermediates are opaque MP4 and would destroy the alpha plane at the joins.
-  const segments =
+  const seqSegments =
     preset === "master_alpha"
       ? [
           {
             index: 0,
             startFrame: 0,
-            endFrame: Math.max(1, Math.ceil((totalDurationMs / 1000) * Math.max(1, sequence.stage.fps))),
-            frameCount: Math.max(1, Math.ceil((totalDurationMs / 1000) * Math.max(1, sequence.stage.fps))),
+            endFrame: Math.max(1, Math.ceil((seqDurationMs / 1000) * Math.max(1, sequence.stage.fps))),
+            frameCount: Math.max(1, Math.ceil((seqDurationMs / 1000) * Math.max(1, sequence.stage.fps))),
             startMs: 0,
-            endMs: totalDurationMs,
+            endMs: seqDurationMs,
           },
         ]
-      : computeRenderTimeSegments(sequence, totalDurationMs, maxItemsPerSegment);
+      : computeRenderTimeSegments(sequence, seqDurationMs, maxItemsPerSegment);
+  // With a tempo, segment windows move to whole output frames (frame counts are
+  // output frames and add up exactly; windows stay on the sequence clock).
+  const segments =
+    tempoRate === 1
+      ? seqSegments
+      : tempoOutputSegments(seqSegments, tempoRate, sequence.stage.fps, outputFrameAtSeqMs(seqDurationMs, tempoRate, sequence.stage.fps));
 
   const uniqueCompCount = countActiveUniqueCompositions(sequence, paths.rootDir);
   const overlayConcurrency = resolveOverlayConcurrency({
@@ -398,6 +415,27 @@ function collectLiveScanFindings(diagnostics: CutholDiagnostic[]): string[] {
   return [...out].sort();
 }
 
+/**
+ * The pre-render verification runs before plan compilation extracts the
+ * composition audio stems, so its G416 "no stem extracted yet" warnings are
+ * stale once the encode is done. Re-checks only the composition audio gate
+ * against the post-extraction state and swaps those entries; every other
+ * diagnostic is left untouched.
+ */
+function refreshCompositionAudioDiagnostics(
+  sequence: CutholSequence,
+  paths: WorkspacePaths,
+  verification: VerificationReport
+): void {
+  if (!verification.diagnostics.some((d) => d.code === "CUTHOL-G416")) return;
+  const fresh: CutholDiagnostic[] = [];
+  verifyCompositionAudio(sequence, paths, fresh);
+  verification.diagnostics = verification.diagnostics.filter((d) => d.code !== "CUTHOL-G416");
+  verification.diagnostics.push(...fresh.filter((d) => d.code === "CUTHOL-G416"));
+  verification.warning_count = verification.diagnostics.filter((d) => d.severity === "WARN").length;
+  verification.info_count = verification.diagnostics.filter((d) => d.severity === "INFO").length;
+}
+
 export function renderSequenceToMp4(options: {
   workspaceDir: string;
   outputPath?: string;
@@ -413,6 +451,8 @@ export function renderSequenceToMp4(options: {
       prep.segments.length <= 1
         ? renderSingleSegmentPath(prep)
         : renderMultiSegmentPath(prep);
+
+    refreshCompositionAudioDiagnostics(prep.sequence, prep.paths, prep.verification);
 
     fs.renameSync(prep.tmpOut, prep.resolvedOut);
     const stat = fs.statSync(prep.resolvedOut);

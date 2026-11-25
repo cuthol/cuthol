@@ -4,11 +4,12 @@
 // clicking a row selects the clip and moves the playhead to it.
 //
 // State dot (never text alone):
-//   working = agent holds the lock (or no lock yet) and the newest agent
-//             revision is fresh (< 90 s old)      → solid amber
-//   paused  = the human holds the lock           → blinking gray pause glyph
-//   error   = disconnected, or the render failed → red triangle
-//   idle    = anything else                      → hollow ring
+//   working    = agent holds the lock (or no lock yet) and the newest agent
+//                revision is fresh (< 90 s old)      → solid amber
+//   paused     = the human holds the lock           → blinking gray pause glyph
+//   error      = disconnected, or the render failed → red triangle
+//   connecting = no snapshot yet and no failure yet → pulsing hollow ring
+//   idle       = anything else                      → hollow ring
 /** @param {HTMLElement|null} root  @param {import('./app.js').LiveContext} ctx */
 export function mount(root, ctx) {
   if (!root) return;
@@ -47,6 +48,7 @@ export function mount(root, ctx) {
   /** Newest agent revision and its age; the dot's working/idle split. */
   function agentState() {
     const { activity, lock, mode, progress } = ctx.store.state;
+    if (mode === "connecting") return "connecting";
     if (mode === "offline") return "error";
     if (progress && progress.state === "failed") return "error";
     if (lock?.holder === "human" || mode === "human") return "paused";

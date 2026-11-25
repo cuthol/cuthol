@@ -9,8 +9,9 @@ All times are seconds relative to the composition start (`0 … C.duration`).
 | `C.beatGrid({from, to, strong, div})` | Shorthand for `C.beats({ ...opts, grid: true })`. |
 | `C.audio(band, t, smoothSec?)` | Energy of the **mixed** audio (spine + voiceover + sfx + music) at `t`, band `"low"` (20–250 Hz), `"mid"` (250–4000 Hz, voice) or `"high"`. Each band is normalized over this window: ~0.05 quiet … 1.0 loudest moment; 0 = silence. Referencing `C.audio` makes Cuthol analyze waveforms (cached) for every audible source in the window; if no energy can be extracted, `C.warnings` and `verify` (`CUTHOL-G507`) say so. |
 | `C.cuts()` | `{cuts: number[], segments: [{t0, t1, index, duration, clipId}]}` — spine cuts inside the window and the shot segments between them. |
-| `C.drive(tl, fn, {start, end})` | Calls `fn(t)` for every rendered frame between `start` and `end` (default whole composition). |
-| `C.value(tl, {from, to, at, duration, ease}, fn)` | Tweens a number and calls `fn(value)` each frame. |
+| `C.drive(tl, fn, {start, end, clock})` | Calls `fn(t)` for every rendered frame between `start` and `end` (default whole composition). `clock: "sequence"` reads `start`/`end` as sequence seconds. Out-of-window times are clamped and reported in `C.warnings`. |
+| `C.value(tl, {from, to, at, duration, ease, clock}, fn)` | Tweens a number and calls `fn(value)` each frame. `clock: "sequence"` reads `at` as a sequence time. |
+| `C.seq` | `{start, toLocal(t), toSequence(t)}` — this cue's start on the sequence clock; convert sequence seconds to composition-local and back. |
 | `C.duration`, `C.fps`, `C.width`, `C.height`, `C.bpm` | Composition facts. |
 | `C.cueStart`, `C.cueEnd`, `C.sequenceDuration`, `C.toGlobal(t)`, `C.toLocal(t)` | Cue position on the sequence timeline (`globalTime = localTime + C.cueStart`). |
 | `C.global` | Full-sequence intelligence in **absolute sequence seconds**: `C.global.word(query, opts)` (returns `{found, start, end, duration, text, clipped, localStart, localEnd, inWindow}`), `C.global.audio(band, t, smoothSec?)` or `C.global.audio(t, smoothSec?)` (3-band energy normalized **once across the whole sequence**), `C.global.words`, `C.global.pauses`, `C.global.sentences`, `C.global.beats(opts)` (the full-sequence beat grid in sequence seconds, same source as `C.beats` but not clipped to this cue — index it by global beat number), `C.global.cuts()`, `C.global.drive(tl, fn, opts)`, `C.global.value(tl, spec, fn)`. |
@@ -71,6 +72,11 @@ loses its fonts. If a composition still renders with fallback fonts, re-run
       const num = C.word("ninety", { fallback: 1.2 });
       C.value(tl, { from: 0, to: 990, at: num.start - 0.6, duration: 0.8 },
         (v) => { document.getElementById("count").textContent = Math.round(v); });
+
+      // Key to a sequence-time event (e.g. a word at 53.92 s on the sequence):
+      // the tween follows the cue when the cue moves on the timeline
+      C.value(tl, { from: 0, to: 1, at: 53.92, clock: "sequence", duration: 0.5 },
+        (v) => { document.getElementById("card").style.opacity = String(v); });
 
       // Continuous audio-reactive motion (seek-safe)
       C.drive(tl, (t) => {

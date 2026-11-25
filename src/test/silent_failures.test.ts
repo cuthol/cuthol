@@ -21,46 +21,81 @@ import { addLaneCue, removeLaneCues, updateLaneCue } from "../sequence/lanes.js"
 import { setStageBackdropColor } from "../sequence/stage.js";
 import { appendSpineClip } from "../sequence/spine.js";
 import { runWorkspaceVerification } from "../verify/gates.js";
+import { runCliFast } from "./c_helpers.js";
 
-const REPO_ROOT = process.cwd();
-const CLI_PATH = path.resolve(REPO_ROOT, "dist/cli.js");
 const TEST_ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-silent-"));
 
-function runCliJson(workspaceDir: string, args: string[]): Record<string, unknown> {
-  const proc = spawnSync(process.execPath, [CLI_PATH, ...args, "--dir", workspaceDir], {
-    encoding: "utf8",
-  });
-  assert.equal(proc.status === 0 || proc.stdout.trim().startsWith("{"), true, proc.stderr);
-  return JSON.parse(proc.stdout) as Record<string, unknown>;
+/** Payload-only CLI calls go in-process (same handlers, no ~0.7 s spawn each). */
+async function runCliJson(workspaceDir: string, args: string[]): Promise<Record<string, unknown>> {
+  const res = await runCliFast([...args, "--dir", workspaceDir]);
+  const text = res.stdout.trim().startsWith("{") ? res.stdout : res.stderr;
+  assert.equal(res.status === 0 || text.trim().startsWith("{"), true, res.stderr);
+  return JSON.parse(text) as Record<string, unknown>;
 }
 
-test("1. Composition C.audio auto-analyzes sfx/spine/vo waveforms in window, warns on failure, and skips extra analysis when C.audio is unused", () => {
+/** Fixture media generated once (stable params, gitignored tmp), copied per test. */
+const SHARED_MEDIA = path.join(os.tmpdir(), "cuthol-silent-shared");
+
+/** Mono 48 kHz pcm_s16le wav written directly (no ffmpeg subprocess). */
+function sharedWav(name: string, seconds: number, fn: (t: number) => number): string {
+  const out = path.join(SHARED_MEDIA, name);
+  if (!fs.existsSync(out)) {
+    fs.mkdirSync(SHARED_MEDIA, { recursive: true });
+    const sampleRate = 48000;
+    const totalSamples = Math.round(seconds * sampleRate);
+    const pcmBuf = Buffer.alloc(44 + totalSamples * 2);
+    pcmBuf.write("RIFF", 0);
+    pcmBuf.writeUInt32LE(36 + totalSamples * 2, 4);
+    pcmBuf.write("WAVE", 8);
+    pcmBuf.write("fmt ", 12);
+    pcmBuf.writeUInt32LE(16, 16);
+    pcmBuf.writeUInt16LE(1, 20);
+    pcmBuf.writeUInt16LE(1, 22);
+    pcmBuf.writeUInt32LE(sampleRate, 24);
+    pcmBuf.writeUInt32LE(sampleRate * 2, 28);
+    pcmBuf.writeUInt16LE(2, 32);
+    pcmBuf.writeUInt16LE(16, 34);
+    pcmBuf.write("data", 36);
+    pcmBuf.writeUInt32LE(totalSamples * 2, 40);
+    for (let i = 0; i < totalSamples; i++) {
+      const s16 = Math.max(-32767, Math.min(32767, Math.round(28000 * fn(i / sampleRate))));
+      pcmBuf.writeInt16LE(s16, 44 + i * 2);
+    }
+    // Atomic publish: parallel agents on this machine share the tmp dir.
+    const tmp = `${out}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, pcmBuf);
+    fs.renameSync(tmp, out);
+  }
+  return out;
+}
+
+function sharedFfmpeg(out: string, args: string[]): string {
+  if (!fs.existsSync(out)) {
+    fs.mkdirSync(path.dirname(out), { recursive: true });
+    // Keep the extension on the temp name so ffmpeg picks the right muxer.
+    const tmp = out.replace(/(\.[A-Za-z0-9]+)$/, `.tmp-${process.pid}$1`);
+    const proc = spawnSync("ffmpeg", ["-y", "-v", "error", ...args, tmp], { encoding: "utf8" });
+    assert.equal(proc.status, 0, proc.stderr);
+    fs.renameSync(tmp, out);
+  }
+  return out;
+}
+
+test("1. Composition C.audio auto-analyzes sfx/spine/vo waveforms in window, warns on failure, and skips extra analysis when C.audio is unused", async () => {
   const wsDir = path.join(TEST_ROOT, "ws_audio_auto");
   fs.rmSync(wsDir, { recursive: true, force: true });
   initWorkspace({ dir: wsDir, title: "Audio Auto Analyze", aspect: "16:9", fps: 30 });
 
   const sfxWav = path.join(wsDir, "sfx_mod.wav");
   const bgmWav = path.join(wsDir, "bgm_bed.wav");
-  spawnSync("ffmpeg", [
-    "-y",
-    "-v",
-    "error",
-    "-f",
-    "lavfi",
-    "-i",
-    "aevalsrc='(0.1+0.9*abs(sin(2*PI*0.6*t)))*sin(2*PI*950*t)':s=48000:d=3.0",
-    sfxWav,
-  ]);
-  spawnSync("ffmpeg", [
-    "-y",
-    "-v",
-    "error",
-    "-f",
-    "lavfi",
-    "-i",
-    "aevalsrc='0.4*sin(2*PI*220*t)':s=48000:d=3.0",
-    bgmWav,
-  ]);
+  fs.copyFileSync(
+    sharedWav("sfx_mod.wav", 3.0, (t) => (0.1 + 0.9 * Math.abs(Math.sin(2 * Math.PI * 0.6 * t))) * Math.sin(2 * Math.PI * 950 * t)),
+    sfxWav
+  );
+  fs.copyFileSync(
+    sharedWav("bgm_bed.wav", 3.0, (t) => 0.4 * Math.sin(2 * Math.PI * 220 * t)),
+    bgmWav
+  );
 
   const ingested = ingestAssetsIntoWorkspace({
     workspaceDir: wsDir,
@@ -91,7 +126,7 @@ test("1. Composition C.audio auto-analyzes sfx/spine/vo waveforms in window, war
     props: { headline: "NO AUDIO USED" },
     transparent: true,
   });
-  const plainCueRes = runCliJson(wsDir, [
+  const plainCueRes = await runCliJson(wsDir, [
     "lane",
     "add-composition",
     "--lane",
@@ -133,7 +168,7 @@ test("1. Composition C.audio auto-analyzes sfx/spine/vo waveforms in window, war
     props: { headline: "SFX ENERGY", subline: "REACTIVE" },
     transparent: true,
   });
-  runCliJson(wsDir, [
+  await runCliJson(wsDir, [
     "lane",
     "add-composition",
     "--lane",
@@ -164,7 +199,7 @@ test("1. Composition C.audio auto-analyzes sfx/spine/vo waveforms in window, war
   db.close();
   fs.writeFileSync(sfxWav, "corrupted-audio-payload", "utf8");
 
-  runCliJson(wsDir, ["composition", "sync"]);
+  await runCliJson(wsDir, ["composition", "sync"]);
   const failedData = JSON.parse(fs.readFileSync(dataJsonPath, "utf8")) as {
     audio: { mid: number[] };
     warnings?: string[];
@@ -213,7 +248,7 @@ test("1. Composition C.audio auto-analyzes sfx/spine/vo waveforms in window, war
   );
 });
 
-test("2. lane add-composition syncs extension assets before lint (no false G407) while catching genuinely missing files", () => {
+test("2. lane add-composition syncs extension assets before lint (no false G407) while catching genuinely missing files", async () => {
   const wsDir = path.join(TEST_ROOT, "ws_ext_lint");
   fs.rmSync(wsDir, { recursive: true, force: true });
   initWorkspace({ dir: wsDir, title: "Ext Lint Order", aspect: "16:9", fps: 30 });
@@ -262,7 +297,7 @@ test("2. lane add-composition syncs extension assets before lint (no false G407)
     "Precondition: extension asset is not yet in composition folder before add-composition"
   );
 
-  const addValidRes = runCliJson(wsDir, [
+  const addValidRes = await runCliJson(wsDir, [
     "lane",
     "add-composition",
     "--lane",
@@ -305,7 +340,7 @@ test("2. lane add-composition syncs extension assets before lint (no false G407)
       ),
     "utf8"
   );
-  const addMissingRes = runCliJson(wsDir, [
+  const addMissingRes = await runCliJson(wsDir, [
     "lane",
     "add-composition",
     "--lane",
@@ -330,73 +365,33 @@ test("3. VFR detection in library probe and INFO [CUTHOL-G207] in verify (none o
   initWorkspace({ dir: wsDir, title: "VFR Check", aspect: "16:9", fps: 30 });
 
   const cfrMp4 = path.join(wsDir, "cfr_clip.mp4");
-  spawnSync("ffmpeg", [
-    "-y",
-    "-v",
-    "error",
-    "-f",
-    "lavfi",
-    "-i",
-    "color=c=#334155:s=640x360:r=30:d=1.5",
-    "-c:v",
-    "libx264",
-    "-pix_fmt",
-    "yuv420p",
-    cfrMp4,
-  ]);
+  fs.copyFileSync(
+    sharedFfmpeg(path.join(SHARED_MEDIA, "cfr_clip.mp4"), [
+      "-f", "lavfi", "-i", "color=c=#334155:s=640x360:r=30:d=1.5",
+      "-c:v", "libx264", "-pix_fmt", "yuv420p",
+    ]),
+    cfrMp4
+  );
 
   // Create a synthetic VFR MP4 by concatenating a 15fps segment and a 60fps segment with vfr vsync
-  const seg15 = path.join(wsDir, "seg15.mp4");
-  const seg60 = path.join(wsDir, "seg60.mp4");
+  const seg15 = sharedFfmpeg(path.join(SHARED_MEDIA, "seg15.mp4"), [
+    "-f", "lavfi", "-i", "testsrc=s=640x360:r=15:d=1.0",
+    "-c:v", "libx264", "-pix_fmt", "yuv420p",
+  ]);
+  const seg60 = sharedFfmpeg(path.join(SHARED_MEDIA, "seg60.mp4"), [
+    "-f", "lavfi", "-i", "testsrc=s=640x360:r=60:d=1.0",
+    "-c:v", "libx264", "-pix_fmt", "yuv420p",
+  ]);
   const vfrMp4 = path.join(wsDir, "vfr_clip.mp4");
-  spawnSync("ffmpeg", [
-    "-y",
-    "-v",
-    "error",
-    "-f",
-    "lavfi",
-    "-i",
-    "testsrc=s=640x360:r=15:d=1.0",
-    "-c:v",
-    "libx264",
-    "-pix_fmt",
-    "yuv420p",
-    seg15,
-  ]);
-  spawnSync("ffmpeg", [
-    "-y",
-    "-v",
-    "error",
-    "-f",
-    "lavfi",
-    "-i",
-    "testsrc=s=640x360:r=60:d=1.0",
-    "-c:v",
-    "libx264",
-    "-pix_fmt",
-    "yuv420p",
-    seg60,
-  ]);
-  spawnSync("ffmpeg", [
-    "-y",
-    "-v",
-    "error",
-    "-i",
-    seg15,
-    "-i",
-    seg60,
-    "-filter_complex",
-    "[0:v][1:v]concat=n=2:v=1:a=0[v]",
-    "-map",
-    "[v]",
-    "-fps_mode",
-    "vfr",
-    "-c:v",
-    "libx264",
-    "-pix_fmt",
-    "yuv420p",
-    vfrMp4,
-  ]);
+  fs.copyFileSync(
+    sharedFfmpeg(path.join(SHARED_MEDIA, "vfr_clip.mp4"), [
+      "-i", seg15, "-i", seg60,
+      "-filter_complex", "[0:v][1:v]concat=n=2:v=1:a=0[v]",
+      "-map", "[v]", "-fps_mode", "vfr",
+      "-c:v", "libx264", "-pix_fmt", "yuv420p",
+    ]),
+    vfrMp4
+  );
 
   const cfrIngested = ingestAssetsIntoWorkspace({ workspaceDir: wsDir, filePaths: [cfrMp4] })[0];
   assert.equal(cfrIngested.probe.is_vfr, false, "CFR source must have is_vfr: false");
@@ -437,18 +432,14 @@ test("4. monitor sheet --at / at=[...], 5. lane cue rotation (graphic + title), 
   setStageBackdropColor({ workspaceDir: wsDir, color: "#0F172A" });
 
   const cardPng = path.join(wsDir, "card.png");
-  spawnSync("ffmpeg", [
-    "-y",
-    "-v",
-    "error",
-    "-f",
-    "lavfi",
-    "-i",
-    "color=c=#F59E0B:s=640x360:d=1,drawbox=x=16:y=16:w=608:h=328:color=#FFFFFF:t=8",
-    "-frames:v",
-    "1",
-    cardPng,
-  ]);
+  fs.copyFileSync(
+    sharedFfmpeg(path.join(SHARED_MEDIA, "card.png"), [
+      "-f", "lavfi", "-i",
+      "color=c=#F59E0B:s=640x360:d=1,drawbox=x=16:y=16:w=608:h=328:color=#FFFFFF:t=8",
+      "-frames:v", "1",
+    ]),
+    cardPng
+  );
   const [imgAsset] = ingestAssetsIntoWorkspace({ workspaceDir: wsDir, filePaths: [cardPng] });
 
   const gCue = addLaneCue({
@@ -493,9 +484,11 @@ test("4. monitor sheet --at / at=[...], 5. lane cue rotation (graphic + title), 
     workspaceDir: wsDir,
     atMs: [400, 1250, 2700, 4100],
   });
+  // Each cell is labelled with the frame-grid instant actually drawn (30 fps): 1250 ms lands
+  // inside frame 37, whose instant is 1233.33 ms; on-grid requests keep their value.
   assert.deepEqual(
     sheetRes.frames.map((f) => f.timestamp_ms),
-    [400, 1250, 2700, 4100]
+    [400, (37 * 1000) / 30, 2700, 4100]
   );
 
   const mcp = new CutholMcpServer({ defaultDir: wsDir });
@@ -532,7 +525,7 @@ test("4. monitor sheet --at / at=[...], 5. lane cue rotation (graphic + title), 
     props: { headline: "INITIAL" },
     transparent: true,
   });
-  runCliJson(wsDir, [
+  await runCliJson(wsDir, [
     "lane",
     "add-composition",
     "--lane",
@@ -546,7 +539,7 @@ test("4. monitor sheet --at / at=[...], 5. lane cue rotation (graphic + title), 
   ]);
 
   // No change -> updated: false
-  const sync1 = runCliJson(wsDir, ["composition", "sync"]);
+  const sync1 = await runCliJson(wsDir, ["composition", "sync"]);
   assert.equal(sync1.updated, false);
   assert.equal(sync1.updated_count, 0);
 
@@ -556,7 +549,7 @@ test("4. monitor sheet --at / at=[...], 5. lane cue rotation (graphic + title), 
   compCue.composition!.props = { headline: "CHANGED" };
   fs.writeFileSync(paths.sequenceFile, JSON.stringify(sequence, null, 2), "utf8");
 
-  const sync2 = runCliJson(wsDir, ["composition", "sync"]);
+  const sync2 = await runCliJson(wsDir, ["composition", "sync"]);
   assert.equal(sync2.updated, true);
   assert.equal(sync2.updated_count, 1);
   const syncedItem = (sync2.synced as Array<{ updated: boolean; updated_files: string[]; reason: string }>)[0];
@@ -566,7 +559,7 @@ test("4. monitor sheet --at / at=[...], 5. lane cue rotation (graphic + title), 
   assert.match(syncedItem.reason, /slice_hash_changed/);
 
   // Immediate repeat without changes -> updated: false
-  const sync3 = runCliJson(wsDir, ["composition", "sync"]);
+  const sync3 = await runCliJson(wsDir, ["composition", "sync"]);
   assert.equal(sync3.updated, false);
   assert.equal(sync3.updated_count, 0);
   const syncedAfter = syncAllCompositionBridges(loadSequence(wsDir).sequence, paths);

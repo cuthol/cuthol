@@ -29,6 +29,7 @@ import {
   splitSpineClip,
 } from "../sequence/spine.js";
 import { verifySequence } from "../verify/gates.js";
+import { runCliFast } from "./c_helpers.js";
 
 const TEST_ROOT = path.resolve(process.cwd(), "test-workspace");
 const CLI = path.resolve(process.cwd(), "dist/cli.js");
@@ -125,11 +126,21 @@ function ensureVideo(): string {
   return videoPath;
 }
 
+const GOLDEN_DIR = path.join(TEST_ROOT, "easing_cubic_golden");
+
+/** Init + ingest once; the four seeded workspaces are plain copies. */
+function ensureGolden(): string {
+  if (!fs.existsSync(path.join(GOLDEN_DIR, "cuthol.sequence.json"))) {
+    initWorkspace({ dir: GOLDEN_DIR, title: "golden", aspect: "16:9", fps: 30 });
+    ingestAssetsIntoWorkspace({ workspaceDir: GOLDEN_DIR, filePaths: [ensureVideo()] });
+  }
+  return GOLDEN_DIR;
+}
+
 function setupWs(name: string): string {
   const wsDir = path.join(TEST_ROOT, name);
   fs.rmSync(wsDir, { recursive: true, force: true });
-  initWorkspace({ dir: wsDir, title: name, aspect: "16:9", fps: 30 });
-  ingestAssetsIntoWorkspace({ workspaceDir: wsDir, filePaths: [ensureVideo()] });
+  fs.cpSync(ensureGolden(), wsDir, { recursive: true });
   return wsDir;
 }
 
@@ -340,7 +351,7 @@ test("6. spine split preserves bezier segments end to end", () => {
   }
 });
 
-test("7. CLI --easing forms and G120 input errors", () => {
+test("7. CLI --easing forms and G120 input errors", async () => {
   assert.deepEqual(parseEasingFlag(undefined), { easing: "ease_in_out" });
   assert.deepEqual(parseEasingFlag("linear"), { easing: "linear" });
   assert.deepEqual(parseEasingFlag("cubic-bezier(0.25,0.1,0.25,1)"), {
@@ -361,15 +372,16 @@ test("7. CLI --easing forms and G120 input errors", () => {
 
   const wsDir = path.join(TEST_ROOT, "easing_cubic_cli");
   fs.rmSync(wsDir, { recursive: true, force: true });
-  assert.ok(cli(["workspace", "init", wsDir, "--aspect", "16:9", "--fps", "30"]).ok);
+  const initRes = await runCliFast(["workspace", "init", wsDir, "--aspect", "16:9", "--fps", "30"]);
+  assert.equal(initRes.status, 0, initRes.stderr || initRes.stdout);
   const add = cli(["lane", "add-cue", "--lane", "ln_titles", "--kind", "title", "--text", "hi", "--duration", "2000ms", "--dir", wsDir]);
   assert.ok(add.ok, add.raw);
   const cueId = /cue_\d+/.exec(add.raw)?.[0] ?? "cue_01";
-  const good = cli([
+  const goodRes = await runCliFast([
     "spine", "envelope", "--clip", cueId, "--param", "placement.opacity",
     "--points", "0ms:0,2000ms:1", "--easing", "cubic-bezier(0.25,0.1,0.25,1)", "--dir", wsDir,
   ]);
-  assert.ok(good.ok, good.raw);
+  assert.equal(goodRes.status, 0, goodRes.stderr || goodRes.stdout);
   const cue = loadSequence(wsDir).sequence.lanes.flatMap((l) => l.cues).find((c) => c.id === cueId)!;
   assert.deepEqual(cue.envelopes[0].points[1], {
     offset_ms: 2000,

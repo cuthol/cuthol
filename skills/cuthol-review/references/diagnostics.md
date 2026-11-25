@@ -34,6 +34,8 @@ and never reused; they may appear in old projects and logs.
 | G632 | SYS INFO | `setup` tool has no writable config (manual registration) → follow the tool's MCP docs with the printed command. |
 | G633 | SYS WARN | `setup` found an existing different cuthol entry (kept) → re-run with `--force` to replace. |
 | G634 | SYS ERROR | `setup` could not back up or write the config → check the folder exists and is writable. |
+| G635 | SYS INFO | MCP server noticed a newer Cuthol build on disk and restarted itself on it; tool list refreshed → keep going (re-open the project if a call reports none). |
+| G636 | SYS WARN | Newer Cuthol build on disk but the MCP self-restart failed; MCP arguments may not match the CLI → reconnect the cuthol MCP server, avoid mixing MCP and CLI calls meanwhile. |
 | G201 | G2 ERROR | File missing on disk. |
 | G202 | G2 ERROR | Source range beyond the media length. |
 | G203 | G2 ERROR | Audio operation on an asset without audio. |
@@ -113,7 +115,9 @@ and never reused; they may appear in old projects and logs.
 | G506 | G5 WARN | 8 px black strip on the right/bottom edge (an ffmpeg conversion bug at widths like 1080). Check versions and render again. |
 | G507 | G5 WARN | A composition uses `C.audio` but no audio energy could be extracted for its window, so `C.audio` returns 0. |
 | G508 | G5 WARN | Post-render audio health: alignment offset, missing signal, or silent output gap while the source is loud (ramp-aware on ramped clips, inconclusive on periodic signals) → check the item's timing/audio chain and render again. |
-| G509 | G4 INFO | N compositions were never opened in a browser, so their scripts are unchecked → `composition.preview(cue=…)` to record a check. |
+| G509 | G4 INFO | N compositions were never opened in a browser, so their scripts are unchecked → `verify()` checks them in one run; if verify itself says this, `composition.preview(cue=…)` shows why. |
+| G460 | G2 INFO | Outside edits inside composition folders were adopted automatically as a journaled revision (undoable) → nothing to do; sequence-file edits still need `changes adopt`. |
+| G461 | G3 WARN | N empty ranges show only the stage backdrop (total ms) on edit commands; the per-range list (G308) stays in `verify` → cover the ranges or run `verify`. |
 | SYS01–08 | — | Project not found, bad time literal, journal entry unavailable, external tool spawn/exit failure (`SYS04`, e.g. `ENOENT`), missing API key, transcript missing, invalid colour, extension execution failure (`SYS08`). |
 | G240 | G2 ERROR | Colour frame sampling failed (unknown item, missing asset, ffmpeg decode failure). | Check the item id and that its asset file exists, then re-run. |
 | G241 | G2 WARN | Colour map has almost no measurable pixels. | Sample more frames or check the source file. |
@@ -141,4 +145,32 @@ and never reused; they may appear in old projects and logs.
 | G134 | G1 WARN | Two or more Looks reach one item through `apply_to`; only the first is used -> bind the intended one. |
 | G135 | G1 WARN | A Look is bound to a screen recording or graphic -> unbind unless asked, or correct `color kind`. |
 | G136 | G1 WARN | HDR (HLG/PQ) source with input transform `none` -> `color kind --input auto`. |
+| G670 | SYS WARN | Live window missed a sequence update and resynced from the server -> reopen the window if it repeats; report the server log tail. |
+| G671 | SYS INFO | Live window dropped a preloaded next composition -> no action; loads on demand. |
+| G672 | SYS INFO | Live window seeked compositions to the playhead on first open -> no action. |
+| G673 | SYS WARN | Live watchdog detected a stuck preview and reported it -> the window reloads its preview automatically. |
+| G674 | SYS WARN | Live window reloaded its preview (recovered/still_stuck) -> reopen the window if it keeps stalling. |
+| G675 | SYS ERROR | Live preview still stuck after an automatic reload -> reload the window page; report the incident with console errors. |
+| G676 | SYS WARN | Live window stopped automatic preview reloads (3 per 10 min) -> reload the window page manually. |
 | G137 | G1 WARN | Ungraded clip of the same source as graded clips -> copy the grade or bind a Look. |
+| G140 | G1 ERROR | Unknown envelope parameter (render ignores it); a `Did you mean` hint names the closest known name -> use a `placement.*`, `audio_chain.gain_db`, `treatments.color_grade.*`, `fx.<id>.<param>` or `color.*` name. |
+| G141 | G3 INFO | Cue starts off the frame grid; first visible frame named -> pass the on-grid start for frame-exact cuts (stored value kept). |
+| G142 | G1 ERROR | Unitless fractional time (`21.1`) would read as milliseconds -> add a unit (`21.1s` or `21100ms`); MCP numbers stay milliseconds. |
+| G143 | G1 ERROR | `monitor sheet` got both `at` and a `start`/`end` window (single `at`) -> drop one of them. |
+| G144 | — WARN | `monitor sheet` ignores `start`/`end` when several `at` values are given -> drop one of them. |
+| G520 | G5 INFO | Back-to-back composition boundary is continuous (small mean pixel step) -> no action. |
+| G521 | G5 INFO | Back-to-back composition boundary changes the picture (mean pixel step given) -> check the two compositions when the cut should be seamless. |
+| G680 | G5 WARN | Live note measurement runs in a worker thread; the server loop and preview stay responsive while it measures. |
+| G681 | G5 WARN | Another Live server is already running for a different project; stop it first or reopen with --replace. |
+| G682 | G5 WARN | Live window reported a preview incident (stored under .cuthol/live/incidents/); see newest file named by live status. |
+| G450 | G3 WARN | Composition time clamped outside the composition window -> pass sequence times with the sequence clock or keep the time inside the window. |
+| G451 | G2 INFO | Project shared files synced into a composition -> edit shared files in the project `shared/` folder. |
+| G452 | G1 INFO | Lint finding downgraded to info after static resolution -> no action needed; stays visible as info. |
+| G160 | G1 ERROR | Invalid tempo rate (must be 0.5..2.0) -> pass --rate in range, or --rate 1 to clear. |
+| G150 | G1 ERROR | Bad `--size` (not WIDTHxHEIGHT, odd or out of range) -> pass even numbers between 16 and 8192 (e.g. `--size 1920x800`). |
+| G151 | G1 INFO | Stage adopted from the first visual source -> pass `--aspect`/`--size` at init to fix it instead. |
+| G152 | G1 INFO | First visual source suggests a stage size -> run the suggested `workspace stage` command. |
+| G153 | G1 INFO | Stage resized and layout rescaled -> `workspace journal undo` restores it. |
+| G154 | G4 WARN | Composition declares data-width/height different from the stage (HTML never rewritten) -> resize the composition or the stage. |
+| G690 | G5 INFO | Multi-scene note packet queued with per-frame contact-sheet cells; the sheet attaches to the stored packet when ready. |
+| G691 | G5 WARN | Contact-sheet cells dropped by the sheet cap; the packet names the dropped count. |

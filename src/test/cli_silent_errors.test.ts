@@ -11,6 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { formatEnvelopeCompact } from "../mcp/mcp_format.js";
+import { runCliFast } from "./c_helpers.js";
 
 const CLI = path.resolve(process.cwd(), "dist/cli.js");
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-cli-silent-"));
@@ -85,28 +86,41 @@ function diagnosticBlob(env: Record<string, unknown>): string {
   return parts.join("\n");
 }
 
+let goldenDir: string | undefined;
+
+/** One CLI init per file; the rest are plain copies of the same empty project. */
 function initProject(name: string): string {
   const dir = path.join(ROOT, name);
   fs.rmSync(dir, { recursive: true, force: true });
-  const res = runCli(["workspace", "init", dir, "--aspect", "1:1", "--fps", "30"]);
-  assert.equal(res.status, 0, res.stderr || res.stdout);
+  if (!goldenDir) {
+    const gold = path.join(ROOT, "golden");
+    const res = runCli(["workspace", "init", gold, "--aspect", "1:1", "--fps", "30"]);
+    assert.equal(res.status, 0, res.stderr || res.stdout);
+    goldenDir = gold;
+  }
+  fs.cpSync(goldenDir, dir, { recursive: true });
   return dir;
+}
+
+/** Setup-only CLI calls with payload assertions go in-process; CLI-behavior calls keep runCli. */
+async function runSetup(args: string[]): Promise<Record<string, unknown>> {
+  const res = await runCliFast(args);
+  assert.equal(res.status, 0, res.stderr || res.stdout);
+  return parseEnvelope(res.stdout, res.stderr);
 }
 
 test("cli silent argument errors", { timeout: 300_000 }, async (t) => {
   ffmpegTone(LONG_MP4, 30);
   ffmpegTone(SHORT_MP4, 2);
 
-  await t.test("extra positional is rejected; ingest, comma ranges, show, and monitor frame still work", () => {
+  await t.test("extra positional is rejected; ingest, comma ranges, show, and monitor frame still work", async () => {
     const dir = initProject("edit");
-    const ingested = runCli(["library", "ingest", LONG_MP4, SHORT_MP4, "--dir", dir]);
-    assert.equal(ingested.status, 0, ingested.stderr || ingested.stdout);
-    const ingestedEnv = parseEnvelope(ingested.stdout, ingested.stderr);
+    const ingestedEnv = await runSetup(["library", "ingest", LONG_MP4, SHORT_MP4, "--dir", dir]);
     const items = ingestedEnv.ingested as unknown[];
     assert.equal(items.length, 2);
 
-    assert.equal(runCli(["spine", "append", "--asset", "vid_01", "--dir", dir]).status, 0);
-    const added = runCli([
+    await runSetup(["spine", "append", "--asset", "vid_01", "--dir", dir]);
+    const addedEnv = await runSetup([
       "lane",
       "add-cue",
       "--lane",
@@ -126,10 +140,9 @@ test("cli silent argument errors", { timeout: 300_000 }, async (t) => {
       "--dir",
       dir,
     ]);
-    assert.equal(added.status, 0, added.stderr || added.stdout);
-    const cueId = String((parseEnvelope(added.stdout, added.stderr).cue as { id: string }).id);
+    const cueId = String((addedEnv.cue as { id: string }).id);
 
-    const created = runCli([
+    await runSetup([
       "extension",
       "create",
       "--name",
@@ -141,14 +154,11 @@ test("cli silent argument errors", { timeout: 300_000 }, async (t) => {
       "--dir",
       dir,
     ]);
-    assert.equal(created.status, 0, created.stderr || created.stdout);
-    const shown = runCli(["extension", "show", "demo_ext", "--dir", dir]);
-    assert.equal(shown.status, 0, shown.stderr || shown.stdout);
-    assert.equal((parseEnvelope(shown.stdout, shown.stderr).manifest as { name?: string } | undefined)?.name ?? (parseEnvelope(shown.stdout, shown.stderr) as { name?: string }).name, "demo_ext");
+    const shownEnv = await runSetup(["extension", "show", "demo_ext", "--dir", dir]);
+    assert.equal((shownEnv.manifest as { name?: string } | undefined)?.name ?? (shownEnv as { name?: string }).name, "demo_ext");
 
-    const frame = runCli(["monitor", "frame", "1s", "--boxes", "false", "--dir", dir]);
-    assert.equal(frame.status, 0, frame.stderr || frame.stdout);
-    assert.equal(parseEnvelope(frame.stdout, frame.stderr).ok, true);
+    const frameEnv = await runSetup(["monitor", "frame", "1s", "--boxes", "false", "--dir", dir]);
+    assert.equal(frameEnv.ok, true);
 
     const dropped = runCli([
       "lane",
@@ -222,12 +232,12 @@ test("cli silent argument errors", { timeout: 300_000 }, async (t) => {
     assert.throws(() => JSON.parse(plain.stdout));
   });
 
-  await t.test("unitless monitor --at warns only for a long sequence and several small bare numbers", () => {
+  await t.test("unitless monitor --at warns only for a long sequence and several small bare numbers", async () => {
     const dir = initProject("monitor");
-    assert.equal(runCli(["library", "ingest", LONG_MP4, "--dir", dir]).status, 0);
-    assert.equal(runCli(["spine", "append", "--asset", "vid_01", "--dir", dir]).status, 0);
+    await runSetup(["library", "ingest", LONG_MP4, "--dir", dir]);
+    await runSetup(["spine", "append", "--asset", "vid_01", "--dir", dir]);
 
-    const warned = runCli(["monitor", "sheet", "--at", "21.1,27.06", "--boxes", "false", "--dir", dir]);
+    const warned = runCli(["monitor", "sheet", "--at", "21,27", "--boxes", "false", "--dir", dir]);
     assert.equal(warned.status, 0, warned.stderr || warned.stdout);
     const warnedEnv = parseEnvelope(warned.stdout, warned.stderr);
     assert.match(diagnosticBlob(warnedEnv), /CUTHOL-G114/);
@@ -249,26 +259,25 @@ test("cli silent argument errors", { timeout: 300_000 }, async (t) => {
     assert.equal(single.status, 0, single.stderr || single.stdout);
     assert.doesNotMatch(diagnosticBlob(parseEnvelope(single.stdout, single.stderr)), /CUTHOL-G114/);
 
-    const oneBare = runCli(["monitor", "frame", "--at", "21.1", "--boxes", "false", "--dir", dir]);
-    assert.equal(oneBare.status, 0, oneBare.stderr || oneBare.stdout);
-    assert.doesNotMatch(diagnosticBlob(parseEnvelope(oneBare.stdout, oneBare.stderr)), /CUTHOL-G114/);
+    const oneBareFraction = runCli(["monitor", "frame", "--at", "21.1", "--boxes", "false", "--dir", dir]);
+    assert.notEqual(oneBareFraction.status, 0, oneBareFraction.stdout);
+    assert.match(
+      diagnosticBlob(parseEnvelope(oneBareFraction.stdout, oneBareFraction.stderr)),
+      /CUTHOL-G142/
+    );
 
     const short = initProject("monitor-short");
-    assert.equal(runCli(["library", "ingest", LONG_MP4, "--dir", short]).status, 0);
-    assert.equal(
-      runCli(["spine", "append", "--asset", "vid_01", "--in", "0s", "--out", "3s", "--dir", short]).status,
-      0
-    );
-    const shortSheet = runCli(["monitor", "sheet", "--at", "21.1,27.06", "--boxes", "false", "--dir", short]);
+    await runSetup(["library", "ingest", LONG_MP4, "--dir", short]);
+    await runSetup(["spine", "append", "--asset", "vid_01", "--in", "0s", "--out", "3s", "--dir", short]);
+    const shortSheet = runCli(["monitor", "sheet", "--at", "1100,1200", "--boxes", "false", "--dir", short]);
     assert.equal(shortSheet.status, 0, shortSheet.stderr || shortSheet.stdout);
     assert.doesNotMatch(diagnosticBlob(parseEnvelope(shortSheet.stdout, shortSheet.stderr)), /CUTHOL-G114/);
   });
 
-  await t.test("library query max_tokens truncation is a visible warning", () => {
+  await t.test("library query max_tokens truncation is a visible warning", async () => {
     const dir = initProject("query");
-    assert.equal(runCli(["library", "ingest", LONG_MP4, "--dir", dir]).status, 0);
-    const wave = runCli(["library", "waveform", "--handle", "vid_01", "--bins", "24", "--dir", dir]);
-    assert.equal(wave.status, 0, wave.stderr || wave.stdout);
+    await runSetup(["library", "ingest", LONG_MP4, "--dir", dir]);
+    await runSetup(["library", "waveform", "--handle", "vid_01", "--bins", "24", "--dir", dir]);
 
     const queried = runCli([
       "library",

@@ -12,6 +12,7 @@ import {
   scaffoldHyperFramesComposition,
 } from "../compositor/hyperframes_bridge.js";
 import { CutholError } from "../core/diagnostics.js";
+import { writeCurrentScriptErrorRecord } from "../compositor/coords_extract.js";
 import {
   resolveHyperFramesWorkers,
   resolveOverlayConcurrency,
@@ -381,6 +382,40 @@ test("4. Concurrent overlay pre-pass (K=3), .meta.json HF summary, warm cache, a
       'if (typeof window !== "undefined") { throw new Error("SYNTHETIC_C02_OVERLAY_FAILURE"); }\n      window.__timelines["main"] = tl;'
     );
     fs.writeFileSync(c02HtmlPath, c02BrokenHtml, "utf8");
+
+    // A render not preceded by verify probes unchecked composition scripts
+    // first: the throwing page stops the render with G430 before any overlay
+    // is captured.
+    assert.throws(
+      () =>
+        renderSequenceToMp4({
+          workspaceDir: wsDir,
+          preset: "master_1080p",
+          outputPath: "output/broken_probe.mp4",
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof CutholError);
+        assert.equal(err.diagnostic.code, "CUTHOL-G430");
+        return true;
+      }
+    );
+    assert.equal(
+      fs.readdirSync(blobsDir).filter((f) => f.startsWith("hf_comp_") && (f.endsWith(".pngseq") || f.endsWith(".mov"))).length,
+      0,
+      "a render stopped by the script probe captures no overlay"
+    );
+
+    // A failure the probe cannot see (it recorded the page as healthy, but the
+    // capture fails) still lets the sibling overlays finish and cache.
+    writeCurrentScriptErrorRecord(wsDir, {
+      absCompDir: path.join(wsDir, "compositions", "c02"),
+      entryHtml: "index.html",
+      source: "probe",
+      timelineExpected: true,
+      timelineRegistered: true,
+      timelinePaused: true,
+      errors: [],
+    });
 
     assert.throws(
       () =>

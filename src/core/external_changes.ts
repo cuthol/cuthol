@@ -1160,7 +1160,11 @@ function describeChangeSetShort(c: CompChangeSet): string {
  * validation and G1–G3 gates pass. `journal undo` of the new revision
  * restores the previous file contents (see `restoreForJournalTraversal`).
  */
-export function adoptExternalChanges(dir: string, compFilter?: string): AdoptResult {
+export function adoptExternalChanges(
+  dir: string,
+  compFilter?: string,
+  opts?: { automatic?: boolean }
+): AdoptResult {
   const paths = resolveWorkspacePaths(dir);
   const changes = detectExternalChanges(dir);
   const diskRaw = fs.readFileSync(paths.sequenceFile, "utf8");
@@ -1226,7 +1230,9 @@ export function adoptExternalChanges(dir: string, compFilter?: string): AdoptRes
 
   const opBits = scoped.map(describeChangeSetShort);
   if (changes.sequence) opBits.push("cuthol.sequence.json");
-  const operation = `${ADOPT_OPERATION_PREFIX}(${opBits.join(", ") || "no changes"}): external change adopted`;
+  const operation =
+    `${ADOPT_OPERATION_PREFIX}(${opBits.join(", ") || "no changes"}): external change adopted` +
+    (opts?.automatic ? " automatically" : "");
 
   const { revision } = commitSequenceMutation(
     dir,
@@ -1267,6 +1273,35 @@ export function adoptExternalChanges(dir: string, compFilter?: string): AdoptRes
       `External change adopted → r${revision} (${scoped.map(describeChangeSetShort).join("; ") || "sequence only"}` +
       `${changes.sequence ? "; cuthol.sequence.json folded in (passed G1–G3)" : ""}). ` +
       `Undoable with 'cuthol workspace journal undo'.`,
+  };
+}
+
+/**
+ * Automatic adoption for composition-file-only outside edits. When the
+ * sequence file itself was touched (or is corrupt), nothing is adopted and
+ * the caller keeps requiring an explicit `changes adopt` / `revert`.
+ * Otherwise the disk state is blessed as a new journaled revision (undoable),
+ * exactly like an explicit adopt. Returns the adopted composition keys, or
+ * null when there was nothing composition-only to adopt.
+ */
+export function adoptExternalCompositionEdits(
+  dir: string,
+  opts?: { automatic?: boolean }
+): { adopted_comps: string[]; revision: number; summary_line: string } | null {
+  let changes;
+  try {
+    changes = detectExternalChanges(dir);
+  } catch {
+    return null;
+  }
+  if (!changes.has_changes || changes.compositions.length === 0) return null;
+  if (changes.sequence !== null) return null;
+  const result = adoptExternalChanges(dir, undefined, opts);
+  if (!result.adopted || result.adopted_comps.length === 0) return null;
+  return {
+    adopted_comps: result.adopted_comps,
+    revision: result.revision,
+    summary_line: `adopted outside composition edits: ${result.adopted_comps.join(", ")}`,
   };
 }
 

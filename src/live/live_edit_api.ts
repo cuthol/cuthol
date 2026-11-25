@@ -148,8 +148,37 @@ export function buildEditCliArgs(body: LiveEditBody, seq: unknown): string[] {
     if (to === undefined) throw new Error(`'trim' needs params.to_ms (sequence time of the ${edge} edge)`);
     const start = clip.timeline_in_ms ?? 0;
     const dur = clip.duration_ms ?? 0;
-    if (!(to > start && to < start + dur)) {
-      throw new Error(`trim ${edge} edge ${ms(to)} is outside clip '${target}' (${ms(start)}..${ms(start + dur)})`);
+    const end = start + dur;
+    const inRange = to > start && to < end;
+    if (!inRange) {
+      // An edge dragged past the clip's current range extends into source
+      // media the clip does not use yet (up to the asset's start/end). The
+      // rate maps sequence overshoot back to source time; speed ramps are
+      // approximated with the base rate past the current edge.
+      const rate = typeof clip?.playback?.rate === "number" && clip.playback.rate > 0 ? clip.playback.rate : 1;
+      const asset = (seq as any)?.library?.find?.((a: any) => a?.handle === clip.asset_handle);
+      const mediaEnd = typeof asset?.probe?.duration_ms === "number" ? asset.probe.duration_ms : NaN;
+      const rangeNote = `is outside clip '${target}' (${ms(start)}..${ms(end)})`;
+      if (edge === "out" && to > end) {
+        const src = Math.round(clip.source_out_ms + (to - end) / rate);
+        if (!Number.isFinite(mediaEnd) || src > mediaEnd) {
+          throw new Error(
+            `trim ${edge} edge ${ms(to)} ${rangeNote}: past the end of media '${clip.asset_handle ?? "?"}` +
+              (Number.isFinite(mediaEnd) ? `' (limit ${ms(mediaEnd)})` : `' (unknown media length)`)
+          );
+        }
+        if (!(src > clip.source_in_ms)) throw new Error(`trim ${edge} edge ${ms(to)} ${rangeNote}`);
+        return ["spine", "trim", "--clip", target, "--out", ms(src)];
+      }
+      if (edge === "in" && to < start && to < end) {
+        const src = Math.round(clip.source_in_ms - (start - to) / rate);
+        if (src < 0) {
+          throw new Error(`trim ${edge} edge ${ms(to)} ${rangeNote}: past the start of media '${clip.asset_handle ?? "?"}' (limit 0ms)`);
+        }
+        if (!(src < clip.source_out_ms)) throw new Error(`trim ${edge} edge ${ms(to)} ${rangeNote}`);
+        return ["spine", "trim", "--clip", target, "--in", ms(src)];
+      }
+      throw new Error(`trim ${edge} edge ${ms(to)} ${rangeNote}`);
     }
     const src = Math.round(sequenceMsToSourceMs(clip, to));
     if (!(src > clip.source_in_ms && src < clip.source_out_ms)) {

@@ -15,8 +15,10 @@ import path from "node:path";
 import {
   CutholDiagnostic,
   CutholError,
+  DIAGNOSTICS,
   VerificationGateId,
 } from "../core/diagnostics.js";
+import { adoptExternalCompositionEdits } from "../core/external_changes.js";
 import { CutholSequence, LaneCue } from "../core/schema.js";
 import { commitSequenceMutation, loadSequence, WorkspacePaths } from "../core/workspace.js";
 import { syncAllCompositionBridges } from "../compositor/bridge_exporter.js";
@@ -24,12 +26,13 @@ import { wrapTypographyLines } from "../compositor/ass_generator.js";
 import { verifyG1Schema, verifyG2Assets, verifyG3Timing } from "./gates_structural.js";
 import { verifyEasing } from "./gates_easing.js";
 import { verifyG4Stage, verifyG5Signal } from "./gates_stage_signal.js";
-import { verifyCompositionScripts } from "./gates_script_errors.js";
+import { probeUncachedCompositionScripts, verifyCompositionScripts } from "./gates_script_errors.js";
 import { verifyCompositionAudio } from "./gates_hf_audio.js";
 import { verifyEdgeMode } from "./gates_edge.js";
 import { verifyExtensionTransitions } from "./gates_transition.js";
 import { verifySpineFx } from "./gates_fx.js";
 import { verifyColorGates } from "./gates_color.js";
+import { verifyBoundaryContinuity } from "./gates_boundary.js";
 
 export { verifyG1Schema, verifyG2Assets, verifyG3Timing } from "./gates_structural.js";
 export { verifyG4Stage, verifyG5Signal } from "./gates_stage_signal.js";
@@ -286,6 +289,7 @@ export function verifySequence(
   // --- Gate 5: Audio Signal & Render Frame Sanity (G5_SIGNAL) ---
   if (gateSet.has("G5_SIGNAL")) {
     verifyG5Signal(seq, paths, libMap, diagnostics);
+    verifyBoundaryContinuity(seq, paths, diagnostics);
   }
 
   const errorCount = diagnostics.filter((d) => d.severity === "ERROR").length;
@@ -304,6 +308,40 @@ export function verifySequence(
 }
 
 /**
+ * Adopts composition-file-only outside edits without throwing. Null when there
+ * is nothing composition-only to adopt, or when adoption itself fails (the
+ * explicit `changes adopt` / `revert` flow stays responsible then).
+ */
+function adoptExternalCompositionEditsSafe(
+  workspaceDir: string
+): { adopted_comps: string[]; revision: number; summary_line: string } | null {
+  try {
+    return adoptExternalCompositionEdits(workspaceDir, { automatic: true });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Replaces two or more per-range backdrop-gap warnings (CUTHOL-G308) with one
+ * summary warning (CUTHOL-G461). Edit commands print the summary; `verify`
+ * keeps the full per-range list.
+ */
+function collapseBackdropGapWarnings(diagnostics: CutholDiagnostic[]): void {
+  const gaps = diagnostics.filter((d) => d.code === "CUTHOL-G308");
+  if (gaps.length <= 1) return;
+  let totalMs = 0;
+  for (const g of gaps) {
+    const m = /in (\d+)\.\.(\d+)ms/.exec(g.what);
+    if (m) totalMs += Number(m[2]) - Number(m[1]);
+  }
+  const kept = diagnostics.filter((d) => d.code !== "CUTHOL-G308");
+  kept.push(DIAGNOSTICS.BACKDROP_GAPS_SUMMARY(gaps.length, totalMs));
+  diagnostics.length = 0;
+  diagnostics.push(...kept);
+}
+
+/**
  * Executes a sequence mutation inside `JournalGuard` and runs the 5-Gate Verification Engine
  * before committing to disk. If any `ERROR`-level diagnostic is detected, throws `CutholError`
  * so `JournalGuard` automatically aborts and leaves `cuthol.sequence.json` untouched.
@@ -314,6 +352,7 @@ export function commitVerifiedMutation<T>(
   mutator: (seq: CutholSequence, paths: WorkspacePaths) => T
 ): { result: T; sequence: CutholSequence; revision: number; verification: VerificationReport } {
   let verificationReport!: VerificationReport;
+  const autoAdopted = adoptExternalCompositionEditsSafe(workspaceDir);
 
   const { result, sequence, revision } = commitSequenceMutation(
     workspaceDir,
@@ -339,6 +378,16 @@ export function commitVerifiedMutation<T>(
     }
   );
 
+  collapseBackdropGapWarnings(verificationReport.diagnostics);
+  if (autoAdopted) {
+    verificationReport.diagnostics.push(
+      DIAGNOSTICS.EXTERNAL_COMPOSITION_EDITS_AUTO_ADOPTED(autoAdopted.adopted_comps)
+    );
+  }
+  verificationReport.error_count = verificationReport.diagnostics.filter((d) => d.severity === "ERROR").length;
+  verificationReport.warning_count = verificationReport.diagnostics.filter((d) => d.severity === "WARN").length;
+  verificationReport.info_count = verificationReport.diagnostics.filter((d) => d.severity === "INFO").length;
+
   return { result, sequence, revision, verification: verificationReport };
 }
 
@@ -346,6 +395,16 @@ export function runWorkspaceVerification(
   workspaceDir: string,
   gates?: VerificationGateId[]
 ): VerificationReport {
+  const auto = adoptExternalCompositionEditsSafe(workspaceDir);
   const { paths, sequence } = loadSequence(workspaceDir);
-  return verifySequence(sequence, paths, gates);
+  // Compositions never opened in a browser get one shared probe run here, so
+  // a real script error surfaces in verify (G430–G432) instead of only at the
+  // first monitor call. Cached records make the second verify fast.
+  probeUncachedCompositionScripts(sequence, paths);
+  const report = verifySequence(sequence, paths, gates);
+  if (auto) {
+    report.diagnostics.push(DIAGNOSTICS.EXTERNAL_COMPOSITION_EDITS_AUTO_ADOPTED(auto.adopted_comps));
+    report.info_count = (report.info_count ?? 0) + 1;
+  }
+  return report;
 }

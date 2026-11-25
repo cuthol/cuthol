@@ -32,7 +32,7 @@ import {
 } from "../core/diagnostics.js";
 import { PngCanvas, RgbaColor } from "../core/png_canvas.js";
 import { CutholSequence, LaneCue } from "../core/schema.js";
-import { OPEN_STANDARDS } from "../core/standards.js";
+import { isVerticalStage, OPEN_STANDARDS } from "../core/standards.js";
 import { formatTimecode } from "../core/time.js";
 import { loadSequence } from "../core/workspace.js";
 import {
@@ -82,140 +82,6 @@ export interface MonitorSheetResult {
   frames: FrameLumaMetrics[];
   blank_frames_ms: number[];
   diagnostics: CutholDiagnostic[];
-}
-
-/**
- * Extracts raw RGB24 pixels at `atMs` from a composite MP4 and computes Rec. ITU-R BT.709 luma statistics.
- */
-function extractRawFrameToCanvas(
-  mp4Path: string,
-  width: number,
-  height: number,
-  atMs: number,
-  durationMs: number,
-  seq: CutholSequence,
-  showBoxes: boolean,
-  rootDir?: string
-): { canvas: PngCanvas; metrics: FrameLumaMetrics; diagnostic: CutholDiagnostic | null } {
-  // Clamp timestamp to the exact last frame PTS index and fallback to -sseof -0.5 / -ss 0
-  const fps = Math.max(1, seq.stage.fps);
-  const lastFrameIdx = Math.max(0, Math.floor((durationMs / 1000) * fps - 1));
-  const maxSafeMs = Math.max(0, Math.floor(lastFrameIdx * (1000 / fps)));
-  let clampedMs = Math.max(0, Math.min(Math.round(atMs), maxSafeMs));
-  const timeSec = (clampedMs / 1000).toFixed(3);
-
-  const extractArgs = [
-    "-v",
-    "error",
-    "-ss",
-    timeSec,
-    "-i",
-    mp4Path,
-    "-vf",
-    "scale=flags=accurate_rnd+full_chroma_int:in_color_matrix=bt709:out_color_matrix=bt709,format=rgb24",
-    "-frames:v",
-    "1",
-    "-f",
-    "rawvideo",
-    "-pix_fmt",
-    "rgb24",
-    "pipe:1",
-  ];
-  let proc = spawnWatchedSync("ffmpeg", extractArgs, {
-    maxBuffer: width * height * 4 + 1024 * 1024,
-    step: "ffmpeg frame extract",
-  });
-
-  if (proc.status !== 0 || proc.error) {
-    throw new CutholError(
-      createSubprocessFailureDiagnostic({
-        tool: "ffmpeg frame extract",
-        executable: "ffmpeg",
-        args: extractArgs,
-        proc,
-        clipCount: seq.spine.clips.length,
-        fallbackDetail: "frame extract failed",
-      })
-    );
-  }
-
-  let rgbBuf = proc.stdout as Buffer;
-  const pixelCount = width * height;
-
-  if (rgbBuf.length < pixelCount * 3) {
-    const retryProc = spawnWatchedSync(
-      "ffmpeg",
-      [
-        "-v",
-        "error",
-        "-sseof",
-        "-0.5",
-        "-i",
-        mp4Path,
-        "-vf",
-        "scale=flags=accurate_rnd+full_chroma_int:in_color_matrix=bt709:out_color_matrix=bt709,format=rgb24",
-        "-frames:v",
-        "1",
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "rgb24",
-        "pipe:1",
-      ],
-      { maxBuffer: width * height * 4 + 1024 * 1024, step: "ffmpeg frame extract" }
-    );
-    if (retryProc.status === 0 && (retryProc.stdout as Buffer).length >= pixelCount * 3) {
-      proc = retryProc;
-      rgbBuf = retryProc.stdout as Buffer;
-      clampedMs = maxSafeMs;
-    } else {
-      const zeroProc = spawnWatchedSync(
-        "ffmpeg",
-        [
-          "-v",
-          "error",
-          "-ss",
-          "0.000",
-          "-i",
-          mp4Path,
-          "-vf",
-          "scale=flags=accurate_rnd+full_chroma_int:in_color_matrix=bt709:out_color_matrix=bt709,format=rgb24",
-          "-frames:v",
-          "1",
-          "-f",
-          "rawvideo",
-          "-pix_fmt",
-          "rgb24",
-          "pipe:1",
-        ],
-        { maxBuffer: width * height * 4 + 1024 * 1024, step: "ffmpeg frame extract" }
-      );
-      if (zeroProc.status === 0 && (zeroProc.stdout as Buffer).length >= pixelCount * 3) {
-        proc = zeroProc;
-        rgbBuf = zeroProc.stdout as Buffer;
-        clampedMs = 0;
-      }
-    }
-  }
-
-  if (rgbBuf.length < pixelCount * 3) {
-    throw new CutholError(
-      DIAGNOSTICS.EXTERNAL_TOOL_FAILED(
-        "ffmpeg frame extract",
-        `Extracted rawvideo buffer (${rgbBuf.length}B) is smaller than expected frame (${pixelCount * 3}B) at ${clampedMs}ms`
-      )
-    );
-  }
-
-  return annotateRgb24BufferToCanvas(
-    rgbBuf,
-    width,
-    height,
-    clampedMs,
-    seq,
-    showBoxes,
-    rootDir
-  );
 }
 
 export interface BlankFrameEvaluation {
@@ -359,7 +225,8 @@ export function annotateRgb24BufferToCanvas(
   clampedMs: number,
   seq: CutholSequence,
   showBoxes: boolean,
-  rootDir?: string
+  rootDir?: string,
+  showHud = true
 ): { canvas: PngCanvas; metrics: FrameLumaMetrics; diagnostic: CutholDiagnostic | null } {
   const pixelCount = width * height;
   const canvas = new PngCanvas(width, height, [0, 0, 0, 255]);
@@ -405,14 +272,13 @@ export function annotateRgb24BufferToCanvas(
     // Draw EBU R95 / 9:16 Safe Zone boundary guide
     const safeLeft = Math.round(width * (OPEN_STANDARDS.SAFE_ZONES.TITLE_MARGIN_PCT / 100));
     const safeTop = Math.round(height * (OPEN_STANDARDS.SAFE_ZONES.TITLE_MARGIN_PCT / 100));
-    const safeRight =
-      seq.stage.aspect === "9:16"
-        ? Math.round(width * (1 - OPEN_STANDARDS.SAFE_ZONES.VERTICAL_9_16_RIGHT_CHROME_PCT / 100))
-        : width - safeLeft;
-    const safeBottom =
-      seq.stage.aspect === "9:16"
-        ? Math.round(height * (1 - OPEN_STANDARDS.SAFE_ZONES.VERTICAL_9_16_BOTTOM_CHROME_PCT / 100))
-        : height - safeTop;
+    const verticalStage = isVerticalStage(seq.stage);
+    const safeRight = verticalStage
+      ? Math.round(width * (1 - OPEN_STANDARDS.SAFE_ZONES.VERTICAL_9_16_RIGHT_CHROME_PCT / 100))
+      : width - safeLeft;
+    const safeBottom = verticalStage
+      ? Math.round(height * (1 - OPEN_STANDARDS.SAFE_ZONES.VERTICAL_9_16_BOTTOM_CHROME_PCT / 100))
+      : height - safeTop;
 
     canvas.strokeRect(
       safeLeft,
@@ -449,10 +315,13 @@ export function annotateRgb24BufferToCanvas(
     seq.spine.clips.length === 0 && activeVisualCueIdsAt(seq, clampedMs).length > 0;
   const effectiveIsBlank = isBlank && !isPastActualSequenceTail && !isAuthoredGraphicsFrame;
 
-  // Draw top HUD bar on the frame FIRST
-  canvas.fillRect(0, 0, width, 24, [13, 17, 23, 215]);
-  const hudText = `T:${clampedMs}MS (${formatTimecode(clampedMs)}) | ACT:${activeHandles.join(",") || "NONE"} | Y:${meanY.toFixed(1)}`;
-  canvas.drawText(hudText, 6, 8, effectiveIsBlank ? [248, 113, 113, 255] : [226, 232, 240, 255], 1);
+  // Draw top HUD bar on the frame FIRST (clean captures for contact
+  // sheets and thumbnails skip it; the CLI monitor frame keeps it).
+  if (showHud) {
+    canvas.fillRect(0, 0, width, 24, [13, 17, 23, 215]);
+    const hudText = `T:${clampedMs}MS (${formatTimecode(clampedMs)}) | ACT:${activeHandles.join(",") || "NONE"} | Y:${meanY.toFixed(1)}`;
+    canvas.drawText(hudText, 6, 8, effectiveIsBlank ? [248, 113, 113, 255] : [226, 232, 240, 255], 1);
+  }
 
   for (const lane of sortedLanes) {
     if (lane.muted) continue;
@@ -625,10 +494,12 @@ export function captureMonitorFrame(options: {
   workspaceDir: string;
   atMs: number;
   showBoxes?: boolean;
+  hideHud?: boolean;
   outputPath?: string;
 }): MonitorFrameResult {
   const { paths, sequence } = loadSequence(options.workspaceDir);
   const showBoxes = options.showBoxes ?? true;
+  const showHud = !(options.hideHud ?? false);
 
   const { rgbBuf, width, height, clampedMs } = renderSingleCompositeFrameRgb24(
     sequence,
@@ -643,7 +514,8 @@ export function captureMonitorFrame(options: {
     clampedMs,
     sequence,
     showBoxes,
-    paths.rootDir
+    paths.rootDir,
+    showHud
   );
 
   const defaultOut = path.join(paths.monitorDir, `frame_${Math.round(options.atMs)}ms.png`);

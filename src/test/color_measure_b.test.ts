@@ -65,6 +65,13 @@ function colourful(): string {
   return out;
 }
 
+/** The (TALK, 96px, 3 frames) load is used by two tests; decode once, hand each a copy. */
+let talk96x3: ColorFrameSet | undefined;
+function talkBase96x3(): ColorFrameSet {
+  talk96x3 ??= loadReferenceFrames(TALK, { width: 96, count: 3 });
+  return structuredClone(talk96x3);
+}
+
 function graded(set: ColorFrameSet, stage: Parameters<typeof stagePixelFunction>[0]): ColorFrameSet {
   const fn = stagePixelFunction(stage, null);
   return {
@@ -115,7 +122,7 @@ describe("color diff", () => {
 
 describe("color solve", () => {
   it("match recovers a known grade within tolerance", { skip: NEED_MEDIA }, () => {
-    const base = loadReferenceFrames(TALK, { width: 96, count: 3 });
+    const base = talkBase96x3();
     const truth = { white_balance: { temp_mired: 30, tint: 0 }, exposure: { stops: -0.7 }, saturation: { saturation: 0.7 } };
     const r = colorSolve({ mode: "match", from: base, to: graded(base, truth), rootDir: TMP });
     assert.ok(Math.abs((r.patch.white_balance?.temp_mired ?? 0) - 30) <= 8, JSON.stringify(r.patch));
@@ -142,7 +149,7 @@ describe("color solve", () => {
 
 describe("color predict", () => {
   it("flags a white wall turning colour on a warm highlight push", { skip: NEED_MEDIA }, () => {
-    const base = loadReferenceFrames(TALK, { width: 96, count: 3 });
+    const base = talkBase96x3();
     const p = predictStage(base, stagePixelFunction({ white_balance: { temp_mired: 60, tint: 0.4 } }, null));
     assert.ok(p.side_effects.some((s) => s.includes("white wall turns")), JSON.stringify(p.side_effects));
     assert.ok(p.mean_change_de > 1);

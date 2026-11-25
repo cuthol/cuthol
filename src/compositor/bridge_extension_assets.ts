@@ -197,8 +197,147 @@ export function syncEnabledExtensionAssetsToComposition(
     }
   }
 
+  const sharedSync = syncSharedProjectAssetsToComposition(absCompDir, entryHtml, paths);
+  if (sharedSync.updated) {
+    updated = true;
+    updatedFiles.push(...sharedSync.updatedFiles);
+  }
+
   if (sidecarDirty) writeExtSyncSidecar(assetsDir, sidecar);
 
+  return { updated, updatedFiles };
+}
+
+export const SHARED_PROJECT_DIR_NAME = "shared";
+const SHARED_SIDECAR_KEY = "__shared__";
+
+/**
+ * Returns true when a composition references project shared assets
+ * (`assets/shared/...` in its entry HTML or scripts), so only compositions
+ * that actually use the shared folder receive copies (and re-render when it changes).
+ */
+export function compositionReferencesSharedAssets(
+  compDir: string,
+  entryHtml = "index.html"
+): boolean {
+  const absCompDir = path.resolve(compDir);
+  const entryPath = path.join(absCompDir, entryHtml || "index.html");
+  const probe = (source: string): boolean => /assets\/shared\//.test(source);
+  try {
+    if (fs.existsSync(entryPath) && probe(fs.readFileSync(entryPath, "utf8"))) return true;
+  } catch {
+    // fall through to script scan
+  }
+  const scanDir = (dir: string, depth: number): boolean => {
+    if (depth > 3) return false;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    for (const ent of entries) {
+      if (ent.name === "node_modules" || ent.name === ".cuthol" || ent.name === ".hyperframes") continue;
+      const full = path.join(dir, ent.name);
+      if (ent.isDirectory()) {
+        if (scanDir(full, depth + 1)) return true;
+      } else if (ent.isFile() && /\.(?:html|js|mjs|css)$/i.test(ent.name)) {
+        try {
+          if (probe(fs.readFileSync(full, "utf8"))) return true;
+        } catch {
+          // ignore unreadable file
+        }
+      }
+    }
+    return false;
+  };
+  return scanDir(absCompDir, 0);
+}
+
+/**
+ * Synchronizes the project-level `shared/` folder (`<project>/shared/`) into a
+ * composition as `assets/shared/...`, but only for compositions that reference
+ * `assets/shared/`. Files there are visible to every composition under the
+ * same relative path in render, monitor and Live (which all serve the
+ * composition directory), and their content is part of the composition hash,
+ * so editing a shared file re-renders exactly the compositions that use it.
+ *
+ * Refresh rule mirrors the extension rule: missing copies are written; a copy
+ * whose current bytes match the last synced bytes is refreshed in place; a
+ * file the user edited inside the composition is left alone.
+ */
+export function syncSharedProjectAssetsToComposition(
+  compDir: string,
+  entryHtml = "index.html",
+  paths?: WorkspacePaths
+): { updated: boolean; updatedFiles: string[] } {
+  if (!paths) return { updated: false, updatedFiles: [] };
+  const absCompDir = path.resolve(compDir);
+  if (!fs.existsSync(absCompDir)) return { updated: false, updatedFiles: [] };
+  if (!compositionReferencesSharedAssets(absCompDir, entryHtml)) {
+    return { updated: false, updatedFiles: [] };
+  }
+  const srcSharedDir = path.join(path.resolve(paths.rootDir), SHARED_PROJECT_DIR_NAME);
+  if (!fs.existsSync(srcSharedDir)) return { updated: false, updatedFiles: [] };
+
+  const assetsDir = path.join(absCompDir, "assets");
+  fs.mkdirSync(assetsDir, { recursive: true });
+  const sidecar = readExtSyncSidecar(assetsDir);
+  let updated = false;
+  const updatedFiles: string[] = [];
+
+  const syncDir = (sDir: string, dDir: string, relPref: string): void => {
+    fs.mkdirSync(dDir, { recursive: true });
+    for (const ent of fs.readdirSync(sDir, { withFileTypes: true })) {
+      if (ent.name.startsWith(".tmp") || ent.name === ".DS_Store") continue;
+      const sFull = path.join(sDir, ent.name);
+      const dFull = path.join(dDir, ent.name);
+      const relFile = `${relPref}/${ent.name}`;
+      if (ent.isDirectory()) {
+        syncDir(sFull, dFull, relFile);
+      } else if (ent.isFile()) {
+        const sBuf = fs.readFileSync(sFull);
+        const sHash = sha256Hex(sBuf);
+        if (!fs.existsSync(dFull)) {
+          fs.writeFileSync(dFull, sBuf);
+          updated = true;
+          updatedFiles.push(relFile);
+          const prev = sidecar.extensions[SHARED_SIDECAR_KEY];
+          sidecar.extensions[SHARED_SIDECAR_KEY] = {
+            contentHash: "dir",
+            files: { ...(prev?.files ?? {}), [relFile]: sHash },
+          };
+        } else {
+          const dHash = sha256Hex(fs.readFileSync(dFull));
+          if (dHash === sHash) {
+            const prev = sidecar.extensions[SHARED_SIDECAR_KEY];
+            if (!prev || prev.files[relFile] !== sHash) {
+              sidecar.extensions[SHARED_SIDECAR_KEY] = {
+                contentHash: "dir",
+                files: { ...(prev?.files ?? {}), [relFile]: sHash },
+              };
+            }
+          } else if (sidecar.extensions[SHARED_SIDECAR_KEY]?.files[relFile] === dHash) {
+            fs.writeFileSync(dFull, sBuf);
+            updated = true;
+            updatedFiles.push(relFile);
+            const prev = sidecar.extensions[SHARED_SIDECAR_KEY];
+            sidecar.extensions[SHARED_SIDECAR_KEY] = {
+              contentHash: "dir",
+              files: { ...(prev?.files ?? {}), [relFile]: sHash },
+            };
+          }
+          // Otherwise the user edited the copy: leave it alone.
+        }
+      }
+    }
+  };
+  syncDir(srcSharedDir, path.join(assetsDir, "shared"), "assets/shared");
+  try {
+    writeExtSyncSidecar(assetsDir, sidecar);
+  } catch {
+    // sidecar is best-effort bookkeeping
+  }
   return { updated, updatedFiles };
 }
 

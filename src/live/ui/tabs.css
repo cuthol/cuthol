@@ -1,6 +1,6 @@
 /* Tab panel: Clip Info | Notes. The existing inspector and notes regions mount
    into the panes below; this module only owns the tab bar and switching. */
-.kt-tabs { display: flex; gap: var(--s-1); padding: var(--s-2) var(--s-3) 0; flex: none; }
+.kt-tabs { display: flex; align-items: center; gap: var(--s-1); padding: var(--s-2) var(--s-3) 0; flex: none; }
 .kt-tab { border: 0; background: transparent; color: var(--text-3); font-size: var(--fs-13); font-weight: var(--fw-semibold); padding: var(--s-2) var(--s-2); cursor: pointer; border-bottom: 2px solid transparent; }
 .kt-tab[aria-selected="true"] { color: var(--text-1); border-bottom-color: var(--text-1); }
 .kt-tab:hover { color: var(--text-1); }
@@ -10,3 +10,11 @@
 .kt-pane .panel-head { display: none; }
 .kt-pane .panel-body { flex: 1; }
 /* The notes panel already draws its own list; the tab keeps its head hidden. */
+/* Expand Notes over the right column (same place as an effect menu). */
+.kt-expand { margin-left: auto; width: 26px; height: 26px; display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: var(--r-sm); background: transparent; color: var(--text-3); cursor: pointer; }
+.kt-expand:hover { background: var(--bg-hover); color: var(--text-1); }
+.kt-expand[hidden] { display: none; }
+.fx-close svg { display: block; margin: auto; }
+.nt-overlay .nt-overlay-body { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+.nt-overlay .kt-pane { flex: 1; min-height: 0; }
+.nt-overlay .kt-pane .panel-head { display: none; }

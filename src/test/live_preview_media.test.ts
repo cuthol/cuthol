@@ -10,7 +10,7 @@
  * Window assertions run against the real `live serve` (no wrapper server);
  * proxy-manager assertions use LiveProxyManager directly on the copy.
  */
-import test from "node:test";
+import test, { after, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
@@ -20,6 +20,7 @@ import path from "node:path";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { resolveCoordsChromePath } from "../compositor/coords_extract.js";
 import { LiveProxyManager } from "../live/live_proxy.js";
+import { waitFor } from "./b_helpers.js";
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "../..");
 const CLI = path.join(REPO, "dist", "cli.js");
@@ -34,16 +35,6 @@ function cli(dir: string, args: string[]): { status: number; stdout: string; std
     timeout: 180000,
   });
   return { status: proc.status ?? 1, stdout: String(proc.stdout ?? ""), stderr: String(proc.stderr ?? "") };
-}
-
-async function waitFor<T>(fn: () => T | Promise<T> | null | undefined | false, timeoutMs: number, what: string): Promise<NonNullable<T>> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    const v = await fn();
-    if (v) return v as NonNullable<T>;
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
-    await new Promise((r) => setTimeout(r, 250));
-  }
 }
 
 function httpGet(url: string): Promise<{ status: number; body: Buffer }> {
@@ -122,13 +113,35 @@ async function stopServer(srv: Served): Promise<void> {
   } catch {}
 }
 
-async function openWindow(srv: Served): Promise<{ browser: Browser; page: Page; errors: string[] }> {
-  const browser = await puppeteer.launch({
+/** One headless browser for the file; each window test opens its own page. */
+let sharedBrowser: Browser | null = null;
+before(async () => {
+  sharedBrowser = await puppeteer.launch({
     executablePath: resolveCoordsChromePath(),
     headless: true,
     args: ["--no-sandbox", "--autoplay-policy=no-user-gesture-required", "--mute-audio"],
   });
-  const page = await browser.newPage();
+});
+
+after(async () => {
+  if (sharedBrowser) {
+    await sharedBrowser.close().catch(() => {});
+    sharedBrowser = null;
+  }
+});
+
+async function openWindow(srv: Served): Promise<{ browser: Browser; page: Page; errors: string[] }> {
+  // The browser is shared; the returned `browser` handle closes only this
+  // test's page, so every `browser.close()` in a finally keeps working.
+  if (!sharedBrowser) {
+    sharedBrowser = await puppeteer.launch({
+      executablePath: resolveCoordsChromePath(),
+      headless: true,
+      args: ["--no-sandbox", "--autoplay-policy=no-user-gesture-required", "--mute-audio"],
+    });
+  }
+  const page = await sharedBrowser.newPage();
+  const browser = { close: () => page.close() } as unknown as Browser;
   await page.setViewport({ width: 1600, height: 900 });
   const errors: string[] = [];
   page.on("console", (m) => {
@@ -489,7 +502,15 @@ test("preview: exact frame shows a loading indicator while rendering", { skip: F
   const { browser, page, errors } = await openWindow(srv);
   try {
     await seek(page, 1000);
-    await new Promise((r) => setTimeout(r, 1000));
+    // The badge appears once the graded state loads: wait for it instead of
+    // sampling after a fixed sleep (same assertion, event-based).
+    await waitFor(async () => {
+      const badge = await page.evaluate(() => ({
+        badge: !(document.querySelector(".pv-badge") as HTMLElement).hidden,
+        btn: !(document.querySelector(".pv-exact-btn") as HTMLElement).hidden,
+      }));
+      return badge.badge && badge.btn ? badge : null;
+    }, 15000, "grade badge and exact button");
     const badge = await page.evaluate(() => ({
       badge: !(document.querySelector(".pv-badge") as HTMLElement).hidden,
       btn: !(document.querySelector(".pv-exact-btn") as HTMLElement).hidden,
@@ -556,13 +577,17 @@ test("preview: proxy progress strip and still fallback while proxies encode", { 
     assert.ok(stillStat === "queued" || stillStat === "encoding", `still proxy pending (got ${stillStat})`);
     // Video clips without a proxy play the original media meanwhile.
     await seek(page, 2000);
-    await new Promise((r) => setTimeout(r, 2000));
-    const videoSrc = await page.evaluate(() => {
-      const v = [...document.querySelectorAll(".pv-video")].find((x) => (x as HTMLElement).style.visibility === "visible") as
-        | HTMLVideoElement
-        | undefined;
-      return v?.currentSrc ?? "";
-    });
+    // The visible slot picks up the media URL once the status round trips:
+    // wait for it instead of sampling after a fixed sleep (same assertion).
+    const videoSrc = await waitFor(async () => {
+      const src = await page.evaluate(() => {
+        const v = [...document.querySelectorAll(".pv-video")].find((x) => (x as HTMLElement).style.visibility === "visible") as
+          | HTMLVideoElement
+          | undefined;
+        return v?.currentSrc ?? "";
+      });
+      return src.includes("/media/") ? src : null;
+    }, 15000, "video fallback to original media");
     assert.ok(videoSrc.includes("/media/"), `video falls back to original media (${videoSrc.slice(-40)})`);
     assert.deepEqual(errors, [], `zero console/page/network errors (got ${errors.length})`);
   } finally {

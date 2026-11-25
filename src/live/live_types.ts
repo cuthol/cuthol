@@ -91,7 +91,7 @@ export interface LiveSceneSummary {
 export interface LiveSnapshot {
   schema: typeof LIVE_SCHEMA;
   revision: number;
-  project: { title: string; dir: string; fps: number; width: number; height: number; aspect: string; duration_ms: number; backdrop: string };
+  project: { title: string; dir: string; fps: number; width: number; height: number; aspect: string; duration_ms: number; backdrop: string; /** Sequence tempo (stage.tempo); absent = 1. */ tempo?: number };
   /** The `cuthol.sequence.json` document as Cuthol stores it (the window reads spine/lanes/library from it). */
   sequence: unknown;
   scenes: LiveSceneSummary[];
@@ -181,9 +181,26 @@ export interface LiveNote {
   elements: LiveNoteElement[];
   /** Overlap between the two topmost elements, if any (px²). */
   overlap_px2?: number;
+  /** Composition cue under the note's time (topmost visible), when there is one. */
+  cue?: string;
+  /**
+   * What the note is about. Absent = the single frame at `at_ms` (the original
+   * behaviour). `boundary`: the cut between two consecutive cues (`at_ms` = the
+   * boundary time). `range`: every cue from `from` to `to` inclusive, in sequence
+   * order. `all`: every composition cue in the sequence.
+   */
+  scope?: LiveNoteScope;
 }
 
-/** One packet = everything the human sent in one go (possibly several notes on one frame). */
+export type LiveNoteScope =
+  | { kind: "boundary"; from: string; to: string }
+  | { kind: "range"; from: string; to: string }
+  | { kind: "all" };
+
+/**
+ * One packet = everything the human sent in one go: several notes, possibly on
+ * different frames and cues. `n` numbers the notes 1..N across the whole packet.
+ */
 export interface LiveNotePacket {
   schema: typeof LIVE_SCHEMA;
   id: string;
@@ -192,6 +209,8 @@ export interface LiveNotePacket {
   notes: LiveNote[];
   /** Relative path (from the project root) of one contact sheet PNG with the pins drawn, if any. */
   sheet?: string;
+  /** Present when contact-sheet cells were dropped by the sheet cap (e.g. "2 of 8 cells dropped"). */
+  sheet_note?: string;
   /** Present when the packet reports human edits made while the agent was paused. */
   human_edits?: { from_revision: number; to_revision: number; entries: LiveActivityEntry[] };
   /** Present when the packet reports a human settings change from the Live window. */
@@ -214,6 +233,49 @@ export interface LiveNotesPayload {
   images: string[];
   /** Present while the user has paused the agent; the lines then start with the wait instruction. */
   paused?: { since: string };
+}
+
+/**
+ * Why the Live window decided its preview stopped responding (watchdog).
+ * - `no_frames`: a visible composition iframe reported no timeline clock for several seconds.
+ * - `clock_stalled`: playing, but the composition's main timeline time did not advance.
+ * - `revision_behind`: the window's sequence revision stayed behind the server's.
+ * - `load_failed`: a composition iframe failed to load or threw during boot.
+ */
+export type LiveIncidentReason = "no_frames" | "clock_stalled" | "revision_behind" | "load_failed";
+
+/**
+ * Body of `POST /api/incident` (window -> server). The server stores each report as one JSON file
+ * under `.cuthol/live/incidents/<iso-time>.json` and lists recent ones in `cuthol live status`.
+ * The window posts one report before it self-reloads the preview, then a second one with the same
+ * `id` and `outcome` once it knows whether the reload helped.
+ */
+export interface LiveIncidentReport {
+  /** Stable id chosen by the window; the follow-up outcome report reuses it. */
+  id: string;
+  reason: LiveIncidentReason;
+  /** ISO time the window detected the problem. */
+  at: string;
+  /** Sequence revision the window holds, and the server's last revision the window saw. */
+  window_revision: number | null;
+  server_revision: number | null;
+  playhead_ms: number;
+  playing: boolean;
+  /** Cue id and iframe URL of the composition that stalled, when one is known. */
+  cue_id?: string;
+  iframe_url?: string;
+  /** `__timelines.main.time()` of that iframe in seconds, or null when unreadable. */
+  comp_clock_sec?: number | null;
+  /** Last event types the window received from the server, newest last (at most 20). */
+  recent_events: string[];
+  /** Console errors captured in the window since the previous report (at most 20, each trimmed). */
+  console_errors: string[];
+  /** Optional PNG data URL of the frozen preview. */
+  snapshot_png?: string;
+  /** What the window did: `reloaded_preview` before the outcome is known. */
+  action: "reloaded_preview" | "warned_user";
+  /** Filled by the follow-up report: did the reload bring the preview back? */
+  outcome?: "recovered" | "still_stuck";
 }
 
 /** Environment variable the live server sets when it runs a human edit through the CLI. */
