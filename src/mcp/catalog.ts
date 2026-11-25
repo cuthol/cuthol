@@ -140,7 +140,7 @@ export const WORKSPACELESS_TOOLS = new Set(["guide"]);
  * Every action the MCP surface serves: `ACTION_SPECS` without CLI-only entries.
  * CLI-only entries (`cliOnly: true`, `catalog_specs_cli.ts`) have no MCP tool and
  * must be invisible to every MCP-facing check; they keep their own coverage in
- * `src/test/w0a_catalog.test.ts`.
+ * `src/test/cli_catalog_flags.test.ts`.
  */
 export function mcpActionSpecs(): ActionSpec[] {
   return ACTION_SPECS.filter((a) => !a.cliOnly);

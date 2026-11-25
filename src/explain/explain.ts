@@ -6,18 +6,18 @@ import { TIMELINE_DOCS } from "./docs_timeline.js";
 import { CAPTIONS_DOCS } from "./docs_captions.js";
 import { RENDER_DOCS } from "./docs_render.js";
 import { COLOR_DOCS } from "./docs_color.js";
-import { W1B_DOCS } from "./docs_w1b.js";
-import { W1G_DOCS } from "./docs_w1g.js";
-import { W1A_DOCS } from "./docs_w1a.js";
-import { W1E_DOCS } from "./docs_w1e.js";
-import { W1F_DOCS } from "./docs_w1f.js";
-import { W1C_DOCS } from "./docs_w1c.js";
-import { W1C2_DOCS } from "./docs_w1c2.js";
-import { W1C3_DOCS } from "./docs_w1c3.js";
-import { W1D_DOCS } from "./docs_w1d.js";
-import { W1D2_DOCS } from "./docs_w1d2.js";
+import { COMPOSITION_DOCS } from "./docs_composition.js";
+import { WORKSPACE_DOCS } from "./docs_workspace.js";
+import { SPEECH_DOCS } from "./docs_speech.js";
+import { MONITOR_DOCS } from "./docs_monitor.js";
+import { EDITING_DOCS } from "./docs_editing.js";
+import { EXTENSIONS_DOCS } from "./docs_extensions.js";
+import { LIVE_DOCS } from "./docs_live.js";
+import { PRESETS_DOCS } from "./docs_presets.js";
+import { SEQUENCE_DOCS } from "./docs_sequence.js";
+import { BACKSTOP_DOCS } from "./docs_backstop.js";
 import { EFFECTS_DOCS } from "./docs_effects.js";
-import { JSON_FLAG_DOCS } from "./docs_kz1.js";
+import { JSON_FLAG_DOCS } from "./docs_json_flags.js";
 import { TOPIC_DOCS } from "./docs_topics.js";
 
 export const ALL_DIAGNOSTIC_DOCS: DiagnosticDoc[] = [
@@ -27,17 +27,17 @@ export const ALL_DIAGNOSTIC_DOCS: DiagnosticDoc[] = [
   ...CAPTIONS_DOCS,
   ...RENDER_DOCS,
   ...COLOR_DOCS,
-  ...W1B_DOCS,
-  ...W1G_DOCS,
-  ...W1A_DOCS,
-  ...W1F_DOCS,
-  ...W1C_DOCS,
-  ...W1C2_DOCS,
-  ...W1C3_DOCS,
-  ...W1D_DOCS,
-  ...W1D2_DOCS,
+  ...COMPOSITION_DOCS,
+  ...WORKSPACE_DOCS,
+  ...SPEECH_DOCS,
+  ...EDITING_DOCS,
+  ...EXTENSIONS_DOCS,
+  ...LIVE_DOCS,
+  ...PRESETS_DOCS,
+  ...SEQUENCE_DOCS,
+  ...BACKSTOP_DOCS,
   ...EFFECTS_DOCS,
-  ...W1E_DOCS,
+  ...MONITOR_DOCS,
   ...JSON_FLAG_DOCS,
 ];
 

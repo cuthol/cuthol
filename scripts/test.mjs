@@ -13,7 +13,7 @@ const SERIAL = new Set([
   "render_speed.test.js", // asserts wall-clock worker counts and render timings
   "long_form.test.js", // cold vs cached performance.now comparison
   "speech_cleanup_mix.test.js", // live ElevenLabs + Deepgram
-  "ducking_bbox_real_speech.test.js", // downloads real speech fixtures over the network
+  "ducking_bbox_real_speech.test.js", // reads cached real-speech fixtures, no network
   "tempo_render.test.js", // hardware encoder renders with frame-exact checks
   // Moved to parallel (no wall-clock assert; media-time "ms" only; per-process
   // temp dirs or distinct repo subdirs; env vars saved/restored per file):

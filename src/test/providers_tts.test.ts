@@ -208,7 +208,12 @@ test("ext TTS cache is separate per provider version; local TTS without installa
   assert.equal(again.cached, true);
 
   const savedLocalTtsCmd = process.env.CUTHOL_LOCAL_TTS_CMD;
+  const savedDataDir = process.env.CUTHOL_DATA_DIR;
   delete process.env.CUTHOL_LOCAL_TTS_CMD;
+  const emptyDataDir = path.join(TEST_ROOT, "ws_tts_empty_data");
+  fs.rmSync(emptyDataDir, { recursive: true, force: true });
+  fs.mkdirSync(emptyDataDir, { recursive: true });
+  process.env.CUTHOL_DATA_DIR = emptyDataDir;
   try {
     await assert.rejects(
       synthesizeVoiceover({ workspaceDir: wsDir, text, provider: "local" }),
@@ -216,6 +221,9 @@ test("ext TTS cache is separate per provider version; local TTS without installa
     );
   } finally {
     if (savedLocalTtsCmd !== undefined) process.env.CUTHOL_LOCAL_TTS_CMD = savedLocalTtsCmd;
+    if (savedDataDir !== undefined) process.env.CUTHOL_DATA_DIR = savedDataDir;
+    else delete process.env.CUTHOL_DATA_DIR;
+    fs.rmSync(emptyDataDir, { recursive: true, force: true });
   }
 });
 

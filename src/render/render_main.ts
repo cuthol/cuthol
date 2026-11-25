@@ -99,6 +99,8 @@ import { verifySequence, VerificationReport } from "../verify/gates.js";
 import { verifyCompositionAudio } from "../verify/gates_hf_audio.js";
 import { probeUncachedCompositionScripts } from "../verify/gates_script_errors.js";
 import { PostRenderAudioHealthResult, scanRenderedMp4AudioHealth } from "./render_audio_health.js";
+import { OPEN_STANDARDS } from "../core/standards.js";
+import { truePeakCeilingDiagnosticForRenderedOutput } from "../verify/gates_stage_signal.js";
 import { PostRenderBlankScanResult, scanRenderedMp4ForBlankFrames, scanRenderedMp4ForEdgeStrips } from "./render_scan.js";
 import { outputDurationMs, outputFrameAtSeqMs, tempoOf, tempoOutputSegments } from "../sequence/tempo.js";
 import { spawnWatchedSync } from "../core/subprocess.js";
@@ -396,6 +398,7 @@ function runPostRenderChecks(params: {
       verification.diagnostics.push(diag);
       verification.warning_count += 1;
     }
+    pushRenderedOutputTruePeakWarning(resolvedOut, sequence, verification);
     return {
       blankScan: {
         fps: Math.max(1, sequence.stage.fps),
@@ -440,6 +443,7 @@ function runPostRenderChecks(params: {
     verification.diagnostics.push(diag);
     verification.warning_count += 1;
   }
+  pushRenderedOutputTruePeakWarning(resolvedOut, sequence, verification);
 
   return {
     blankScan,
@@ -448,6 +452,27 @@ function runPostRenderChecks(params: {
     audioHealth,
     audioHealthMs,
   };
+}
+
+/**
+ * Post-render true-peak check: measures the true peak of the finished output
+ * file against the project's master ceiling and appends a WARN diagnostic
+ * when it exceeds the ceiling. Never fails the render; a missing file or a
+ * failed measurement simply yields no diagnostic.
+ */
+function pushRenderedOutputTruePeakWarning(
+  resolvedOut: string,
+  sequence: CutholSequence,
+  verification: VerificationReport
+): void {
+  const ceilingDbtp =
+    sequence.stage.master_audio?.true_peak_ceiling_dbtp ??
+    OPEN_STANDARDS.LOUDNESS.DEFAULT_TRUE_PEAK_DBTP;
+  const diag = truePeakCeilingDiagnosticForRenderedOutput("render output", resolvedOut, ceilingDbtp);
+  if (diag) {
+    verification.diagnostics.push(diag);
+    verification.warning_count += 1;
+  }
 }
 
 /**
@@ -640,6 +665,7 @@ const LIVE_SCAN_FINDINGS = new Map([
   ["CUTHOL-G502", "G502"],
   ["CUTHOL-G506", "G506"],
   ["CUTHOL-G508", "G508"],
+  ["CUTHOL-G790", "G790"],
 ]);
 
 function collectLiveScanFindings(diagnostics: CutholDiagnostic[]): string[] {
@@ -747,6 +773,14 @@ export function renderSequenceToMp4(options: {
       preset: prep.preset,
     });
     finishLiveRender(collectLiveScanFindings(prep.verification.diagnostics.slice(diagsBeforeScans)));
+
+    // Digital silence where a source has signal fails the render (ok:false,
+    // non-zero exit via CutholError). The output file is kept in place for
+    // inspection, as the G790 diagnostic says.
+    const g790 = prep.verification.diagnostics.find((d) => d.code === "CUTHOL-G790");
+    if (g790) {
+      throw new CutholError(g790);
+    }
 
     const summary = buildRenderOutputSummary({
       prep,

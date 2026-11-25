@@ -155,6 +155,7 @@ export function formatCaptionsDigest(
 ): {
   style: GenerateCaptionsResult["style"];
   cues_created: number;
+  cues_kept: number;
   skipped_excised_words: number;
   revision: number;
   decision_trace: GenerateCaptionsResult["decision_trace"];
@@ -172,6 +173,7 @@ export function formatCaptionsDigest(
   return {
     style: res.style,
     cues_created: res.cues_created,
+    cues_kept: res.cues_kept.length,
     skipped_excised_words: res.skipped_excised_words,
     revision: res.revision,
     decision_trace: res.decision_trace,
@@ -182,6 +184,7 @@ export function formatCaptionsDigest(
       duration_ms: durationMs,
       counts: {
         cues_created: res.cues_created,
+        cues_kept: res.cues_kept.length,
         skipped_excised_words: res.skipped_excised_words,
       },
       stats: {

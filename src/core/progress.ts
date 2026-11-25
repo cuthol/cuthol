@@ -276,11 +276,17 @@ function writeLiveFile(done) {
 }
 
 const port = parentPort;
+let lastPrintedName = "";
+let lastPrintedDone = -1;
 const timer = setInterval(() => {
   if (!port || Atomics.load(flag, 0) !== 1 || !state.name || !(state.total > 0)) return;
   const done = sample();
   const count = " " + done + "/" + state.total;
   if (Atomics.load(flag, 0) !== 1) return;
+  // A stalled encode repeats the same frame count every tick; print only on change.
+  if (state.name === lastPrintedName && done === lastPrintedDone) return;
+  lastPrintedName = state.name;
+  lastPrintedDone = done;
   fs.writeSync(2, prefix + state.name + count + eta(done, state.total, state.startedAt) + "\\n");
   port.postMessage({ type: "sample", name: state.name, done });
   try {
@@ -470,6 +476,19 @@ export function progressFinish(name?: string): void {
   setPolling(false);
   emit(true);
   notifyHook({ type: "finish", name: stage.name, done: stage.done, total: stage.total, depth: stack.length + 1, mode: stage.mode });
+  stage = stack.pop() ?? null;
+  if (stage) {
+    setPolling(true);
+    postStage();
+  }
+}
+
+/** Drops the active stage without claiming completion (stall/failure path). */
+export function progressAbort(name?: string): void {
+  if (!stage) return;
+  if (name && stage.name !== name) return;
+  setPolling(false);
+  notifyHook({ type: "stop", name: stage.name, done: stage.done, total: stage.total, depth: stack.length + 1, mode: stage.mode });
   stage = stack.pop() ?? null;
   if (stage) {
     setPolling(true);

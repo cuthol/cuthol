@@ -1,6 +1,6 @@
 import { DiagnosticDoc } from "./docs_types.js";
 
-export const W1C3_DOCS: DiagnosticDoc[] = [
+export const PRESETS_DOCS: DiagnosticDoc[] = [
   {
     code: "G349",
     title: "fx full cost_class contradicts measurement",

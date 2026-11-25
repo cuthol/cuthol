@@ -1,6 +1,6 @@
 import { DiagnosticDoc } from "./docs_types.js";
 
-export const W1F_DOCS: DiagnosticDoc[] = [
+export const EDITING_DOCS: DiagnosticDoc[] = [
   {
     code: "G116",
     title: "Invalid speed ramp",

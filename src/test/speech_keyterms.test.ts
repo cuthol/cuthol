@@ -131,12 +131,12 @@ test("keyterms reach the provider request and scope the cache key", async () => 
   // Keyterms change the request: the plain record must not serve it.
   const scoped = await transcribeLibraryAsset({ ...base, keyterms: ["Zentrix", "Cuthol"] });
   assert.equal(scoped.cached, false);
-  assert.deepEqual(transcriptWords(scoped.transcript), ["base", "kutay", "cuthol"]);
+  assert.deepEqual(transcriptWords(scoped.transcript), ["base", "zentrix", "cuthol"]);
 
   // Same keyterms hit the scoped record.
   const scopedAgain = await transcribeLibraryAsset({ ...base, keyterms: ["Zentrix", "Cuthol"] });
   assert.equal(scopedAgain.cached, true);
-  assert.deepEqual(transcriptWords(scopedAgain.transcript), ["base", "kutay", "cuthol"]);
+  assert.deepEqual(transcriptWords(scopedAgain.transcript), ["base", "zentrix", "cuthol"]);
 
   // Different keyterms miss again.
   const other = await transcribeLibraryAsset({ ...base, keyterms: ["Other"] });
@@ -239,17 +239,17 @@ test("keyterm-only transcript is what the readers use; plain transcribe still mi
   // Keyterm run first: there is no plain record at all.
   const scoped = await transcribeLibraryAsset({ ...base, keyterms: ["Zentrix"] });
   assert.equal(scoped.cached, false);
-  assert.deepEqual(transcriptWords(scoped.transcript), ["base", "kutay"]);
+  assert.deepEqual(transcriptWords(scoped.transcript), ["base", "zentrix"]);
 
   // Every reader goes through loadCachedTranscriptForAsset: the newest
   // transcript wins even when it was made with keyterms.
   assert.deepEqual(
     transcriptWords(loadCachedTranscriptForAsset(wsDir, "vid_01", "auto")),
-    ["base", "kutay"]
+    ["base", "zentrix"]
   );
   assert.deepEqual(
     transcriptWords(loadCachedTranscriptForAsset(wsDir, "vid_01", "tr")),
-    ["base", "kutay"]
+    ["base", "zentrix"]
   );
 
   // A plain request must miss (provider called again): the only cached
@@ -266,7 +266,7 @@ test("keyterm-only transcript is what the readers use; plain transcribe still mi
   // The scoped record is untouched by the plain round-trip.
   const scopedAgain = await transcribeLibraryAsset({ ...base, keyterms: ["Zentrix"] });
   assert.equal(scopedAgain.cached, true);
-  assert.deepEqual(transcriptWords(scopedAgain.transcript), ["base", "kutay"]);
+  assert.deepEqual(transcriptWords(scopedAgain.transcript), ["base", "zentrix"]);
 });
 
 test("speech cleanup (dry run) finds a keyterm-only transcript", async () => {
@@ -294,17 +294,17 @@ test("explicit-language readers return the newest transcript (plain then keyterm
   const plain = await transcribeLibraryAsset({ ...base });
   assert.deepEqual(transcriptWords(plain.transcript), ["base"]);
   const fixed = await transcribeLibraryAsset({ ...base, keyterms: ["Zentrix"] });
-  assert.deepEqual(transcriptWords(fixed.transcript), ["base", "kutay"]);
+  assert.deepEqual(transcriptWords(fixed.transcript), ["base", "zentrix"]);
 
   // Every explicit-language reader must see the newest transcript, not the
   // older plain record under the same language key.
   assert.deepEqual(transcriptWords(loadCachedTranscriptForAsset(wsDir, "vid_01", "tr")), [
     "base",
-    "kutay",
+    "zentrix",
   ]);
   assert.deepEqual(transcriptWords(loadCachedTranscriptForAsset(wsDir, "vid_01", "auto")), [
     "base",
-    "kutay",
+    "zentrix",
   ]);
 
   // A refreshed plain transcription is newest again: readers follow it back.

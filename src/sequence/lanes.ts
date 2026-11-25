@@ -27,9 +27,58 @@ import {
   ParallelLane,
   SpineClip,
   syncSequenceHandleCounters,
+  TimedWordToken,
   TimelineMarker,
   TypographySpec,
 } from "../core/schema.js";
+
+/**
+ * Re-aligns the per-word timings of an active-word caption cue after its text
+ * was hand-edited. Same word count: each word keeps its times, only the word
+ * text changes. Different word count: the new words are spread over the span
+ * from the first word's start to the last word's end, weighted by character
+ * length, so times stay monotonic inside the cue's span.
+ */
+export function realignCaptionWords(
+  prevWords: TimedWordToken[],
+  newText: string
+): TimedWordToken[] {
+  const newTokens = newText.split(/\s+/).filter((w) => w.length > 0);
+  if (newTokens.length === 0) return [];
+  if (newTokens.length === prevWords.length) {
+    return prevWords.map((w, i) => ({ ...w, word: newTokens[i] }));
+  }
+  const firstStart = prevWords[0]?.sequence_start_ms ?? 0;
+  const lastEnd = prevWords[prevWords.length - 1]?.sequence_end_ms ?? firstStart;
+  const spanStart = Math.max(0, firstStart);
+  const spanEnd = Math.max(spanStart + newTokens.length, lastEnd);
+  const srcStart = prevWords[0]?.source_start_ms ?? 0;
+  const srcEnd = prevWords[prevWords.length - 1]?.source_end_ms ?? srcStart;
+  const totalChars = newTokens.reduce((sum, w) => sum + Math.max(1, w.length), 0);
+  const spanMs = Math.max(newTokens.length, spanEnd - spanStart);
+  const srcSpanMs = Math.max(0, srcEnd - srcStart);
+  let cursor = spanStart;
+  return newTokens.map((word, i) => {
+    const weight = Math.max(1, word.length) / totalChars;
+    const dur = i === newTokens.length - 1
+      ? spanEnd - cursor
+      : Math.max(1, Math.round(spanMs * weight));
+    const start = cursor;
+    const end = i === newTokens.length - 1 ? spanEnd : Math.min(spanEnd - (newTokens.length - 1 - i), start + dur);
+    cursor = end;
+    const srcOffset = spanMs > 0 ? (start - spanStart) / spanMs : 0;
+    const srcDur = spanMs > 0 ? (end - start) / spanMs : 0;
+    return {
+      word,
+      source_start_ms: Math.round(srcStart + srcOffset * srcSpanMs),
+      source_end_ms: Math.round(srcStart + (srcOffset + srcDur) * srcSpanMs),
+      sequence_start_ms: start,
+      sequence_end_ms: end,
+      clip_id: prevWords[0]?.clip_id,
+      excised: false,
+    };
+  });
+}
 import {
   resolveDefaultLaneMaxWidthPct,
   resolveDefaultLaneTypographyFontSizePx,
@@ -543,7 +592,14 @@ export function updateLaneCue(options: {
             max_width_pct: options.maxWidthPct ?? resolveDefaultLaneMaxWidthPct(seq.stage),
           };
         } else {
-          if (options.text !== undefined) targetCue.typography.text = options.text;
+          if (options.text !== undefined) {
+            const prevTypo = targetCue.typography;
+            if (options.text !== prevTypo.text && (prevTypo.words?.length ?? 0) > 0) {
+              prevTypo.words = realignCaptionWords(prevTypo.words!, options.text);
+              prevTypo.hand_edited = true;
+            }
+            prevTypo.text = options.text;
+          }
           if (options.fontSizePx !== undefined) targetCue.typography.font_size_px = options.fontSizePx;
           if (options.maxWidthPct !== undefined) targetCue.typography.max_width_pct = options.maxWidthPct;
         }

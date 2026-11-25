@@ -1,6 +1,6 @@
 import { DiagnosticDoc } from "./docs_types.js";
 
-export const W1B_DOCS: DiagnosticDoc[] = [
+export const COMPOSITION_DOCS: DiagnosticDoc[] = [
   {
     code: "G119",
     title: "Envelope on a non-animatable parameter",

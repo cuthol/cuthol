@@ -37,6 +37,8 @@ export type CaptionStylePreset = "active_word" | "sentence" | "boxed";
 export interface GenerateCaptionsResult {
   style: CaptionStylePreset;
   cues_created: number;
+  /** Hand-edited caption cues kept untouched by a re-run without `replace`. */
+  cues_kept: string[];
   skipped_excised_words: number;
   cues: LaneCue[];
   decision_trace: DecisionTrace;
@@ -70,7 +72,7 @@ export function generateSequenceCaptions(options: {
   const defaultMaxWidthPct = resolveDefaultCaptionMaxWidthPct(initialSeq.stage);
   const lang = options.language ?? "auto";
   let detectedTranscriptLang: string | null = null;
-  const replaceExisting = options.replaceExistingCaptions ?? true;
+  const replaceExisting = options.replaceExistingCaptions === true;
   const minFrameDurMs = Math.ceil(
     (OPEN_STANDARDS.SIGNAL_SANITY.MIN_CLIP_FRAMES * 1000) / Math.max(1, initialSeq.stage.fps)
   );
@@ -79,7 +81,7 @@ export function generateSequenceCaptions(options: {
   const allProjectedWords: TimedWordToken[] = [];
   let skippedExcisedCount = 0;
   let targetClipWindow: { startMs: number; endMs: number } | null = null;
-  // [ed G384–G385] spine items (and vo cues) that carry audio but have no
+  // [G384–G385] spine items (and vo cues) that carry audio but have no
   // transcript: named in the warning, never in the silent path.
   const untranscribedItems: string[] = [];
   const untranscribedHandles: string[] = [];
@@ -337,7 +339,7 @@ export function generateSequenceCaptions(options: {
     groups.push(currentGroup);
   }
 
-  // [ed G384] nothing to caption: no empty undoable revision. WARN names the
+  // [G384] nothing to caption: no empty undoable revision. WARN names the
   // untranscribed audio items and the next step; without audio items there is
   // simply nothing to do.
   if (groups.length === 0) {
@@ -384,6 +386,7 @@ export function generateSequenceCaptions(options: {
     return {
       style,
       cues_created: 0,
+      cues_kept: [],
       skipped_excised_words: skippedExcisedCount,
       cues: [],
       decision_trace: decisionTrace,
@@ -392,6 +395,7 @@ export function generateSequenceCaptions(options: {
     };
   }
 
+  let keptHandEditedIds: string[] = [];
   const { result: createdCues, revision, verification } = commitVerifiedMutation(
     options.workspaceDir,
     `speech.captions(${style})`,
@@ -410,6 +414,7 @@ export function generateSequenceCaptions(options: {
       }
 
       syncSequenceHandleCounters(seq);
+      let keptHandEdited: LaneCue[] = [];
       if (replaceExisting) {
         if (options.clipId && options.replaceExistingCaptions === undefined && targetClipWindow) {
           capLane.cues = capLane.cues.filter((c) => {
@@ -420,7 +425,23 @@ export function generateSequenceCaptions(options: {
         } else {
           capLane.cues = [];
         }
+      } else {
+        // Without `replace`: hand-edited caption cues survive the re-run;
+        // the rest is regenerated, and no new cue is created over a kept cue.
+        keptHandEdited = capLane.cues.filter((c) => c.typography?.hand_edited === true);
+        capLane.cues = keptHandEdited;
+        keptHandEditedIds = keptHandEdited.map((c) => c.id);
       }
+
+      const keptSpans = keptHandEdited.map((c) => {
+        const cStart = resolveCueStartMs(seq, c);
+        return { id: c.id, start: cStart, end: cStart + c.duration_ms };
+      });
+      const activeGroups = groups.filter((grp) => {
+        const gs = grp[0].sequence_start_ms;
+        const ge = grp[grp.length - 1].sequence_end_ms;
+        return !keptSpans.some((k) => gs < k.end && ge > k.start);
+      });
 
       const existingCueIds = new Set(seq.lanes.flatMap((l) => l.cues.map((c) => c.id)));
       const newCues: LaneCue[] = [];
@@ -428,15 +449,15 @@ export function generateSequenceCaptions(options: {
         ? OPEN_STANDARDS.CAPTIONS.TURKISH_MAX_CPS
         : OPEN_STANDARDS.CAPTIONS.DEFAULT_MAX_CPS;
 
-      for (let gIdx = 0; gIdx < groups.length; gIdx++) {
-        const grp = groups[gIdx];
+      for (let gIdx = 0; gIdx < activeGroups.length; gIdx++) {
+        const grp = activeGroups[gIdx];
         const startMs = grp[0].sequence_start_ms;
         const rawEndMs = grp[grp.length - 1].sequence_end_ms;
         const text = grp.map((w) => w.word).join(" ");
         const minDurationForCpsMs = Math.ceil((text.length / maxCps) * 1000);
-        const hasNextGroup = gIdx + 1 < groups.length;
+        const hasNextGroup = gIdx + 1 < activeGroups.length;
         const nextGroupStartMs = hasNextGroup
-          ? groups[gIdx + 1][0].sequence_start_ms
+          ? activeGroups[gIdx + 1][0].sequence_start_ms
           : Math.max(rawEndMs, startMs + minDurationForCpsMs, startMs + 200);
         const maxAvailableDurMs = hasNextGroup
           ? Math.max(minFrameDurMs, nextGroupStartMs - startMs)
@@ -561,7 +582,7 @@ export function generateSequenceCaptions(options: {
     near_misses: capNearMisses,
   };
 
-  // [ed G385] some items transcribed, others not: captions cover the
+  // [G385] some items transcribed, others not: captions cover the
   // transcribed ones, the rest are named in a warning on the same revision.
   if (untranscribedItems.length > 0) {
     const partial = DIAGNOSTICS.CAPTIONS_PARTIAL_TRANSCRIPT(untranscribedItems, untranscribedHandles);
@@ -569,9 +590,17 @@ export function generateSequenceCaptions(options: {
     verification.warning_count += 1;
   }
 
+  const keptIds: string[] = keptHandEditedIds;
+  decisionTrace.summary.text += keptIds.length > 0 ? `; kept hand-edited: ${keptIds.join(", ")}` : "";
+  decisionTrace.summary.effect = {
+    ...decisionTrace.summary.effect,
+    cues_kept: keptIds.length,
+  };
+
   return {
     style,
     cues_created: createdCues.length,
+    cues_kept: keptIds,
     skipped_excised_words: skippedExcisedCount,
     cues: createdCues,
     decision_trace: decisionTrace,

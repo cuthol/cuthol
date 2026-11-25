@@ -75,6 +75,14 @@ export interface StallWatchdogConfig {
   pollIntervalMs: number;
 }
 
+/**
+ * Once an ffmpeg step has produced progress, no further progress for this long
+ * stops it as stalled (`SUBPROCESS_STALLED`). The startup wait before the first
+ * progress and the `CUTHOL_STALL_TIMEOUT_SEC` override keep their meaning; an
+ * explicit shorter override still wins via `Math.min` at the call site.
+ */
+export const AFTER_PROGRESS_STALL_CAP_MS = 90_000;
+
 const DISABLED_TOKENS = new Set(["0", "false", "off", "none", "no", "disable", "disabled"]);
 const ENABLED_TOKENS = new Set(["1", "true", "on", "yes", "enable", "enabled"]);
 

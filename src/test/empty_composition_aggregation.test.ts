@@ -1,5 +1,5 @@
 /**
- * w1e aggregation proofs: empty-composition repeats (G720/G722/G723) emit one
+ * aggregation proofs: empty-composition repeats (G720/G722/G723) emit one
  * line per cue, and a single aggregated line (count + id range, every id in
  * `subject_ids`, `warning_count` counts lines) when 2+ cues are empty.
  */
@@ -20,7 +20,7 @@ import { collectEmptyRenderDiagnostics } from "../render/render_main.js";
 process.env.CUTHOL_SKILLS_AUTO = "0";
 process.env.CI = "1";
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-w1e-agg-"));
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-empty-agg-"));
 test.after(() => rmRetrySync(TMP));
 
 function makeCompDir(root: string, name: string, empty: boolean): string {

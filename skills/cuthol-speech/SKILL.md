@@ -177,7 +177,9 @@ all_spine?, max_words?, max_chars?, lang?, replace?)` builds caption cues on
 - `active_word` highlights the spoken word. Reading speed uses the project
   language (19 CPS Turkish, 17 CPS English); fast groups give G402 — lower
   `max_words`. Captions sit at `y=26`; move them with `lane.update_cue` on
-  collision (G403 warns about occlusion).
+  collision (G403 warns about occlusion). Editing a caption's text with
+  `lane.update_cue --text` re-aligns its word timings and marks it
+  hand-edited, so later `speech captions` runs keep it unless `replace=true`.
 - Items without a transcript are skipped: with no transcribed item at all the
   run writes no revision and warns G384 naming the untranscribed items
   (transcribe first with `speech.transcribe --handle <h>`); with some

@@ -1,6 +1,6 @@
 import { DiagnosticDoc } from "./docs_types.js";
 
-export const W1E_DOCS: DiagnosticDoc[] = [
+export const MONITOR_DOCS: DiagnosticDoc[] = [
   {
     code: "G114",
     title: "Unitless times read as milliseconds",

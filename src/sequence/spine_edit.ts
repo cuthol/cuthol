@@ -94,7 +94,7 @@ export function splitSpineClip(options: {
   splitPointsMs: number[];
   isSequenceTime?: boolean;
 }): { clips: SpineClip[]; revision: number; verification: VerificationReport } {
-  // [ed G383] `--at` is clip-local: a sequence-time-looking point (or any
+  // [G383] `--at` is clip-local: a sequence-time-looking point (or any
   // point outside the clip) used to split silently into nothing. Reject with
   // nothing written, naming the clip-local and sequence ranges to convert by.
   {
@@ -936,8 +936,8 @@ export function setItemEnvelope(options: {
       )
     );
   }
-  // [fxcheck:A G320–G329] frozen/instance probe on the would-be fx envelope; ERROR rejects before write.
-  // [ed G380–G381] orphan / non-animatable fx envelopes rejected here with nothing written.
+  // [G320–G329] frozen/instance probe on the would-be fx envelope; ERROR rejects before write.
+  // [G380–G381] orphan / non-animatable fx envelopes rejected here with nothing written.
   {
     const m = /^fx\.([^.]+)\.(.+)$/.exec(options.parameter);
     if (m) {

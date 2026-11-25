@@ -25,7 +25,7 @@ const NESTED: Array<{ words: string[]; actions: string[] }> = [
   { words: ["workspace", "changes"], actions: ["show", "adopt", "revert"] },
 ];
 
-test("w0afix: every nested group --help lists its actions with summaries", () => {
+test("every nested group --help lists its actions with summaries", () => {
   for (const { words, actions } of NESTED) {
     const [group, action, ...rest] = words;
     const out = captureStdout(() => printHelp(group, action, rest));
@@ -37,7 +37,7 @@ test("w0afix: every nested group --help lists its actions with summaries", () =>
   }
 });
 
-test("w0afix: exact nested actions still print their own flags", () => {
+test("exact nested actions still print their own flags", () => {
   const fxAdd = captureStdout(() => printHelp("spine", "fx", ["add"]));
   assert.ok(fxAdd.includes("--item"), `spine fx add --help misses --item:\n${fxAdd}`);
   const pointAdd = captureStdout(() => printHelp("spine", "envelope", ["point", "add"]));
@@ -48,7 +48,7 @@ test("w0afix: exact nested actions still print their own flags", () => {
   assert.ok(show.length > 0, "workspace changes show --help is empty");
 });
 
-test("w0afix: G110 drops the prefix for descriptive suggestions, keeps it for bare commands", async () => {
+test("G110 drops the prefix for descriptive suggestions, keeps it for bare commands", async () => {
   await assert.rejects(() => runCli(["library", "ingest", "--files", "a.mp4"]), (err: unknown) => {
     const text = String((err as Error).message);
     return (

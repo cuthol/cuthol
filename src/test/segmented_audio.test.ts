@@ -7,6 +7,7 @@ import test from "node:test";
 import { compileSequenceRenderPlan } from "../compositor/compiler.js";
 import { scaffoldHyperFramesComposition } from "../compositor/hyperframes_bridge.js";
 import { initWorkspace, loadSequence } from "../core/workspace.js";
+import { CutholError } from "../core/diagnostics.js";
 import { ingestAssetsIntoWorkspace } from "../library/probe.js";
 import { captureMonitorFrame } from "../monitor/preview.js";
 import { renderSequenceToMp4 } from "../render/renderer.js";
@@ -138,28 +139,30 @@ test("1. Segmented audio render: in-segment delayed cue crossing segment boundar
     }
     process.env.CUTHOL_TEST_LEGACY_POST_ADELAY_TRIM = "1";
     const buggyMp4 = path.join(wsDir, "output", "buggy.mp4");
-    const buggySummary = renderSequenceToMp4({
-      workspaceDir: wsDir,
-      outputPath: buggyMp4,
-      preset: "draft_480p",
-    });
-
-    assert.ok(buggySummary.audio_health, "Expected audio_health in buggy render summary");
-    assert.ok(
-      buggySummary.audio_health.issues.length > 0,
-      "Expected audio_health to detect shifted audio in legacy post-adelay trim mode"
+    assert.throws(
+      () =>
+        renderSequenceToMp4({
+          workspaceDir: wsDir,
+          outputPath: buggyMp4,
+          preset: "draft_480p",
+        }),
+      (err: unknown) => {
+        assert.ok(err instanceof CutholError, `expected CutholError, got ${err}`);
+        assert.equal(err.diagnostic.code, "CUTHOL-G790");
+        assert.equal(err.diagnostic.severity, "ERROR");
+        assert.match(err.diagnostic.what, /cue_01/);
+        assert.match(err.diagnostic.what, /silent gap/);
+        assert.match(err.diagnostic.what, /445\.\.998/);
+        assert.match(err.diagnostic.what, /kept at/);
+        assert.ok(
+          err.diagnostic.what.includes(buggyMp4),
+          `expected the G790 message to name the kept output path, got: ${err.diagnostic.what}`
+        );
+        return true;
+      },
+      "Expected legacy post-adelay trim render to fail with CUTHOL-G790"
     );
-    assert.ok(
-      buggySummary.verification.diagnostics.some((d) => d.code === "CUTHOL-G508"),
-      "Expected CUTHOL-G508 diagnostic when audio is shifted across segment boundary"
-    );
-    const seg0Issue = buggySummary.audio_health.issues.find(
-      (iss) => Math.abs(iss.measured_offset_ms + 600) < 50
-    );
-    assert.ok(
-      seg0Issue,
-      `Expected detected offset near -600ms in Segment 0, got issues: ${JSON.stringify(buggySummary.audio_health.issues)}`
-    );
+    assert.ok(fs.existsSync(buggyMp4), "G790 output file must be kept for inspection");
   } finally {
     delete process.env.CUTHOL_TEST_LEGACY_POST_ADELAY_TRIM;
     if (prevMaxClips === undefined) {

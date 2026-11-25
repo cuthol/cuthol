@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
+import { resolveHyperFramesCliMjs } from "../core/package_resolve.js";
 
 export const LOCAL_SPEECH_PINNED_PACKAGES = {
   fasterWhisper: "1.2.1",
@@ -28,7 +29,7 @@ export const LOCAL_SPEECH_DEFAULT_VOICE = "tr_TR-dfki-medium";
  * provider with it so old whole-file transcripts are re-transcribed.
  * Must match `LOCAL_ASR_ENGINE_REVISION` in `scripts/local_speech.py`.
  */
-export const LOCAL_ASR_ENGINE_REVISION = "v6";
+export const LOCAL_ASR_ENGINE_REVISION = "v8";
 
 /** Parallel chunk workers for keyless local ASR (each loads its own model copy). */
 export function localAsrJobs(): number {
@@ -467,10 +468,19 @@ export function isParakeetLanguage(language: string | undefined): boolean {
   return code !== "auto" && (PARAKEET_LANGUAGES as readonly string[]).includes(code);
 }
 
-/** Path of the pinned HyperFrames CLI (`CUTHOL_HYPERFRAMES_BIN` wins). */
+/**
+ * Path of the pinned HyperFrames CLI (`CUTHOL_HYPERFRAMES_BIN` wins).
+ *
+ * Resolved the Node way (same lookup the runtime uses), so an npm install
+ * that hoists `hyperframes` to a parent `node_modules` keeps working; the
+ * package-root copy stays as the fallback for layouts the resolver cannot
+ * see.
+ */
 export function hyperframesBin(): string {
   const override = (process.env.CUTHOL_HYPERFRAMES_BIN ?? "").trim();
   if (override) return override;
+  const resolved = resolveHyperFramesCliMjs();
+  if (resolved) return resolved;
   const here = path.dirname(fileURLToPath(import.meta.url));
   return path.resolve(here, "..", "..", "node_modules", "hyperframes", "bin", "hyperframes.mjs");
 }
@@ -787,7 +797,7 @@ function parseParakeetTranscriptFile(transcriptPath: string): LocalBridgeWord[] 
   return words;
 }
 
-/** Words recovered by the single Parakeet dropped-gap retry (ke4). */
+/** Words recovered by the single Parakeet dropped-gap retry. */
 export interface ParakeetGapRetry {
   gaps: number;
   words: number;
@@ -1051,6 +1061,25 @@ function buildGapRetryWav(
   return slices;
 }
 
+/**
+ * Deterministic one-bit nudge of a gap-retry wav (flips the LSB of the
+ * first audio sample, inaudible and layout-preserving).
+ *
+ * Measured cause of a lost sentence: the pinned HyperFrames Parakeet build
+ * answers some exact slice contents with an empty transcript (0 words for
+ * a 5.88 s speech-like slice) while the same slice with one LSB flipped
+ * decodes fully (the exact 15-word sentence). Used only when a gap-slice
+ * decode comes back empty, for one extra attempt; never on the main audio.
+ */
+function nudgeGapWavFirstSample(filePath: string): void {
+  const buf = fs.readFileSync(filePath);
+  // Written by `writeWavFile` below: 44-byte header, then little-endian
+  // 16-bit samples, so byte 44 is the LSB of sample 0.
+  if (buf.length < 46) return;
+  buf[44] ^= 1;
+  fs.writeFileSync(filePath, buf);
+}
+
 /** Map retry words back to source times, keeping margin-duplicate drops. */
 export function mapGapRetryWords(
   retryWords: LocalBridgeWord[],
@@ -1076,6 +1105,13 @@ function runParakeetBridge(options: {
 }): { language: string; modelName: string; words: LocalBridgeWord[]; droppedSegments: LocalBridgeDroppedSegment[]; engine: LocalAsrEngineId; gapRetry: ParakeetGapRetry; gapRetryNote: string | null } {
   // The HyperFrames CLI has no keyterm/hotword channel: caller keyterms are
   // documented as Whisper/Deepgram-only and ignored here, never failed.
+  // Parakeet never reports the detected language, so without `--lang` the
+  // transcript cannot be tagged: fail here with G213 before running.
+  // Whisper and cloud paths are untouched (they detect the language).
+  const lang = (options.language ?? "auto").trim().toLowerCase();
+  if (lang === "auto") {
+    throw new CutholError(DIAGNOSTICS.ASR_LANGUAGE_REQUIRED("local"));
+  }
   const bin = hyperframesBin();
   // Scale the limit with the audio so a ~25 min talk no longer dies at the
   // old fixed 280 s: prefer the caller duration, else probe via ffprobe.
@@ -1086,7 +1122,6 @@ function runParakeetBridge(options: {
   const audioMs = probedMs && probedMs > 0 ? probedMs : undefined;
   const { cliTimeoutMs, spawnTimeoutMs } = parakeetTimeouts(audioMs);
   const audioMin = audioMs !== undefined ? audioMs / 60000 : null;
-  const lang = (options.language ?? "auto").trim().toLowerCase();
   const firstWords = runParakeetOnce({ bin, audioFilePath: options.audioFilePath, lang, cliTimeoutMs, spawnTimeoutMs, audioMin });
   const emptyRetry: ParakeetGapRetry = { gaps: 0, words: 0 };
   const finish = (
@@ -1140,6 +1175,19 @@ function runParakeetBridge(options: {
         `parakeet gap retry failed (${gaps.length} speech-like ${gaps.length === 1 ? "gap" : "gaps"} left as-is); ` +
         (err instanceof Error ? err.message.split("\n")[0] : String(err)).slice(0, 200);
       return finish(firstWords, { gaps: gaps.length, words: 0 }, note);
+    }
+    if (retryWords.length === 0) {
+      // An empty retry decode over a speech-like slice is an engine miss,
+      // not an empty gap (see `nudgeGapWavFirstSample`): shift the slice
+      // content by one bit and decode once more. A second empty (or
+      // failed) decode keeps the first result, as before.
+      try {
+        nudgeGapWavFirstSample(gapWavPath);
+        const second = runParakeetOnce({ bin, audioFilePath: gapWavPath, lang, cliTimeoutMs: retryLimits.cliTimeoutMs, spawnTimeoutMs: retryLimits.spawnTimeoutMs, audioMin: null });
+        if (second.length > 0) retryWords = second;
+      } catch {
+        // Keep the empty first retry result.
+      }
     }
     const recovered = mapGapRetryWords(retryWords, slices);
     const merged = firstWords.concat(recovered).sort((a, b) => a.source_start_ms - b.source_start_ms || a.source_end_ms - b.source_end_ms);

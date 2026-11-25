@@ -198,7 +198,7 @@ if (args[0] === "models") {
   return file;
 }
 
-test("parakeet transcript with auto language names the retry and the 25 languages", async () => {
+test("parakeet transcript with auto language requires --lang (G213)", async () => {
   const wsDir = path.join(TEST_ROOT, "ws_parakeet_auto");
   fs.rmSync(wsDir, { recursive: true, force: true });
   initWorkspace({ dir: wsDir, title: "parakeet auto", aspect: "16:9", fps: 30 });
@@ -219,13 +219,10 @@ test("parakeet transcript with auto language names the retry and the 25 language
           }),
         (err: unknown) => {
           const text = err instanceof Error ? err.message : String(err);
-          if (!/CUTHOL-G239/.test(text)) return false;
-          if (!/does not report the detected language/.test(text)) return false;
-          for (const code of PARAKEET_LANGUAGES) {
-            if (!text.includes(code)) return false;
-          }
+          if (!/CUTHOL-G213/.test(text)) return false;
+          if (!/cannot detect the speech language automatically/.test(text)) return false;
           if (!/--lang en/.test(text)) return false;
-          if (!/--engine whisper --apply/.test(text)) return false;
+          if (!/--provider local/.test(text)) return false;
           return true;
         },
         "expected the explicit parakeet auto-language failure"

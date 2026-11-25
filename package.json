@@ -1,6 +1,6 @@
 {
   "name": "cuthol",
-  "version": "0.3.9",
+  "version": "0.4.0",
   "description": "Agent-first open-source non-linear video editor (NLE) powered by HyperFrames and open media standards.",
   "license": "MIT",
   "type": "module",
@@ -23,11 +23,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/HypeAITR/Cuthol"
+    "url": "git+https://github.com/cuthol/cuthol.git"
   },
-  "homepage": "https://github.com/HypeAITR/Cuthol#readme",
+  "homepage": "https://cuthol.com",
   "bugs": {
-    "url": "https://github.com/HypeAITR/Cuthol/issues"
+    "url": "https://github.com/cuthol/cuthol/issues",
+    "email": "hello@cuthol.com"
   },
   "files": [
     "dist",

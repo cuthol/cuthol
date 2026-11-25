@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { MessageChannel, receiveMessageOnPort, Worker } from "node:worker_threads";
 import { summarizeCommandForDiagnostic } from "./diagnostics.js";
-import { resolveStallWatchdogConfig } from "./env.js";
+import { AFTER_PROGRESS_STALL_CAP_MS, resolveStallWatchdogConfig } from "./env.js";
 
 export interface WatchedSubprocessOptions extends SpawnSyncOptions {
   /** Human-readable step name for diagnostics (e.g. "ffmpeg render", "hyperframes render"). */
@@ -81,6 +81,7 @@ interface WorkerJobRequest {
   stallTimeoutMs: number;
   startupTimeoutMs: number;
   pollIntervalMs: number;
+  afterProgressCapMs?: number;
   simulateNvencStall?: boolean;
   simulateHwEncoderStall?: string;
 }
@@ -485,7 +486,16 @@ function runOneWatchedJob(job) {
         hasProgress = true;
       }
 
-      const stallThreshold = hasProgress ? job.stallTimeoutMs : job.startupTimeoutMs;
+      const afterProgressCap =
+        typeof job.afterProgressCapMs === "number" && job.afterProgressCapMs > 0
+          ? job.afterProgressCapMs
+          : 0;
+      const stallThreshold =
+        hasProgress && isFfmpeg && afterProgressCap > 0
+          ? Math.min(job.stallTimeoutMs, afterProgressCap)
+          : hasProgress
+            ? job.stallTimeoutMs
+            : job.startupTimeoutMs;
       if (now - lastProgressTime >= Math.min(2000, Math.max(100, Math.floor((stallThreshold || 2000) / 3)))) {
         let curWatchedBytes = 0;
         for (const wp of watchedPaths) {
@@ -689,6 +699,7 @@ export function spawnWatchedSync(
     stallTimeoutMs: watchdogCfg.stallTimeoutMs,
     startupTimeoutMs: watchdogCfg.startupTimeoutMs,
     pollIntervalMs: watchdogCfg.pollIntervalMs,
+    afterProgressCapMs: AFTER_PROGRESS_STALL_CAP_MS,
     simulateNvencStall: process.env.CUTHOL_SIMULATE_NVENC_STALL === "1",
     simulateHwEncoderStall: process.env.CUTHOL_SIMULATE_HW_ENCODER_STALL,
   };
@@ -821,6 +832,7 @@ export function runWatchedParallelFfmpegJobsSync(
       stallTimeoutMs: watchdogCfg.stallTimeoutMs,
       startupTimeoutMs: watchdogCfg.startupTimeoutMs,
       pollIntervalMs: watchdogCfg.pollIntervalMs,
+      afterProgressCapMs: AFTER_PROGRESS_STALL_CAP_MS,
       simulateNvencStall: process.env.CUTHOL_SIMULATE_NVENC_STALL === "1",
       simulateHwEncoderStall: process.env.CUTHOL_SIMULATE_HW_ENCODER_STALL,
     }));

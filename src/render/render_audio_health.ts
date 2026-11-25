@@ -235,7 +235,14 @@ function scanRenderedOutputGaps(options: {
   );
   if (audioItems.length === 0 || winCount < 3) return issues;
 
+  // Gap detection floor: spans where the decoded output drops below -60 dBFS
+  // while the mapped source has clear signal. Whether such a span fails the
+  // render (G790) or stays a WARN (G508) is decided per gap below: only true
+  // digital silence (at or below -90 dBFS) or a quiet hole with clearly
+  // audible output around it counts as lost audio. Uniformly quiet output
+  // (e.g. a solo -40 dB tone at ~-61 dB RMS after AAC) is a level finding.
   const quietLin = Math.pow(10, -60 / 20);
+  const silenceLin = Math.pow(10, -90 / 20);
   const quiet: boolean[] = new Array(winCount);
   for (let w = 0; w < winCount; w++) {
     let sumSq = 0;
@@ -301,15 +308,20 @@ function scanRenderedOutputGaps(options: {
   }
   if (jobs.length === 0) return issues;
 
-  const ffmpegJobs: ParallelFfmpegJob[] = jobs.map((j) => ({
+  const ffmpegJobs: ParallelFfmpegJob[] = jobs.map((j) => {
+    const seekSec = Math.max(0, j.srcStartMs / 1000);
+    const durSec = Math.max(0.001, (j.srcEndMs - j.srcStartMs) / 1000);
+    return {
     args: [
       "-v",
       "error",
+      "-ss",
+      seekSec.toFixed(6),
       "-i",
       j.item.absAssetPath,
       "-vn",
       "-af",
-      `atrim=start=${(j.srcStartMs / 1000).toFixed(6)}:end=${(j.srcEndMs / 1000).toFixed(6)},asetpts=PTS-${(j.srcStartMs / 1000).toFixed(6)}/TB,aresample=async=1:first_pts=0,aresample=${sampleRate}`,
+      `atrim=0:${durSec.toFixed(6)},asetpts=N/SR/TB,aresample=async=1:first_pts=0,aresample=${sampleRate}`,
       "-ac",
       "1",
       "-ar",
@@ -319,7 +331,8 @@ function scanRenderedOutputGaps(options: {
       "pipe:1",
     ],
     cwd: paths.rootDir,
-  }));
+    };
+  });
   const results = runParallelFfmpegJobsSync(
     ffmpegJobs,
     ffmpegJobs.map(() => 1024 * 1024),
@@ -393,15 +406,52 @@ function scanRenderedOutputGaps(options: {
     const key = `${j.item.id}@${Math.round(j.gap.startMs)}`;
     if (flagged.has(key)) continue;
     flagged.add(key);
+    // Classify the gap: true digital silence (at or below -90 dBFS, exact
+    // zero included) or a quiet hole surrounded by clearly audible output
+    // (20+ dB of contrast) means audio was lost -> G790. Uniformly quiet
+    // output (a quiet mix, not a hole) stays a G508 level finding.
+    const rmsOverMs = (fromMs: number, toMs: number): number => {
+      const a = Math.max(0, Math.floor((fromMs / 1000) * sampleRate));
+      const b = Math.min(renderPcm.length, Math.ceil((toMs / 1000) * sampleRate));
+      if (b <= a) return 0;
+      let sumSq = 0;
+      for (let k = a; k < b; k++) sumSq += renderPcm[k] * renderPcm[k];
+      return Math.sqrt(sumSq / (b - a));
+    };
+    const gapRms = rmsOverMs(j.gap.startMs, j.gap.endMs);
+    const beforeRms = rmsOverMs(j.gap.startMs - 100, j.gap.startMs);
+    const afterRms = rmsOverMs(j.gap.endMs, j.gap.endMs + 100);
+    const surrRms = Math.max(beforeRms, afterRms);
+    const lostAudio = gapRms <= silenceLin || (gapRms > 0 && surrRms / gapRms >= 10);
     issues.push({
       item_id: j.item.id,
       check_at_ms: Math.round(((j.gap.startMs + j.gap.endMs) / 2) * 10) / 10,
       measured_offset_ms: 0,
       similarity: 0,
-      detail: `silent gap ${Math.round(j.gap.startMs)}..${Math.round(j.gap.endMs)}ms in output while source has signal`,
+      detail: lostAudio
+        ? `silent gap ${Math.round(j.gap.startMs)}..${Math.round(j.gap.endMs)}ms in output while source has signal`
+        : `quiet span ${Math.round(j.gap.startMs)}..${Math.round(j.gap.endMs)}ms in output below source level (low output level, not digital silence)`,
     });
   }
   return issues;
+}
+
+/**
+ * True when the issue is the digital-silence kind: no signal at all in the
+ * output where the mapped source clearly has signal. Matches exactly the two
+ * detail shapes the checks above emit for that case:
+ * - `no signal in the expected audio window (digital silence)` (NCC path)
+ * - `silent gap <a>..<b>ms in output while source has signal` (gap-scan path)
+ * Drift (`large time offset ...`), masking, low-correlation and `quiet span ...`
+ * (uniformly quiet output, not a hole) wordings never match, so those findings
+ * stay WARN under G508.
+ */
+export function isDigitalSilenceIssue(issue: { detail: string }): boolean {
+  const detail = issue.detail;
+  if (detail === "no signal in the expected audio window (digital silence)") return true;
+  return (
+    detail.startsWith("silent gap ") && detail.endsWith("ms in output while source has signal")
+  );
 }
 
 /**
@@ -998,7 +1048,10 @@ export function scanRenderedMp4AudioHealth(
             other.timelineStartMs + other.postTrimDurationMs > checkAtMs
         );
 
-        if (renderRms < Math.min(0.0005, bestRms * 0.08)) {
+        // Digital silence means (near-)zero output: frames at or below
+        // -90 dBFS (exact zero included). Quiet but non-zero output falls
+        // through to the drift/masking/low-correlation cases (G508 WARN).
+        if (renderRms < Math.min(Math.pow(10, -90 / 20), bestRms * 0.08)) {
           ok = false;
           detail = "no signal in the expected audio window (digital silence)";
         } else if (similarity >= 0.52 && Math.abs(offsetMs) > 20) {
@@ -1049,8 +1102,18 @@ export function scanRenderedMp4AudioHealth(
   });
   issues.push(...gapIssues);
 
-  const diagnostics: CutholDiagnostic[] =
-    issues.length > 0 ? [DIAGNOSTICS.RENDER_AUDIO_ALIGNMENT_MISMATCH(issues)] : [];
+  // Digital-silence kind (source clearly has signal, output has none at all):
+  // the two G508 sub-cases quoted above. Drift and low-similarity findings
+  // stay WARN under G508; silence fails the render under G790.
+  const silenceIssues = issues.filter(isDigitalSilenceIssue);
+  const driftIssues = issues.filter((iss) => !isDigitalSilenceIssue(iss));
+  const diagnostics: CutholDiagnostic[] = [];
+  if (driftIssues.length > 0) {
+    diagnostics.push(DIAGNOSTICS.RENDER_AUDIO_ALIGNMENT_MISMATCH(driftIssues));
+  }
+  if (silenceIssues.length > 0) {
+    diagnostics.push(DIAGNOSTICS.RENDER_AUDIO_DIGITAL_SILENCE(silenceIssues, mp4Path));
+  }
 
   return {
     checked_points: points.length,

@@ -1,6 +1,6 @@
 import { DiagnosticDoc } from "./docs_types.js";
 
-export const W1C_DOCS: DiagnosticDoc[] = [
+export const EXTENSIONS_DOCS: DiagnosticDoc[] = [
   {
     code: "G112",
     title: "Extension manifest invalid",

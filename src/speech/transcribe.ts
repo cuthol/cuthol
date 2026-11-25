@@ -37,6 +37,42 @@ import { LOCAL_ASR_ENGINE_REVISION, PARAKEET_LANGUAGES, PARAKEET_MODEL_ID, resol
  * `local@<rev>+parakeet`) so one engine never serves the other's transcript;
  * sidecar/custom-cli transcripts stay under the engine-independent base key.
  */
+export interface ClampWord {
+  source_start_ms: number;
+  source_end_ms: number;
+}
+
+export function clampLocalWordsToAcousticSpeech<T extends ClampWord>(
+  words: T[],
+  silenceIntervals: Array<{ start_ms: number; end_ms: number }>
+): T[] {
+  for (let wi = 0; wi < words.length; wi++) {
+    const w = words[wi];
+    for (const sil of silenceIntervals) {
+      const overlapMs =
+        Math.min(w.source_end_ms, sil.end_ms) - Math.max(w.source_start_ms, sil.start_ms);
+      if (overlapMs >= 300) {
+        if (w.source_start_ms < sil.start_ms && w.source_end_ms > sil.start_ms) {
+          w.source_end_ms = Math.max(w.source_start_ms + 1, sil.start_ms);
+          const next = words[wi + 1];
+          if (
+            next &&
+            next.source_start_ms < sil.end_ms &&
+            next.source_end_ms > sil.start_ms
+          ) {
+            next.source_start_ms = Math.min(sil.end_ms, next.source_end_ms - 1);
+          }
+        }
+        if (w.source_start_ms < sil.end_ms && w.source_end_ms > sil.end_ms) {
+          w.source_start_ms = Math.min(sil.end_ms, w.source_end_ms - 1);
+        }
+      }
+    }
+  }
+  words.sort((a, b) => a.source_start_ms - b.source_start_ms);
+  return words;
+}
+
 export function localAsrCachePrefix(engine?: string): string {
   const base = `local@${LOCAL_ASR_ENGINE_REVISION}`;
   return engine ? `${base}+${engine}` : base;
@@ -291,6 +327,20 @@ export async function transcribeLibraryAsset(options: {
         requestedAuto,
         keyterms !== null
       );
+      if (
+        isKeylessPath &&
+        resolvedProvider.source !== "builtin" &&
+        forcedValid !== undefined &&
+        extProviderName === null
+      ) {
+        const engineKey = cacheLangKey.replace(
+          `local@${LOCAL_ASR_ENGINE_REVISION}`,
+          `local@${LOCAL_ASR_ENGINE_REVISION}+${forcedValid}`
+        );
+        if (engineKey !== cacheLangKey && !lookupKeys.includes(engineKey)) {
+          lookupKeys = [engineKey, ...lookupKeys];
+        }
+      }
       if (isKeylessPath && resolvedProvider.source === "builtin") {
         const extra: string[] = [];
         for (const k of lookupKeys) {
@@ -499,6 +549,9 @@ export async function transcribeLibraryAsset(options: {
       // absorbed into stretched ASR word `end` timestamps are detected reliably without ever
       // overlapping or truncating spoken words.
       const minPauseMs = OPEN_STANDARDS.DIALOGUE_CLEANUP.DEFAULT_MIN_PAUSE_MS;
+      if (doc.provider === "local") {
+        clampLocalWordsToAcousticSpeech(doc.words, acousticSilenceIntervals);
+      }
       for (const sil of acousticSilenceIntervals) {
         for (let wi = 0; wi < doc.words.length; wi++) {
           const w = doc.words[wi];

@@ -139,7 +139,7 @@ export function mount(root, ctx) {
     const items = clips.map((c) => {
       const end = (c.timeline_in_ms ?? 0) + (c.duration_ms ?? 0);
       extent = Math.max(extent, end);
-      return { id: c.id, kind: "clip", start: c.timeline_in_ms ?? 0, end, label: c.asset_handle ?? c.id, ref: c };
+      return { id: c.id, kind: "clip", start: c.timeline_in_ms ?? 0, end, label: c.asset_handle ?? c.id, ref: c, audioOnly: spineClipIsAudio(c) };
     });
     tracks.push({ key: "spine", label: "V1", sub: "Spine", kind: "spine", locked: false, muted: false, items });
 
@@ -411,8 +411,18 @@ export function mount(root, ctx) {
     g.fillRect(0, RULER_H - 1, w, 1);
   }
 
+  const AUDIO_EXT_RE = /\.(mp3|wav|ogg|oga|flac|m4a|aac|opus|wma|aif|aiff)(\?.*)?$/i;
+  function spineClipIsAudio(ref) {
+    if (!ref) return false;
+    if (ref.kind === "audio") return true;
+    const seq = ctx.store.state.sequence;
+    const asset = seq?.library?.find?.((a) => a?.handle === ref.asset_handle);
+    if (asset) return asset.kind === "audio" || asset.kind === "voiceover";
+    return typeof ref.asset_handle === "string" && AUDIO_EXT_RE.test(ref.asset_handle);
+  }
+
   const trackFill = (tr, it) => {
-    if (tr.kind === "spine") return C.video;
+    if (tr.kind === "spine") return it.audioOnly ? C.audio : C.video;
     if (it.cueKind === "caption" || tr.kind === "caption") return C.caption;
     if (["music", "sfx", "voiceover"].includes(it.cueKind ?? tr.kind)) return C.audio;
     return C.title;
@@ -423,7 +433,9 @@ export function mount(root, ctx) {
   // edits keep stable thumbnail URLs (no reload).
   const thumbRev = new Map();
   function thumbUrlFor(clipId) {
-    const { scenes, revision, lastChanged } = ctx.store.state;
+    const { scenes, revision, lastChanged, sequence } = ctx.store.state;
+    const clip = sequence?.spine?.clips?.find?.((c) => c?.id === clipId);
+    if (clip && spineClipIsAudio(clip)) return null;
     const scene = (scenes ?? []).find((s) => (s.members ?? []).includes(clipId));
     if (!scene) return null;
     if (scene.thumb) return ctx.api.url(scene.thumb);
@@ -477,10 +489,10 @@ export function mount(root, ctx) {
       g.fillStyle = trackFill(tr, it);
       roundRect(g, x, y, iw, h, 4);
       g.fill();
-      if (tr.kind === "spine") drawClipThumb(g, it, x, y, iw, h);
-      else if (["music", "sfx", "voiceover"].includes(it.cueKind ?? tr.kind)) drawAudioCue(g, it, x, y, iw, h);
+      if (tr.kind === "spine" && !it.audioOnly) drawClipThumb(g, it, x, y, iw, h);
+      else if (it.audioOnly || ["music", "sfx", "voiceover"].includes(it.cueKind ?? tr.kind)) drawAudioCue(g, it, x, y, iw, h);
       else drawItemLabel(g, it.label, x, y, iw, h);
-      if (tr.kind === "spine" && iw > 60) drawItemLabel(g, it.label, x, y + h - 15, iw, 14, true);
+      if (tr.kind === "spine" && !it.audioOnly && iw > 60) drawItemLabel(g, it.label, x, y + h - 15, iw, 14, true);
       const isSel = selection?.id === it.id;
       const isChanged = fresh && changed.has(it.id);
       if (isSel || isChanged) {
@@ -642,7 +654,13 @@ export function mount(root, ctx) {
     roundRect(g, x + 0.5, y + 0.5, w - 1, h - 1, 4);
     g.stroke();
     g.restore();
+    // Waveform stays inside the rounded block: clip to the block rect so tall
+    // peaks never paint over the track or neighbours.
+    g.save();
+    roundRect(g, x + 1, y + 1, Math.max(0, w - 2), Math.max(0, h - 2), 3);
+    g.clip();
     drawWave(g, wavePeaksForCue(it), x, y + 2, w, h - 4);
+    g.restore();
     if (w > 60) {
       g.save();
       g.fillStyle = "rgba(0, 0, 0, 0.55)";

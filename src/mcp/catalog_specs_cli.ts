@@ -208,7 +208,7 @@ export const CLI_ACTION_SPECS: ActionSpec[] = [
     tool: "mix",
     action: "normalize",
     argv: ["mix", "normalize"],
-    summary: "Loudness-normalize.",
+    summary: "Loudness-normalize (manual gains are kept as offsets).",
     mutates: false,
     cliOnly: true,
     params: [

@@ -30,6 +30,48 @@ import { computeSequenceDurationMs } from "../core/timeline.js";
 import { LIVE_SCHEMA, type LiveActivityEntry, type LiveLock, type LiveNotePacket, type LiveServerInfo } from "./live_types.js";
 
 export { buildActivity, buildScenes, buildSnapshot } from "./live_state.js";
+/** Content fingerprint of a composition dir (ignores Cuthol-owned files). Stable when nothing meaningful changed. */
+export function fingerprintCompDir(abs: string): string {
+  const h = crypto.createHash("sha1");
+  const walk = (dir: string, rel: string): void => {
+    let names: string[] = [];
+    try {
+      names = fs.readdirSync(dir).sort();
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      const childRel = rel ? `${rel}/${name}` : name;
+      const top = childRel.split("/")[0];
+      if (isCompIgnoredFile(childRel, name) || COMP_IGNORE_DIRS.has(top)) continue;
+      const full = path.join(dir, name);
+      let st: fs.Stats;
+      try {
+        st = fs.statSync(full);
+      } catch {
+        h.update(`gone:${childRel};`);
+        continue;
+      }
+      if (st.isDirectory()) {
+        h.update(`dir:${childRel};`);
+        walk(full, childRel);
+      } else if (st.isFile()) {
+        h.update(`file:${childRel}:${st.size};`);
+        try {
+          const fd = fs.openSync(full, "r");
+          const buf = Buffer.alloc(Math.min(st.size, 65536));
+          const n = fs.readSync(fd, buf, 0, buf.length, 0);
+          fs.closeSync(fd);
+          h.update(buf.subarray(0, n));
+        } catch {
+          // unreadable: size+mtime already recorded
+        }
+      }
+    }
+  };
+  walk(abs, "");
+  return h.digest("hex");
+}
 
 export interface LiveStatus {
   running: boolean;
@@ -568,6 +610,7 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
   const pendingCompDirs = new Set<string>();
   let compDebounce: NodeJS.Timeout | null = null;
   const COMP_DEBOUNCE_MS = 300;
+  const compContentHash = new Map<string, string>();
   const compDirsFromSequence = (sequence: unknown): string[] => {
     const dirs = new Set<string>();
     const lanes: any[] = (sequence as any)?.lanes ?? [];
@@ -579,12 +622,68 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
     }
     return [...dirs];
   };
+  const flushCompDirs = (): void => {
+    if (compDebounce) return;
+    compDebounce = setTimeout(() => {
+      compDebounce = null;
+      const dirs = [...pendingCompDirs];
+      pendingCompDirs.clear();
+      if (dirs.length === 0) return;
+      // Handles may watch a deleted inode after a replace: re-attach the
+      // watchers for every touched directory so later edits are not lost.
+      for (const dir of dirs) {
+        const abs = path.resolve(root, dir);
+        const old = compWatchers.get(abs);
+        if (old) {
+          try { old.close(); } catch {}
+          compWatchers.delete(abs);
+        }
+      }
+      try {
+        attachCompWatchers(lastSeq);
+      } catch {
+        // re-attached lazily on the next event
+      }
+      try {
+        const changed: string[] = [];
+        const hashes: Record<string, string> = {};
+        for (const dir of dirs) {
+          let fp = "";
+          try {
+            fp = fingerprintCompDir(path.resolve(root, dir));
+          } catch {
+            changed.push(dir);
+            continue;
+          }
+          hashes[dir] = fp;
+          if (compContentHash.get(dir) !== fp) {
+            compContentHash.set(dir, fp);
+            changed.push(dir);
+          }
+        }
+        if (changed.length === 0) return;
+        const seq = loadSequence(root).sequence;
+        const scenes = buildScenes(seq, token, root);
+        broadcast("comps", { schema: LIVE_SCHEMA, dirs: changed, scenes, hashes });
+        log(`comps changed: ${changed.join(", ")}`);
+        refreshMedia(seq);
+      } catch (e) {
+        log(`comps check failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }, COMP_DEBOUNCE_MS);
+    compDebounce.unref?.();
+  };
   const attachCompWatchers = (sequence: unknown): void => {
     const wanted = new Set(compDirsFromSequence(sequence).map((d) => path.resolve(root, d)));
     for (const [abs, w] of compWatchers) {
       if (!wanted.has(abs)) {
         try { w.close(); } catch {}
         compWatchers.delete(abs);
+      }
+    }
+    for (const [rel] of compContentHash) {
+      if (![...wanted].some((abs) => path.relative(root, abs).split(path.sep).join("/") === rel)) {
+        compContentHash.delete(rel);
       }
     }
     for (const abs of wanted) {
@@ -597,7 +696,35 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
         const opts: { recursive?: boolean } = {};
         if (process.platform === "win32" || process.platform === "darwin") opts.recursive = true;
         const w = fs.watch(abs, opts, (event, filename) => {
-          const rel = typeof filename === "string" ? filename.split(path.sep).join("/") : "";
+          // Windows recursive watch can report the watched root itself as an
+          // absolute path (or an absolute path inside it); normalize to a path
+          // relative to `abs` so the ignore/stat checks below see the truth.
+          let rel = typeof filename === "string" && filename.length > 0 ? filename.split(path.sep).join("/") : "";
+          if (rel) {
+            const norm = rel.replace(/\\/g, "/");
+            const absPosix = abs.replace(/\\/g, "/").replace(/\/$/, "");
+            if (norm === absPosix || norm === absPosix + "/") {
+              rel = "";
+            } else if (norm.startsWith(absPosix + "/")) {
+              rel = norm.slice(absPosix.length + 1);
+            } else if (/^([A-Za-z]:\/|\/)/.test(norm)) {
+              // Absolute path outside the watched root: not our change.
+              return;
+            }
+          }
+          if (!rel) {
+            // Event naming the watched root itself (rename/replace of the
+            // directory): the old handle may watch a deleted inode even when
+            // a same-path directory already exists again, so always close and
+            // re-attach; a replaced directory gets a fresh watcher and later
+            // edits are not lost.
+            try { w.close(); } catch {}
+            compWatchers.delete(abs);
+            try { attachCompWatchers(lastSeq); } catch {}
+            pendingCompDirs.add(path.relative(root, abs).split(path.sep).join("/"));
+            flushCompDirs();
+            return;
+          }
           const base = rel ? path.posix.basename(rel) : "";
           const top = rel ? rel.split("/")[0] : "";
           if (rel && (isCompIgnoredFile(rel, base) || (top && COMP_IGNORE_DIRS.has(top)))) return;
@@ -612,27 +739,19 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
             }
           }
           pendingCompDirs.add(path.relative(root, abs).split(path.sep).join("/"));
-          if (compDebounce) return;
-          compDebounce = setTimeout(() => {
-            compDebounce = null;
-            const dirs = [...pendingCompDirs];
-            pendingCompDirs.clear();
-            if (dirs.length === 0) return;
-            try {
-              const seq = loadSequence(root).sequence;
-              const scenes = buildScenes(seq, token, root);
-              broadcast("comps", { schema: LIVE_SCHEMA, dirs, scenes });
-              log(`comps changed: ${dirs.join(", ")}`);
-              refreshMedia(seq);
-            } catch (e) {
-              log(`comps check failed: ${e instanceof Error ? e.message : String(e)}`);
-            }
-          }, COMP_DEBOUNCE_MS);
-          compDebounce.unref?.();
+          flushCompDirs();
         });
         w.on("error", () => {});
         compWatchers.set(abs, w);
         watchers.push(w);
+        try {
+          // Never clobber an existing baseline: the flush path owns updates,
+          // so a re-attach between event and flush must not hide the change.
+          const rel = path.relative(root, abs).split(path.sep).join("/");
+          if (!compContentHash.has(rel)) compContentHash.set(rel, fingerprintCompDir(abs));
+        } catch {
+          // hashed lazily on first event
+        }
       } catch {
         // directory vanished between stat and watch; the poll covers it
       }
@@ -640,10 +759,27 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
   };
   const checkCompFallback = (): void => {
     // Cheap poll fallback: recompute attach set so added/removed cue dirs and
-    // non-recursive platforms still converge within ~1 s.
+    // non-recursive platforms still converge within ~1 s. A replaced directory
+    // can also silently kill its watcher (same path, dead inode): re-hash
+    // every watched dir so missed events still converge, broadcasting only
+    // when the content actually changed.
+    let touched = false;
+    for (const [rel, fp] of [...compContentHash]) {
+      let cur = "";
+      try {
+        cur = fingerprintCompDir(path.resolve(root, rel));
+      } catch {
+        continue;
+      }
+      if (cur !== fp) {
+        pendingCompDirs.add(rel);
+        touched = true;
+      }
+    }
     try {
       attachCompWatchers(lastSeq);
     } catch {}
+    if (touched) flushCompDirs();
   };
 
   const checkAll = (): void => {

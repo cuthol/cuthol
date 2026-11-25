@@ -366,6 +366,8 @@ export function normalizeSequenceAudio(options: {
         integrated_lufs: number;
         applied_gain_db: number;
         effective_mix_gain_db: number;
+        normalize_gain_db: number;
+        manual_offset_db: number;
       }> = [];
       let skippedMutedCount = 0;
       const libMap = new Map(seq.library.map((x) => [x.handle, x]));
@@ -383,9 +385,21 @@ export function normalizeSequenceAudio(options: {
 
         const desiredGain = targetLufs - m.integrated_lufs;
         const maxSafeGain = truePeakDbtp - m.true_peak_dbtp;
-        const appliedGain = Number(Math.max(-24, Math.min(24, desiredGain, maxSafeGain)).toFixed(2));
+        const normalizedGain = Number(Math.max(-24, Math.min(24, desiredGain, maxSafeGain)).toFixed(2));
+        const prevNorm = clip.audio_chain.normalize_gain_db;
+        let offsetDb: number;
+        if (typeof prevNorm === "number" && Number.isFinite(prevNorm)) {
+          offsetDb = Number((clip.audio_chain.gain_db - prevNorm).toFixed(2));
+        } else if (clip.audio_chain.loudness_target_lufs !== null) {
+          offsetDb = Number((clip.audio_chain.gain_db - normalizedGain).toFixed(2));
+          if (Math.abs(offsetDb) < 0.1) offsetDb = 0;
+        } else {
+          offsetDb = Number(clip.audio_chain.gain_db.toFixed(2));
+        }
+        const appliedGain = Number((normalizedGain + offsetDb).toFixed(2));
 
         clip.audio_chain.gain_db = appliedGain;
+        clip.audio_chain.normalize_gain_db = normalizedGain;
         clip.audio_chain.loudness_target_lufs = targetLufs;
         clip.audio_chain.true_peak_ceiling_dbtp = truePeakDbtp;
         spanById.set(clip.id, [clip.timeline_in_ms, clip.timeline_in_ms + clip.duration_ms]);
@@ -395,6 +409,8 @@ export function normalizeSequenceAudio(options: {
           integrated_lufs: m.integrated_lufs,
           applied_gain_db: appliedGain,
           effective_mix_gain_db: appliedGain,
+          normalize_gain_db: normalizedGain,
+          manual_offset_db: offsetDb,
         });
       }
 
@@ -423,14 +439,26 @@ export function normalizeSequenceAudio(options: {
           const m = cue.asset_handle ? loudnessByAsset.get(cue.asset_handle) : stemM;
           if (!m) continue;
 
-          const desiredGain = targetLufs - m.integrated_lufs;
-          const maxSafeGain = truePeakDbtp - m.true_peak_dbtp;
-          const appliedGain = Number(Math.max(-24, Math.min(24, desiredGain, maxSafeGain)).toFixed(2));
-
           if (!cue.audio_chain) {
             cue.audio_chain = createDefaultAudioChain();
           }
+          const desiredGain = targetLufs - m.integrated_lufs;
+          const maxSafeGain = truePeakDbtp - m.true_peak_dbtp;
+          const normalizedGain = Number(Math.max(-24, Math.min(24, desiredGain, maxSafeGain)).toFixed(2));
+          const prevNorm = cue.audio_chain.normalize_gain_db;
+          let offsetDb: number;
+          if (typeof prevNorm === "number" && Number.isFinite(prevNorm)) {
+            offsetDb = Number((cue.audio_chain.gain_db - prevNorm).toFixed(2));
+          } else if (cue.audio_chain.loudness_target_lufs !== null) {
+            offsetDb = Number((cue.audio_chain.gain_db - normalizedGain).toFixed(2));
+            if (Math.abs(offsetDb) < 0.1) offsetDb = 0;
+          } else {
+            offsetDb = Number(cue.audio_chain.gain_db.toFixed(2));
+          }
+          const appliedGain = Number((normalizedGain + offsetDb).toFixed(2));
+
           cue.audio_chain.gain_db = appliedGain;
+          cue.audio_chain.normalize_gain_db = normalizedGain;
           cue.audio_chain.loudness_target_lufs = targetLufs;
           cue.audio_chain.true_peak_ceiling_dbtp = truePeakDbtp;
           const cueStart = resolveCueStartMs(seq, cue);
@@ -441,6 +469,8 @@ export function normalizeSequenceAudio(options: {
             integrated_lufs: m.integrated_lufs,
             applied_gain_db: appliedGain,
             effective_mix_gain_db: appliedGain,
+            normalize_gain_db: normalizedGain,
+            manual_offset_db: offsetDb,
           });
         }
       }
@@ -462,19 +492,27 @@ export function normalizeSequenceAudio(options: {
 
   const normDecisions: DecisionTraceItem[] = adjusted.map((item) => {
     const desired = Number((targetLufs - item.integrated_lufs).toFixed(2));
-    const clamped = Math.abs(desired - item.applied_gain_db) > 0.05;
+    const normalizeClamped = Math.abs(desired - item.normalize_gain_db) > 0.05;
+    const overCeiling = Math.abs(item.applied_gain_db - item.normalize_gain_db) > 0.001
+      && item.applied_gain_db > item.normalize_gain_db + 0.05
+      && normalizeClamped;
+    const clamped = normalizeClamped;
+    const reason = overCeiling ? "TRUE_PEAK_CEILING_EXCEEDED" : clamped ? "TRUE_PEAK_CLAMPED" : "APPLIED";
     return {
       id: item.id,
       span: spanById.get(item.id) ?? [0, 0],
-      action: clamped ? "clamped" : "applied",
-      reason_code: clamped ? "TRUE_PEAK_CLAMPED" : "APPLIED",
+      action: clamped || overCeiling ? "clamped" : "applied",
+      reason_code: reason,
       measured: {
         integrated_lufs: item.integrated_lufs,
         desired_gain_db: desired,
         applied_gain_db: item.applied_gain_db,
         effective_mix_gain_db: item.effective_mix_gain_db,
+        normalize_gain_db: item.normalize_gain_db,
+        manual_offset_db: item.manual_offset_db,
       },
       threshold: { target_lufs: targetLufs, true_peak_dbtp: truePeakDbtp },
+      note: `kept manual offset ${item.manual_offset_db >= 0 ? "+" : ""}${item.manual_offset_db} dB on top of normalized ${item.normalize_gain_db} dB`,
     };
   });
 

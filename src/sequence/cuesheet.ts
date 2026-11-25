@@ -34,7 +34,7 @@ import {
 import { assertValidEasing } from "../core/easing.js";
 import { loadSequence, WorkspacePaths } from "../core/workspace.js";
 import { commitVerifiedMutation, VerificationReport, verifySequence } from "../verify/gates.js";
-import { syncCueAnchors } from "./lanes.js";
+import { realignCaptionWords, syncCueAnchors } from "./lanes.js";
 import { computeClipDurationMs, reflowSpine } from "./spine.js";
 
 export interface CueSheetSpineEntry {
@@ -55,6 +55,7 @@ export interface CueSheetSpineEntry {
   voice_clarity?: boolean;
   loudness_target_lufs?: number | null;
   true_peak_ceiling_dbtp?: number;
+  normalize_gain_db?: number | null;
   treatments?: Partial<VisualTreatments>;
   transition_out?: TransitionSpec | null;
   envelopes?: ParameterEnvelope[];
@@ -76,6 +77,7 @@ export interface CueSheetCueEntry {
   composition?: HyperFramesMountSpec;
   gain_db?: number;
   muted?: boolean;
+  normalize_gain_db?: number | null;
   envelopes?: ParameterEnvelope[];
 }
 
@@ -243,6 +245,9 @@ export function mergeCueSheetIntoSequence(
         if (entry.true_peak_ceiling_dbtp !== undefined) {
           updated.audio_chain.true_peak_ceiling_dbtp = entry.true_peak_ceiling_dbtp;
         }
+        if (entry.normalize_gain_db !== undefined) {
+          updated.audio_chain.normalize_gain_db = entry.normalize_gain_db;
+        }
         if (entry.treatments) {
           updated.treatments = { ...updated.treatments, ...entry.treatments };
         }
@@ -293,6 +298,9 @@ export function mergeCueSheetIntoSequence(
         }
         if (entry.true_peak_ceiling_dbtp !== undefined) {
           created.audio_chain.true_peak_ceiling_dbtp = entry.true_peak_ceiling_dbtp;
+        }
+        if (entry.normalize_gain_db !== undefined) {
+          created.audio_chain.normalize_gain_db = entry.normalize_gain_db;
         }
         created.duration_ms = computeClipDurationMs(created);
 
@@ -413,13 +421,26 @@ export function mergeCueSheetIntoSequence(
         if (entry.source_out_ms !== undefined) updated.source_out_ms = entry.source_out_ms;
         if (entry.placement) Object.assign(updated.placement, entry.placement);
         if (entry.typography) {
+          const prevWords = prevCue.typography?.words;
+          const textChanged =
+            entry.typography.text !== undefined &&
+            entry.typography.text !== (prevCue.typography?.text ?? "");
+          const wordsAreStored =
+            entry.typography.words === undefined ||
+            JSON.stringify(entry.typography.words) === JSON.stringify(prevWords);
+          const realignedWords =
+            textChanged && (prevWords?.length ?? 0) > 0 && wordsAreStored
+              ? realignCaptionWords(prevWords!, entry.typography.text!)
+              : undefined;
           updated.typography = {
             ...updated.typography,
             text: entry.typography.text ?? updated.typography?.text ?? "",
-            words:
-              entry.typography.words !== undefined
-                ? entry.typography.words
-                : updated.typography?.words,
+            words: realignedWords ?? (entry.typography.words !== undefined
+              ? entry.typography.words
+              : updated.typography?.words),
+            hand_edited: realignedWords
+              ? true
+              : (entry.typography.hand_edited ?? updated.typography?.hand_edited),
             font_family: entry.typography.font_family ?? updated.typography?.font_family ?? "Inter",
             font_size_px: entry.typography.font_size_px ?? updated.typography?.font_size_px ?? 48,
             font_weight: entry.typography.font_weight ?? updated.typography?.font_weight ?? 700,
@@ -446,6 +467,10 @@ export function mergeCueSheetIntoSequence(
         if (entry.gain_db !== undefined) {
           if (!updated.audio_chain) updated.audio_chain = createDefaultAudioChain();
           updated.audio_chain.gain_db = entry.gain_db;
+        }
+        if (entry.normalize_gain_db !== undefined) {
+          if (!updated.audio_chain) updated.audio_chain = createDefaultAudioChain();
+          updated.audio_chain.normalize_gain_db = entry.normalize_gain_db;
         }
         if (entry.muted !== undefined) {
           if (!updated.audio_chain) updated.audio_chain = createDefaultAudioChain();
@@ -489,6 +514,7 @@ export function mergeCueSheetIntoSequence(
             kind === "voiceover" ||
             kind === "broll" ||
             entry.gain_db !== undefined ||
+            entry.normalize_gain_db !== undefined ||
             entry.muted !== undefined
               ? createDefaultAudioChain()
               : undefined,
@@ -515,6 +541,10 @@ export function mergeCueSheetIntoSequence(
         if (entry.gain_db !== undefined) {
           if (!created.audio_chain) created.audio_chain = createDefaultAudioChain();
           created.audio_chain.gain_db = entry.gain_db;
+        }
+        if (entry.normalize_gain_db !== undefined) {
+          if (!created.audio_chain) created.audio_chain = createDefaultAudioChain();
+          created.audio_chain.normalize_gain_db = entry.normalize_gain_db;
         }
         if (entry.muted !== undefined) {
           if (!created.audio_chain) created.audio_chain = createDefaultAudioChain();
@@ -601,6 +631,7 @@ export function exportSequenceToCueSheet(seq: CutholSequence): CutholCueSheet {
       voice_clarity: c.audio_chain.voice_clarity.enabled,
       loudness_target_lufs: c.audio_chain.loudness_target_lufs,
       true_peak_ceiling_dbtp: c.audio_chain.true_peak_ceiling_dbtp,
+      normalize_gain_db: c.audio_chain.normalize_gain_db ?? null,
       treatments: c.treatments,
       transition_out: c.transition_out,
       envelopes: c.envelopes,
@@ -622,6 +653,7 @@ export function exportSequenceToCueSheet(seq: CutholSequence): CutholCueSheet {
         composition: cue.composition,
         gain_db: cue.audio_chain?.gain_db,
         muted: cue.audio_chain?.muted,
+        normalize_gain_db: cue.audio_chain?.normalize_gain_db ?? null,
         envelopes: cue.envelopes,
       }))
     ),

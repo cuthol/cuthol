@@ -214,7 +214,7 @@ export const MEDIA_ACTION_SPECS: ActionSpec[] = [
     tool: "mix",
     action: "normalize",
     argv: ["mix", "normalize"],
-    summary: "Calibrate clip/voiceover gains and master mix gain to reach the loudness target without exceeding the true-peak ceiling; reports achieved_lufs and target_reached.",
+    summary: "Calibrate clip/voiceover gains and master mix gain to reach the loudness target without exceeding the true-peak ceiling; manual gains are kept as offsets on top of the normalized gain; reports achieved_lufs and target_reached.",
     mutates: true,
     params: [
       { name: "target_lufs", type: "number", description: "Integrated loudness target (default −14)." },

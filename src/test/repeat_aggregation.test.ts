@@ -1,5 +1,5 @@
 /**
- * [w1b repeats] loops that collect the same code for many items in one pass emit one
+ * [repeats] loops that collect the same code for many items in one pass emit one
  * diagnostic with the count, the id range, the shared value and every id in
  * `subject_ids`. Fails on the old build: `pushRepeatDiagnostic` and the `*_MANY`
  * factories do not exist there (import fails).
@@ -13,7 +13,7 @@ import {
   type CutholDiagnostic,
 } from "../core/diagnostics.js";
 
-describe("w1b repeat aggregation", () => {
+describe("repeat aggregation", () => {
   it("repeatIdRange renders a single id and a first…last range", () => {
     assert.equal(repeatIdRange(["cue_03"]), "cue_03");
     assert.equal(repeatIdRange(["cue_386", "cue_004", "cue_100"]), "cue_004 … cue_386");

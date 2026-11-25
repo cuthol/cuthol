@@ -1,6 +1,6 @@
 import { DiagnosticDoc } from "./docs_types.js";
 
-export const W1A_DOCS: DiagnosticDoc[] = [
+export const SPEECH_DOCS: DiagnosticDoc[] = [
   {
     code: "G102",
     title: "Duplicate handle in the sequence",

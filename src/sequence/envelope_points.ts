@@ -18,7 +18,7 @@ import { checkFrozenParam, fxEntryFilterName } from "../effects/fx_check.js";
 import { listEffectDefinitions } from "../effects/effect_registry.js";
 import { isKnownEnvelopeParameter, suggestEnvelopeParameter } from "./envelope_params.js";
 
-// [fxcheck:A G320–G329] pre-write frozen/instance probe for fx.* envelope edits.
+// [G320–G329] pre-write frozen/instance probe for fx.* envelope edits.
 // Throws CUTHOL-G322/G324 on ERROR before the caller writes anything.
 function fxEnvelopePreCheck(
   workspaceDir: string, targetId: string, parameter: string,
@@ -303,7 +303,7 @@ export function addEnvelopePoint(
   edit: EnvelopePointEdit
 ): { envelope: ParameterEnvelope; revision: number; verification: VerificationReport } {
   assertKnownParameter(edit.parameter, edit.targetId);
-  // [fxcheck:A G320–G329] frozen probe on the would-be point set.
+  // [G320–G329] frozen probe on the would-be point set.
   {
     const { sequence } = loadSequence(edit.workspaceDir);
     const { owner } = findEnvelopeOwner(sequence, edit.targetId);
@@ -337,7 +337,7 @@ export function addEnvelopePointsBulk(options: {
   points: EnvelopePointEdit[];
 }): { envelope: ParameterEnvelope; revision: number; verification: VerificationReport } {
   assertKnownParameter(options.parameter, options.targetId);
-  // [fxcheck:A G320–G329] frozen probe on the would-be point set.
+  // [G320–G329] frozen probe on the would-be point set.
   {
     const { sequence } = loadSequence(options.workspaceDir);
     const { owner } = findEnvelopeOwner(sequence, options.targetId);
@@ -378,7 +378,7 @@ export function moveEnvelopePoint(options: {
   bezier?: ParameterEnvelopePoint["bezier"];
 }): { envelope: ParameterEnvelope; revision: number; verification: VerificationReport } {
   assertKnownParameter(options.parameter, options.targetId);
-  // [fxcheck:A G320–G329] frozen probe on the would-be point set.
+  // [G320–G329] frozen probe on the would-be point set.
   {
     const { sequence } = loadSequence(options.workspaceDir);
     const { owner } = findEnvelopeOwner(sequence, options.targetId);

@@ -1,5 +1,5 @@
 /**
- * sza4: engine resolution must not block cached transcripts.
+ * Engine resolution must not block cached transcripts.
  *
  * Parakeet installed, Whisper not, Turkish transcript cached -> served from
  * the cache without resolving (and throwing on) the engine. Same setup
@@ -52,7 +52,7 @@ function writeToneMp4(mediaFile: string, durationSec: number): void {
 
 /** Parakeet installed, Whisper missing: fake HyperFrames CLI + empty data dir. */
 function parakeetOnlyEnv(): { dir: string; restore: () => void } {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-sza4-"));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-cached-tx-"));
   const bin = path.join(dir, "hyperframes.mjs");
   fs.writeFileSync(
     bin,

@@ -25,6 +25,7 @@ import {
 } from "./cleanup_acoustic.js";
 import {
   AsrProviderId,
+  matchWordForLanguage,
   normalizeTokenForMatch,
   RawTranscriptWord,
   TranscriptDocument,
@@ -301,7 +302,7 @@ function buildExpectedWords(
     for (const token of projected) {
       if (token.excised || token.sequence_start_ms === null || token.sequence_end_ms === null) continue;
       if (!token.clip_id || !targetIds.has(token.clip_id)) continue;
-      const norm = normalizeTokenForMatch(token.word);
+      const norm = normalizeTokenForMatch(token.word, doc.language);
       if (!norm) continue;
       const owner = clipById.get(token.clip_id);
       words.push({
@@ -571,7 +572,8 @@ function heardTokens(doc: TranscriptDocument): HeardTok[] {
     .sort((a, b) => a.source_start_ms - b.source_start_ms || a.source_end_ms - b.source_end_ms);
   for (const word of sorted) {
     const display = word.punctuated_word || word.word;
-    const norm = normalizeTokenForMatch(display) || normalizeTokenForMatch(word.word);
+    const norm =
+      normalizeTokenForMatch(display, doc.language) || matchWordForLanguage(word, doc.language);
     if (!norm) continue;
     tokens.push({
       word: display,

@@ -1,6 +1,6 @@
 import { DiagnosticDoc } from "./docs_types.js";
 
-export const W1D_DOCS: DiagnosticDoc[] = [
+export const SEQUENCE_DOCS: DiagnosticDoc[] = [
   {
     code: "G103",
     title: "Spine clip or lane cue points at an unknown library handle",

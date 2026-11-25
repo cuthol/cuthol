@@ -4,8 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { rmRetrySync } from "./fs_cleanup.js";
+import { hyperframesCacheDir } from "../speech/local_engine.js";
 
-const REAL_CHROME_CACHE = "C:\\Users\\user\\.cache\\hyperframes\\chrome";
+const REAL_CHROME_CACHE = path.join(hyperframesCacheDir(), "chrome");
 
 function countProfiles(): number {
   return fs

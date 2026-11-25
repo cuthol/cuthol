@@ -120,6 +120,11 @@ MAX_CLIPS`) compile and render in frame-exact time segments and concatenate
 without re-encoding video, preserving transitions, compositions, envelopes,
 subtitles and loudness calibration across boundaries.
 
+With many composition cues overlapping in time (e.g. 6–8 staggered
+overlays), ffmpeg 8.1 can stop producing frames; Cuthol stops the step after
+90 s without progress (`CUTHOL-SYS10`). Use fewer composition cues running
+at the same time, or merge adjacent compositions into one composition.
+
 ## Sequence tempo vs spine speed
 
 `workspace tempo --rate <0.5..2.0>` sets `stage.tempo`: a whole-edit rate

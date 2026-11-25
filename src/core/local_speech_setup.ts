@@ -133,7 +133,12 @@ export function planLocalSpeechSetup(options: LocalSpeechSetupOptions = {}): Loc
       LOCAL_SPEECH_VOICES[voice as keyof typeof LOCAL_SPEECH_VOICES].downloadBytes,
     alreadyInstalled: false,
   };
-  plan.alreadyInstalled = engine === "parakeet" ? parakeetInstallState().installed : isInstalled(plan);
+  // A cached Parakeet model without the HyperFrames CLI to run it is not
+  // "already installed": setup must report the missing CLI, not a noop.
+  plan.alreadyInstalled =
+    engine === "parakeet"
+      ? parakeetInstallState().installed && fs.existsSync(hyperframesBin())
+      : isInstalled(plan);
   return plan;
 }
 
@@ -166,6 +171,13 @@ export function describeLocalSpeechSetup(plan: LocalSpeechSetupPlan): string[] {
     ];
   }
   if (plan.engine === "parakeet") {
+    const bin = hyperframesBin();
+    if (!fs.existsSync(bin)) {
+      return [
+        `local speech engine parakeet model is cached but the HyperFrames CLI it runs through is missing at '${bin}'; nothing to transcribe with.`,
+        `reinstall the 'hyperframes' package (it provides the CLI), then re-run 'cuthol setup --local-speech --engine parakeet --apply'.`,
+      ];
+    }
     if (plan.alreadyInstalled) {
       return [`local speech engine parakeet already installed (HyperFrames '${PARAKEET_MODEL_ID}'); nothing to do.`];
     }

@@ -13,9 +13,17 @@
  * revision of that scene's last change (null = bare stable URL).
  */
 export function sceneThumbPath(scene, bustRev) {
+  // Audio-only scenes have no picture: null means "plain audio placeholder,
+  // never issue a thumbnail request".
+  if (scene?.audio_only) return null;
   if (scene?.thumb) return scene.thumb;
   const v = bustRev == null ? "" : `?v=${bustRev}`;
   return `/api/thumb/${encodeURIComponent(scene?.id ?? "")}${v}`;
+}
+
+/** True when a scene summary marks an audio-only spine scene (no picture). */
+export function sceneIsAudio(scene) {
+  return !!scene?.audio_only;
 }
 
 /** @param {HTMLElement|null} root  @param {import('./app.js').LiveContext} ctx */
@@ -92,11 +100,18 @@ export function mount(root, ctx) {
       // edits leave every <img> untouched (no new request).
       if (bustAll || isChanged || row.thumb === "") row.bustRev = revision ?? 0;
       else if (row.bustRev == null) row.bustRev = revision ?? 0;
-      const url = ctx.api.url(sceneThumbPath(scene, row.bustRev));
+      const path = sceneThumbPath(scene, row.bustRev);
+      const url = path == null ? null : ctx.api.url(path);
       if (row.thumb !== url) {
         row.btn.classList.remove("sc-loaded");
-        row.img.src = url;
-        row.thumb = url;
+        row.btn.classList.toggle("sc-audio", url == null);
+        if (url == null) {
+          row.img.removeAttribute("src");
+          row.thumb = null;
+        } else {
+          row.img.src = url;
+          row.thumb = url;
+        }
       }
       if (selectedId === scene.id) row.btn.setAttribute("aria-current", "true");
       else row.btn.removeAttribute("aria-current");

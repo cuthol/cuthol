@@ -85,6 +85,8 @@ export interface LiveSceneSummary {
    * only when the picture changes; the window uses it as is (no revision query).
    */
   thumb?: string;
+  /** True when the scene covers only audio spine clips: no picture exists. */
+  audio_only?: boolean;
 }
 
 /** Full state the window needs; sent on connect and whenever a delta cannot be applied. */

@@ -346,7 +346,7 @@ export function checkRenderedColor(opts: { workspaceDir: string; renderedFile: s
     return [];
   }
   const results: RenderedColorItemResult[] = [];
-  // [w1b G775–G777] items excluded from the render comparison and why.
+  // [G775–G777] items excluded from the render comparison and why.
   const skipped: string[] = [];
   const noteSkip = (id: string, why?: string): void => {
     const entry = why ? `${id} (${why})` : id;

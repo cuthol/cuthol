@@ -1,6 +1,6 @@
 import { DiagnosticDoc } from "./docs_types.js";
 
-export const W1D2_DOCS: DiagnosticDoc[] = [
+export const BACKSTOP_DOCS: DiagnosticDoc[] = [
   {
     code: "G316",
     title: "Bare backdrop shows through transparent composition",

@@ -19,7 +19,7 @@ import { initWorkspace } from "../core/workspace.js";
 import { MediaLedger } from "../library/ledger.js";
 import { ingestAssetsIntoWorkspace } from "../library/probe.js";
 import { transcribeWithDeepgram, transcribeWithLocalProvider } from "../speech/providers.js";
-import { transcribeLibraryAsset } from "../speech/transcribe.js";
+import { localAsrCachePrefix, transcribeLibraryAsset } from "../speech/transcribe.js";
 
 const TEST_ROOT = path.resolve(process.cwd(), "test-workspace/speech_no_default_keyterms");
 
@@ -162,10 +162,10 @@ test("unstamped legacy transcript is re-transcribed once, then served", async ()
   const ledger = new MediaLedger(path.join(wsDir, ".cuthol", "ledger.sqlite"));
   const sha = first.sha256;
   try {
-    const stored = ledger.getTranscript<Record<string, unknown>>(sha, "local@v6:tr");
+    const stored = ledger.getTranscript<Record<string, unknown>>(sha, `${localAsrCachePrefix()}:tr`);
     assert.ok(stored, "expected the fresh record under the local key");
     // Simulate the old build by stripping the stamp from every record.
-    const keys = ["local@v6:tr", "tr", "auto", "latest"];
+    const keys = [`${localAsrCachePrefix()}:tr`, "tr", "auto", "latest"];
     for (const key of keys) {
       const rec = ledger.getTranscript<Record<string, unknown>>(sha, key);
       if (rec && "keyterms" in rec) {

@@ -20,6 +20,7 @@ import {
   DetectedDisfluencySpan,
   isContextualFillerIsolated,
   isContextualFillerToken,
+  matchWordForLanguage,
   normalizeTokenForMatch,
   RawTranscriptWord,
   TranscriptDocument,
@@ -46,11 +47,13 @@ export interface CleanupAssetLoaders {
     spans: DetectedDisfluencySpan[];
     words: RawTranscriptWord[];
     docDurationMs: number;
+    language: string;
   };
   getAssetRepetitionCandidates: (
     clip: SpineClip,
     transcriptWords: RawTranscriptWord[],
-    docDurationMs: number
+    docDurationMs: number,
+    language?: string
   ) => RepetitionRestartCandidate[];
   getAssetAcousticProfile: (
     assetHandle: string
@@ -119,7 +122,7 @@ export function createCleanupAssetLoaders(options: {
   // and asset-wide repetition candidates only ONCE per unique asset_handle!
   const transcriptCache = new Map<
     string,
-    { spans: DetectedDisfluencySpan[]; words: RawTranscriptWord[]; docDurationMs: number }
+    { spans: DetectedDisfluencySpan[]; words: RawTranscriptWord[]; docDurationMs: number; language: string }
   >();
   const acousticCache = new Map<string, ReturnType<typeof measureAssetAcousticWindows>>();
   const assetRepetitionCache = new Map<string, RepetitionRestartCandidate[]>();
@@ -131,6 +134,7 @@ export function createCleanupAssetLoaders(options: {
     let spans: DetectedDisfluencySpan[] = [];
     let words: RawTranscriptWord[] = [];
     let docDurationMs = clip.source_out_ms;
+    let language = options.language ?? "auto";
 
     try {
       const doc: TranscriptDocument = loadCachedTranscriptForAsset(
@@ -141,6 +145,7 @@ export function createCleanupAssetLoaders(options: {
       spans = doc.disfluencies;
       words = doc.words ?? [];
       docDurationMs = doc.duration_ms || clip.source_out_ms;
+      language = doc.language || language;
     } catch (err) {
       if (options.useAcousticFallback !== false) {
         const wave = analyzeAssetWaveform({
@@ -159,7 +164,7 @@ export function createCleanupAssetLoaders(options: {
       }
     }
 
-    const entry = { spans, words, docDurationMs };
+    const entry = { spans, words, docDurationMs, language };
     transcriptCache.set(clip.asset_handle, entry);
     return entry;
   };
@@ -167,7 +172,8 @@ export function createCleanupAssetLoaders(options: {
   const getAssetRepetitionCandidates = (
     clip: SpineClip,
     transcriptWords: RawTranscriptWord[],
-    docDurationMs: number
+    docDurationMs: number,
+    language?: string
   ): RepetitionRestartCandidate[] => {
     let fullList = assetRepetitionCache.get(clip.asset_handle);
     if (!fullList) {
@@ -183,6 +189,7 @@ export function createCleanupAssetLoaders(options: {
         clip: fullAssetProbeClip,
         transcriptWords,
         docDurationMs,
+        language,
       });
       assetRepetitionCache.set(clip.asset_handle, fullList);
     }
@@ -321,12 +328,12 @@ export function collectCleanupReviewAndRepetitionCandidates(params: {
       continue;
     }
 
-    const { words: transcriptWords, docDurationMs } = getAssetTranscriptAndSpans(clip);
+    const { words: transcriptWords, docDurationMs, language } = getAssetTranscriptAndSpans(clip);
     const clipReviewCands: ContextualFillerReviewCandidate[] = [];
 
     for (let wIdx = 0; wIdx < transcriptWords.length; wIdx++) {
       const w = transcriptWords[wIdx];
-      if (!isContextualFillerToken(w.word)) continue;
+      if (!isContextualFillerToken(w.punctuated_word || w.word, language)) continue;
       const origStart = Math.max(clip.source_in_ms, w.source_start_ms);
       const origEnd = Math.min(clip.source_out_ms, w.source_end_ms);
       if (origEnd <= origStart) continue;
@@ -361,7 +368,7 @@ export function collectCleanupReviewAndRepetitionCandidates(params: {
         id,
         clip_id: clip.id,
         asset_handle: clip.asset_handle,
-        word: normalizeTokenForMatch(w.word) || w.word,
+        word: matchWordForLanguage(w, language),
         punctuated_word: w.punctuated_word || w.word,
         source_start_ms: origStart,
         source_end_ms: origEnd,
@@ -376,7 +383,7 @@ export function collectCleanupReviewAndRepetitionCandidates(params: {
       allReviewCandidates.push(cand);
     }
 
-    const clipRepCands = getAssetRepetitionCandidates(clip, transcriptWords, docDurationMs);
+    const clipRepCands = getAssetRepetitionCandidates(clip, transcriptWords, docDurationMs, language);
     reviewCandidatesByClip.set(clip.id, clipReviewCands);
     repetitionCandidatesByClip.set(clip.id, clipRepCands);
     for (const rc of clipRepCands) {
@@ -853,10 +860,14 @@ export function resolveSelectedCutCandidates(params: {
       continue;
     }
 
-    // Word token match (`"yani"`, `"şey"`)
-    const normalizedWord = normalizeTokenForMatch(spec);
+    // Word token match (`"yani"`, `"şey"`): the user-typed spec is tried in
+    // both Turkish and language-neutral form so it matches candidates
+    // normalized under either rule.
+    const specForms = new Set(
+      [normalizeTokenForMatch(spec, "tr"), normalizeTokenForMatch(spec, "en")].filter(Boolean)
+    );
     const matchingByWord = allReviewCandidates.filter(
-      (rc) => rc.id.toLowerCase() === lower || (normalizedWord && rc.word === normalizedWord)
+      (rc) => rc.id.toLowerCase() === lower || specForms.has(rc.word)
     );
     if (matchingByWord.length > 0) {
       for (const rc of matchingByWord) {

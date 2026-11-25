@@ -1024,7 +1024,15 @@ export function mount(root, ctx) {
     words.forEach((w, i) => {
       if (w.sequence_start_ms != null && tq >= w.sequence_start_ms && tq < (w.sequence_end_ms ?? w.sequence_start_ms + 1)) activeIdx = i;
     });
-    const key = `${active.id}:${activeIdx}:${Math.round(stagePxW)}x${Math.round(stagePxH)}`;
+    // Style signature: a revision that changes only caption typography (same
+    // cue, same word, same stage size) must still re-draw the current frame.
+    // Mirrors captionStyleKey() in src/live/live_captions.ts.
+    const typoSig = JSON.stringify([
+      typo.font_family, typo.font_size_px, typo.font_weight, typo.color_hex,
+      typo.active_word_color_hex, typo.stroke_color_hex, typo.stroke_width_px,
+      typo.box_color_hex, typo.box_opacity, typo.align, typo.max_width_pct, typo.text,
+    ]);
+    const key = `${active.id}:${activeIdx}:${Math.round(stagePxW)}x${Math.round(stagePxH)}:${typoSig}`;
     if (key !== capKey) {
       capKey = key;
       capLayer.innerHTML = "";
@@ -1038,25 +1046,34 @@ export function mount(root, ctx) {
       div.style.left = `${posX.toFixed(2)}%`;
       div.style.top = `${posY.toFixed(2)}%`;
       div.style.maxWidth = `${clamp(typo.max_width_pct ?? 80, 15, 95)}%`;
-      div.style.fontFamily = `"${typo.font_family ?? "Arial"}", sans-serif`;
-      div.style.fontSize = `${Math.max(8, Math.round((typo.font_size_px ?? 42) * s * (p.scale_y || 1)))}px`;
-      div.style.fontWeight = String(typo.font_weight ?? 700);
+      // Same font pick as the renderer (src/compositor/ass_generator.ts):
+      // commas stripped, trimmed, "Arial" fallback. Do not change the renderer.
+      div.style.fontFamily = `"${(String(typo.font_family ?? "").replace(/,/g, "").trim() || "Arial")}", sans-serif`;
+      // Same numbers as the renderer (src/compositor/ass_generator.ts; the CSS
+      // conversion lives in resolveLiveCaptionCss(), src/live/live_captions.ts):
+      // ASS Fontsize is a line height, drawn ~8/9 of a CSS em, so the CSS size
+      // is converted the way libass draws it. Weight is thresholded because the
+      // renderer only sees Bold = weight >= 600. Without a box the renderer
+      // always draws Outline = max(1, stroke) plus Shadow = 2 in BackColour.
+      const ASS_TO_CSS = 8 / 9;
+      const cssSize = (Number.isFinite(+typo.font_size_px) ? +typo.font_size_px : 44) * s * (p.scale_y || 1) * ASS_TO_CSS;
+      div.style.fontSize = `${Math.max(8, Math.round(cssSize))}px`;
+      div.style.lineHeight = "0.945"; // libass line pitch, see LIVE_CAPTION_LINE_HEIGHT
+      div.style.fontWeight = (Number.isFinite(+typo.font_weight) ? +typo.font_weight : 0) >= 600 ? "700" : "400";
       div.style.textAlign = typo.align ?? "center";
       div.style.opacity = String(clamp(p.opacity ?? 1, 0, 1));
-      const strokeW = (typo.stroke_width_px ?? 0) * s;
-      // Scale-aware outline mirroring the ASS output (ass_generator.ts renders
-      // Outline = max(1, stroke_width_px) at full stage resolution with
-      // ScaledBorderAndShadow): whole pixels, stroke behind the fill, and a
-      // crisp offset shadow instead of a blurred glow when no stroke applies.
-      if ((typo.stroke_width_px ?? 0) > 0 && strokeW >= 1) {
-        div.style.webkitTextStroke = `${Math.round(strokeW)}px ${typo.stroke_color_hex ?? "#000"}`;
-        div.style.paintOrder = "stroke fill";
-      } else if (typo.stroke_color_hex) {
-        div.style.textShadow = `0 ${Math.max(1, Math.round(2 * s))}px 0 ${typo.stroke_color_hex}`;
-      }
-      if (typo.box_color_hex && (typo.box_opacity ?? 0) > 0) {
+      const boxed = typeof typo.box_color_hex === "string" && typo.box_color_hex.trim() !== "" && (+typo.box_opacity > 0);
+      if (boxed) {
         div.style.background = typo.box_color_hex;
+        div.style.padding = `${Math.round(14 * s)}px`;
         div.style.opacity = String(clamp(p.opacity ?? 1, 0, 1) * clamp(typo.box_opacity, 0, 1));
+      } else {
+        const cssStroke = Math.max(1, Number.isFinite(+typo.stroke_width_px) ? +typo.stroke_width_px : 0) * s;
+        if (Math.round(cssStroke) >= 1) {
+          div.style.webkitTextStroke = `${Math.round(cssStroke)}px ${typo.stroke_color_hex ?? "#000000"}`;
+          div.style.paintOrder = "stroke fill";
+        }
+        div.style.textShadow = `0 ${Math.max(1, Math.round(2 * s))}px 0 rgba(0, 0, 0, 0.5)`;
       }
       const tokens = words.length > 0 ? words.map((w) => w.word) : String(typo.text ?? "").split(/\s+/).filter(Boolean);
       tokens.forEach((tok, i) => {
@@ -1616,10 +1633,12 @@ export function mount(root, ctx) {
   // Outside composition edits: reload only the affected iframes, then re-seek
   // to the current playhead. Cache-bust so the fresh files load, not the old ones.
   window.__cutholCompReloads = window.__cutholCompReloads ?? 0;
+  window.__cutholCompHashes = window.__cutholCompHashes ?? {};
   store.on("comps", (msg) => {
     noteEvent("comps");
     const dirs = new Set(msg?.dirs ?? []);
     if (dirs.size === 0 || !seq) return;
+    const hashes = msg?.hashes ?? {};
     const t = nowMs();
     let matched = false;
     for (const lane of seq?.lanes ?? []) {
@@ -1627,6 +1646,11 @@ export function mount(root, ctx) {
         const d = cue?.composition?.composition_dir;
         if (typeof d !== "string" || !dirs.has(d.replace(/\\/g, "/"))) continue;
         matched = true;
+        // Identical content hash: a duplicate/storm event, keep the iframe.
+        const key = d.replace(/\\/g, "/");
+        if (hashes[key] && window.__cutholCompHashes[key] === hashes[key]) continue;
+        if (hashes[key]) window.__cutholCompHashes[key] = hashes[key];
+        else delete window.__cutholCompHashes[key];
         // The composition files changed: any cached size may be stale.
         compSizeCache.delete(cue.id);
         const rec = compFrames.get(cue.id);

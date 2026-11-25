@@ -14,7 +14,7 @@
 
 import { SpineClip } from "../core/schema.js";
 import { sourceMsToSequenceMs } from "../sequence/spine.js";
-import { normalizeTokenForMatch, RawTranscriptWord } from "./providers.js";
+import { matchWordForLanguage, normalizeTokenForMatch, RawTranscriptWord } from "./providers.js";
 
 export interface RepetitionAttempt {
   attempt_id: string;
@@ -334,13 +334,14 @@ export function detectRepetitionAndRestartCandidates(options: {
   clip: SpineClip;
   transcriptWords: RawTranscriptWord[];
   docDurationMs?: number;
+  language?: string;
 }): RepetitionRestartCandidate[] {
   const { clip, transcriptWords } = options;
   const docDurationMs = options.docDurationMs ?? clip.source_out_ms;
   if (transcriptWords.length < 2) return [];
 
   const toks: TokenInfo[] = transcriptWords.map((w, idx) => {
-    const norm = normalizeTokenForMatch(w.word);
+    const norm = matchWordForLanguage(w, options.language);
     const gapBefore =
       idx > 0 ? Math.max(0, w.source_start_ms - transcriptWords[idx - 1].source_end_ms) : w.source_start_ms;
     const gapAfter =

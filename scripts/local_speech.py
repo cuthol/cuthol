@@ -36,7 +36,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Cache-busting revision of the chunked local ASR engine (see
 # `LOCAL_ASR_ENGINE_REVISION` in `src/speech/transcribe.ts`).
-LOCAL_ASR_ENGINE_REVISION = "v5"
+LOCAL_ASR_ENGINE_REVISION = "v8"
 
 # Fixed decode seed: the faster-whisper default temperature fallback list
 # re-decodes bad windows, so the RNG must be seeded for repeat runs.

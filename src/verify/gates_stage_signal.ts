@@ -2,6 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { CutholDiagnostic, CutholError, DIAGNOSTICS, pushRepeatDiagnostic } from "../core/diagnostics.js";
+import { spawnWatchedSync } from "../core/subprocess.js";
 import { CutholSequence, LaneCue, LibraryItem } from "../core/schema.js";
 import { isVerticalStage, OPEN_STANDARDS } from "../core/standards.js";
 import { resolveCueStartMs } from "../core/timeline.js";
@@ -107,6 +108,47 @@ function boxesIntersectionArea(a: PixelBoundingBox, b: PixelBoundingBox): number
   const iy1 = Math.min(a.bottom, b.bottom);
   if (ix1 <= ix0 || iy1 <= iy0) return 0;
   return (ix1 - ix0) * (iy1 - iy0);
+}
+
+/**
+ * True peak (dBTP) of a rendered output file, measured with ebur128=peak=true.
+ * Returns null when the file is missing or the measurement fails (caller treats
+ * that as "unknown", never as a pass). Render wiring (a later step) calls this
+ * in `src/render/render_main.ts` after both render branches merge, and pushes
+ * `truePeakCeilingDiagnosticForRenderedOutput(...)` into the render result
+ * when the measured peak is above the project's ceiling.
+ */
+export function measureRenderedOutputTruePeakDbtp(outputPath: string): number | null {
+  try {
+    if (!fs.existsSync(outputPath)) return null;
+    const proc = spawnWatchedSync(
+      "ffmpeg",
+      ["-nostats", "-v", "info", "-i", outputPath, "-af", "ebur128=peak=true", "-f", "null", "-"],
+      { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, step: "ffmpeg output true-peak" }
+    );
+    if (proc.error || proc.status !== 0) return null;
+    const text = `${proc.stderr || ""}\n${proc.stdout || ""}`;
+    const summaryIdx = text.lastIndexOf("Summary:");
+    const block = summaryIdx >= 0 ? text.slice(summaryIdx) : text;
+    const m = /Peak:\s*([-\d.]+)\s*dBFS/i.exec(block);
+    if (!m) return null;
+    const peak = Number(m[1]);
+    return Number.isFinite(peak) ? Number(peak.toFixed(2)) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** TRUE_PEAK_CEILING_EXCEEDED for a rendered output above its ceiling, else null. */
+export function truePeakCeilingDiagnosticForRenderedOutput(
+  outputId: string,
+  outputPath: string,
+  ceilingDbtp: number
+): CutholDiagnostic | null {
+  const peak = measureRenderedOutputTruePeakDbtp(outputPath);
+  if (peak === null) return null;
+  if (peak <= ceilingDbtp + 0.01) return null;
+  return DIAGNOSTICS.TRUE_PEAK_CEILING_EXCEEDED(outputId, peak, ceilingDbtp);
 }
 
 export function verifyG4Stage(

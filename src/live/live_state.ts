@@ -207,11 +207,42 @@ export function activityEntriesForRange(projectDir: string, fromRev: number, toR
  * every other scene's cached image across revisions) plus the server token,
  * so the window uses it as a plain `<img src>` with no further auth step.
  */
+/** Audio file extensions (lowercase, with dot) treated as audio-only spine assets. */
+export const AUDIO_ONLY_EXTENSIONS = new Set([".mp3", ".wav", ".ogg", ".oga", ".flac", ".m4a", ".aac", ".opus", ".wma", ".aif", ".aiff"]);
+
+/** True when a spine clip carries audio only (library kind `audio`/`voiceover`, or an audio file extension fallback). */
+export function isAudioOnlySpineClip(seq: any, clip: any): boolean {
+  const handle = clip?.asset_handle;
+  const asset = seq?.library?.find?.((a: any) => a?.handle === handle);
+  if (asset && (asset.kind === "audio" || asset.kind === "voiceover")) return true;
+  if (typeof handle === "string") {
+    const dot = handle.lastIndexOf(".");
+    if (dot >= 0 && AUDIO_ONLY_EXTENSIONS.has(handle.slice(dot).toLowerCase())) return true;
+  }
+  return clip?.kind === "audio";
+}
+
+/** True when every member clip of a scene is an audio-only spine clip. */
+export function sceneIsAudioOnly(seq: any, members: string[]): boolean {
+  if (!members.length) return false;
+  const clips: any[] = seq?.spine?.clips ?? [];
+  return members.every((id) => {
+    const clip = clips.find((c) => c?.id === id);
+    return clip ? isAudioOnlySpineClip(seq, clip) : false;
+  });
+}
+
 export function buildScenes(seq: any, token?: string, projectDir?: string): LiveSceneSummary[] {
   setSceneThumbProjectDir(projectDir);
   const clips: any[] = seq?.spine?.clips ?? [];
   const toScene = (id: string, startMs: number, endMs: number, label: string, members: string[]): LiveSceneSummary => {
     const scene: LiveSceneSummary = { id, start_ms: startMs, end_ms: endMs, label, members };
+    if (sceneIsAudioOnly(seq, members)) {
+      // No picture exists for audio-only scenes: no thumb URL, so the window
+      // never issues a thumbnail request for them.
+      scene.audio_only = true;
+      return scene;
+    }
     const key = computeSceneThumbKey(seq, scene, projectDir);
     // `s=1` once the picture file exists: the server answers a missing one at
     // once with a pending placeholder, and the URL change makes the window

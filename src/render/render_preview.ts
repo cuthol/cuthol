@@ -17,6 +17,7 @@ import { requirePlanPrePasses } from "./pre_pass.js";
 import {
   beginOverlayCollect, isPngSequenceBlobDir,
   isValidVideoBlobOnDisk,
+  lookupCachedCompositionBlobForSingleFrame,
   renderHyperFramesBatchFramesPng,
   resolveFramePngInPngSequenceDir,
   runCollectedOverlays
@@ -237,9 +238,66 @@ export function ensurePreviewCompositeMp4(
 }
 
 /**
+ * True when the frame path (`compile_lane` single-frame instant) can serve every
+ * `localSecs` instant of a composition cue from the render overlay cache without
+ * starting HyperFrames. This mirrors the frame path's own cache-only lookup, so
+ * the sheet skips snapshots the frame path never needs. Content-addressed keys
+ * change on any composition edit, so a lookup hit can never serve stale pixels.
+ */
+function overlayCacheServesCueTimestamps(args: {
+  compositionDir: string;
+  entryHtml: string;
+  blobsDir: string;
+  renderWidth: number;
+  renderHeight: number;
+  fps: number;
+  durationMs: number;
+  props: Record<string, unknown>;
+  transparent: boolean;
+  mode: "overlay_alpha";
+  opaqueBackdropColor?: string;
+  localSecs: number[];
+}): boolean {
+  let found: { cachedBlobPath: string } | null = null;
+  try {
+    found = lookupCachedCompositionBlobForSingleFrame({
+      compositionDir: args.compositionDir,
+      entryHtml: args.entryHtml,
+      blobsDir: args.blobsDir,
+      width: args.renderWidth,
+      height: args.renderHeight,
+      fps: args.fps,
+      durationMs: args.durationMs,
+      props: args.props,
+      transparent: args.transparent,
+      mode: args.mode,
+      opaqueBackdropColor: args.opaqueBackdropColor,
+    });
+  } catch {
+    return false;
+  }
+  if (!found) return false;
+  if (!isPngSequenceBlobDir(found.cachedBlobPath)) return true;
+  for (const localSec of args.localSecs) {
+    const gridIdx = Math.max(0, Math.floor(localSec * args.fps + 1e-6));
+    const framePath = path.join(
+      found.cachedBlobPath,
+      `frame_${String(gridIdx + 1).padStart(6, "0")}.png`
+    );
+    try {
+      if (!fs.existsSync(framePath) || fs.statSync(framePath).size <= 64) return false;
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Pre-renders all active HyperFrames composition frames needed across `timestampsMs` in a single
  * batched `snapshot --at` call per composition cue so subsequent `renderSingleCompositeFrameRgb24`
- * calls hit the `hf_frame_<hash>_f<idx>.png` cache directly.
+ * calls hit the `hf_frame_<hash>_f<idx>.png` cache directly. Cues the frame path can already
+ * serve from the render overlay cache need no snapshot at all and are skipped.
  */
 export function prefetchCompositeFramesForTimestamps(
   seq: CutholSequence,
@@ -297,7 +355,45 @@ export function prefetchCompositeFramesForTimestamps(
 
       const entryPath = path.join(compDir, cue.composition.entry_html);
       let allFramesAlreadyCached = false;
-      if (fs.existsSync(entryPath)) {
+      // The frame path serves overlay-cache hits without any snapshot: skip the
+      // prefetch when it covers every instant this cue needs. Both the
+      // transparent overlay key and the baked opaque key (full-frame cue over
+      // an empty backdrop) are tried, mirroring the frame path's opacity
+      // decision. A miss here keeps today's snapshot behaviour.
+      const overlayVariants: Array<{ transparent: boolean; opaqueBackdropColor?: string }> = [
+        { transparent: cue.composition.transparent },
+      ];
+      if (cue.composition.transparent) {
+        overlayVariants.push({
+          transparent: false,
+          opaqueBackdropColor: seq.stage.backdrop.color,
+        });
+      }
+      for (const variant of overlayVariants) {
+        if (
+          overlayCacheServesCueTimestamps({
+            compositionDir: compDir,
+            entryHtml: cue.composition.entry_html,
+            blobsDir: paths.blobsDir,
+            renderWidth,
+            renderHeight,
+            fps,
+            durationMs: cue.duration_ms,
+            props: cue.composition.props,
+            transparent: variant.transparent,
+            mode: compMode,
+            opaqueBackdropColor: variant.opaqueBackdropColor,
+            localSecs,
+          })
+        ) {
+          const bboxSidecarPath = path.join(compDir, "assets/cuthol-bbox.json");
+          if (!cue.composition.transparent || fs.existsSync(bboxSidecarPath)) {
+            allFramesAlreadyCached = true;
+          }
+          break;
+        }
+      }
+      if (!allFramesAlreadyCached && fs.existsSync(entryPath)) {
         try {
           const htmlSource = fs.readFileSync(entryPath, "utf8");
           const wMatch = /\bdata-width\s*=\s*(["'])(\d+)\1/i.exec(htmlSource);

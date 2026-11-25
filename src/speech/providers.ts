@@ -107,16 +107,45 @@ export const CONTEXTUAL_FILLER_TOKENS = new Set([
   "acaba",
 ]);
 
-export function normalizeTokenForMatch(word: string): string {
-  return word
-    .toLocaleLowerCase("tr-TR")
+/**
+ * True for Turkish transcript languages (`tr`, `tr-TR`, ...). Only Turkish
+ * transcripts use Turkish lowercasing (`I` -> `ı`); every other language
+ * uses language-neutral lowercasing (`I` -> `i`). An unknown language falls
+ * back to the legacy Turkish rule so callers without language context
+ * (TTS doors, extension bridges, old tests) behave exactly as before.
+ */
+export function isTurkishAsrLanguage(language: string | undefined): boolean {
+  const lang = (language ?? "").trim();
+  return lang === "" || /^tr([-_]|$)/i.test(lang);
+}
+
+export function normalizeTokenForMatch(word: string, language?: string): string {
+  const lowered = isTurkishAsrLanguage(language)
+    ? word.toLocaleLowerCase("tr-TR")
+    : word.toLowerCase();
+  return lowered
     .replace(/\u0307/g, "")
     .replace(/[.,!?;:"'()[\]{}…—–-]/g, "")
     .trim();
 }
 
-export function isContextualFillerToken(word: string): boolean {
-  return CONTEXTUAL_FILLER_TOKENS.has(normalizeTokenForMatch(word));
+/**
+ * Match form of one transcript token in a transcript of `language`:
+ * derived from `punctuated_word` (which stored records keep verbatim) so
+ * records written with the old Turkish-only rule and records written with
+ * the language-aware rule behave the same. Both compared sides must use
+ * this helper with the same language.
+ */
+export function matchWordForLanguage(
+  token: { word: string; punctuated_word?: string },
+  language?: string
+): string {
+  const surface = token.punctuated_word || token.word;
+  return normalizeTokenForMatch(surface, language) || token.word;
+}
+
+export function isContextualFillerToken(word: string, language?: string): boolean {
+  return CONTEXTUAL_FILLER_TOKENS.has(normalizeTokenForMatch(word, language));
 }
 
 export function isContextualFillerIsolated(gapBeforeMs: number, gapAfterMs: number): boolean {
@@ -141,15 +170,16 @@ export function annotateWordsAndDisfluencies(
     confidence?: number;
   }>,
   totalDurationMs: number,
-  minPauseMs: number = OPEN_STANDARDS.DIALOGUE_CLEANUP.DEFAULT_MIN_PAUSE_MS
+  minPauseMs: number = OPEN_STANDARDS.DIALOGUE_CLEANUP.DEFAULT_MIN_PAUSE_MS,
+  language?: string
 ): { words: RawTranscriptWord[]; disfluencies: DetectedDisfluencySpan[] } {
   const words: RawTranscriptWord[] = [];
   const disfluencies: DetectedDisfluencySpan[] = [];
 
   for (let i = 0; i < rawWords.length; i++) {
     const curr = rawWords[i];
-    const clean = normalizeTokenForMatch(curr.word);
-    const prevClean = i > 0 ? normalizeTokenForMatch(rawWords[i - 1].word) : "";
+    const clean = matchWordForLanguage(curr, language);
+    const prevClean = i > 0 ? matchWordForLanguage(rawWords[i - 1], language) : "";
     const gapFromPrev = i > 0 ? curr.source_start_ms - rawWords[i - 1].source_end_ms : curr.source_start_ms;
     const gapToNext =
       i + 1 < rawWords.length
@@ -328,13 +358,19 @@ export async function transcribeWithDeepgram(options: {
     confidence: w.confidence ?? 0.98,
   }));
 
-  const { words, disfluencies } = annotateWordsAndDisfluencies(rawWords, options.durationMs);
+  const docLang = ch?.detected_language ?? options.language ?? "auto";
+  const { words, disfluencies } = annotateWordsAndDisfluencies(
+    rawWords,
+    options.durationMs,
+    OPEN_STANDARDS.DIALOGUE_CLEANUP.DEFAULT_MIN_PAUSE_MS,
+    docLang
+  );
 
   return {
     provider: "deepgram",
     model,
     engine: model,
-    language: ch?.detected_language ?? options.language ?? "auto",
+    language: docLang,
     duration_ms: options.durationMs,
     text: alt?.transcript ?? words.map((w) => w.punctuated_word).join(" "),
     words,
@@ -408,11 +444,16 @@ export async function transcribeWithLocalProvider(options: {
         source_end_ms: Number.isFinite(Number(w.source_end_ms)) ? Math.round(Number(w.source_end_ms)) : 100,
         confidence: Number.isFinite(Number(w.confidence)) ? Number(w.confidence) : 0.99,
       }));
-    const { words, disfluencies } = annotateWordsAndDisfluencies(sanitizedWords, options.durationMs);
     const sidecarLang =
       typeof raw.language === "string" && raw.language.trim()
         ? raw.language.trim().toLowerCase()
         : (options.language ?? "auto");
+    const { words, disfluencies } = annotateWordsAndDisfluencies(
+      sanitizedWords,
+      options.durationMs,
+      OPEN_STANDARDS.DIALOGUE_CLEANUP.DEFAULT_MIN_PAUSE_MS,
+      sidecarLang
+    );
     return {
       provider: "local",
       model: "local-sidecar",
@@ -471,11 +512,16 @@ export async function transcribeWithLocalProvider(options: {
         source_start_ms: Number.isFinite(Number(w.source_start_ms)) ? Math.round(Number(w.source_start_ms)) : 0,
         source_end_ms: Number.isFinite(Number(w.source_end_ms)) ? Math.round(Number(w.source_end_ms)) : 100,
       }));
-    const { words, disfluencies } = annotateWordsAndDisfluencies(sanitizedWords, options.durationMs);
     const cmdLang =
       typeof parsed.language === "string" && parsed.language.trim()
         ? parsed.language.trim().toLowerCase()
         : (options.language ?? "auto");
+    const { words, disfluencies } = annotateWordsAndDisfluencies(
+      sanitizedWords,
+      options.durationMs,
+      OPEN_STANDARDS.DIALOGUE_CLEANUP.DEFAULT_MIN_PAUSE_MS,
+      cmdLang
+    );
     return {
       provider: "local",
       model: "custom-cli",
@@ -518,7 +564,12 @@ export async function transcribeWithLocalProvider(options: {
       source_end_ms: Number.isFinite(Number(w.source_end_ms)) ? Math.round(Number(w.source_end_ms)) : 100,
       confidence: Number.isFinite(Number(w.confidence)) ? Number(w.confidence) : 0.99,
     }));
-  const { words, disfluencies } = annotateWordsAndDisfluencies(sanitizedBridgeWords, options.durationMs);
+  const { words, disfluencies } = annotateWordsAndDisfluencies(
+    sanitizedBridgeWords,
+    options.durationMs,
+    OPEN_STANDARDS.DIALOGUE_CLEANUP.DEFAULT_MIN_PAUSE_MS,
+    bridge.language
+  );
   return {
     provider: "local",
     model: bridge.engine === "parakeet" ? bridge.modelName : `faster-whisper-${bridge.modelName}`,

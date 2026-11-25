@@ -50,6 +50,18 @@ export const TIMELINE_DOCS: DiagnosticDoc[] = [
     fix: ["cuthol lane update-cue --cue <cue_XX> --fade-out 200ms", "cuthol spine unmute --clip <sp_XX> --fade-in 100ms", "cuthol explain G786"],
   },
   {
+    code: "G790",
+    title: "Digital silence in the rendered mix where a source has signal",
+    checks: "Partitions post-render audio-health issues by detail text via isDigitalSilenceIssue: the NCC 'no signal in the expected audio window (digital silence)' finding and the gap-scan 'silent gap A..Bms in output while source has signal' finding fail the render; drift ('large time offset ...'), masking and low-correlation findings stay WARN under G508.",
+    fires_when: "scanRenderedMp4AudioHealth finds an output span with no signal at all while the mapped source clearly has signal there; the render throws CutholError(G790) so the envelope is ok:false with a non-zero exit, and the output file is kept in place for inspection.",
+    source: "src/core/diagnostics.ts RENDER_AUDIO_DIGITAL_SILENCE; src/render/render_audio_health.ts isDigitalSilenceIssue + scanRenderedMp4AudioHealth, failed in src/render/render_main.ts renderSequenceToMp4",
+    severity: "ERROR",
+    gate: "G5_SIGNAL",
+    messageShape: "Post-render audio health check found digital silence at ${n} point(s) where a source has signal: ${summary}. The output file was kept at '${outputPath}' for inspection (gate G5 fails the render on lost audio).",
+    thresholds: [{ none: true, why: "Exact detail-text match on the two digital-silence wordings; no level or duration threshold beyond the checks that produced them." }],
+    fix: ["cuthol spine show", "cuthol render --preset draft_480p", "cuthol explain G790"],
+  },
+  {
     code: "G740",
     title: "Cleanup join-edge loudness summary",
     checks: "Measures loudness across each cleanup join edge and summarizes the share of loud joins.",

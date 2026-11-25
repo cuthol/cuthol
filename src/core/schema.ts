@@ -120,6 +120,8 @@ export interface AudioProcessingChain {
   };
   loudness_target_lufs: number | null;
   true_peak_ceiling_dbtp: number;
+  /** Portion of gain_db written by mix normalize; the rest is the user's manual offset. */
+  normalize_gain_db?: number | null;
 }
 
 export interface VisualTreatments {
@@ -276,6 +278,8 @@ export interface TimedWordToken {
 export interface TypographySpec {
   text: string;
   words?: TimedWordToken[];
+  /** Set when an agent or user hand-edited the caption text: `speech captions` keeps the cue on re-runs without `--replace`. */
+  hand_edited?: boolean;
   font_family: string;
   font_size_px: number;
   font_weight: number;
@@ -520,6 +524,7 @@ export function createDefaultAudioChain(): AudioProcessingChain {
     },
     loudness_target_lufs: null,
     true_peak_ceiling_dbtp: OPEN_STANDARDS.LOUDNESS.DEFAULT_TRUE_PEAK_DBTP,
+    normalize_gain_db: null,
   };
 }
 

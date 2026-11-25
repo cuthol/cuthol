@@ -117,7 +117,10 @@ test("audio health gap: injected 10 ms silence in a loud region raises a gap iss
       gapIssues.length > 0,
       `expected a gap issue for the injected 10 ms silence, got: ${JSON.stringify(res.issues)}`
     );
-    assert.ok(hasG508(res.diagnostics), "expected CUTHOL-G508 for the injected gap");
+    // Digital silence where the source has signal fails as G790 ERROR, not G508.
+    const g790 = res.diagnostics.filter((d) => d.code === "CUTHOL-G790");
+    assert.equal(g790.length, 1, `expected one CUTHOL-G790 for the injected gap, got: ${JSON.stringify(res.diagnostics.map((d) => d.code))}`);
+    assert.equal(g790[0].severity, "ERROR");
     const near = gapIssues.find((iss) => Math.abs(iss.check_at_ms - 2000) < 500);
     assert.ok(near, `gap issue should point near 2000ms, got: ${JSON.stringify(gapIssues)}`);
   } finally {

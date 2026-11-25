@@ -3,7 +3,7 @@
  * explain `fix` line must parse against the action catalog (action exists,
  * every --flag is a flag of that action; `<placeholders>` allowed).
  * Commands that fail today are pinned in `src/explain/command_allowlist.json`,
- * which only shrinks. Added by w1b (shared W1 gate contract).
+ * which only shrinks (shared gate contract).
  */
 import { strict as assert } from "node:assert";
 import { describe, it } from "node:test";

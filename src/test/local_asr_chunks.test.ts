@@ -54,8 +54,7 @@ test("localAsrCpuThreads parses CUTHOL_LOCAL_ASR_THREADS with a safe default and
 });
 
 test("local engine revision namespaces the local cache key only", () => {
-  assert.equal(LOCAL_ASR_ENGINE_REVISION, "v6");
-  assert.equal(localAsrCachePrefix(), "local@v6");
+  assert.equal(localAsrCachePrefix(), `local@${LOCAL_ASR_ENGINE_REVISION}`);
 });
 
 function keylessDoc(extra: Partial<TranscriptDocument> = {}): TranscriptDocument {
@@ -76,7 +75,7 @@ test("isStaleLocalEngineRecord flags only older keyless-engine records", () => {
   assert.equal(isStaleLocalEngineRecord(keylessDoc({ engineRev: "v1" })), true);
   assert.equal(isStaleLocalEngineRecord(keylessDoc({ engineRev: "v4" })), true);
   assert.equal(isStaleLocalEngineRecord(keylessDoc({ engineRev: "v5" })), true);
-  assert.equal(isStaleLocalEngineRecord(keylessDoc({ engineRev: "v6" })), false);
+  assert.equal(isStaleLocalEngineRecord(keylessDoc({ engineRev: LOCAL_ASR_ENGINE_REVISION })), false);
   assert.equal(
     isStaleLocalEngineRecord(
       keylessDoc({ engine: "parakeet", model: "parakeet-tdt-0.6b-v3", engineRev: "v5" })
@@ -85,7 +84,7 @@ test("isStaleLocalEngineRecord flags only older keyless-engine records", () => {
   );
   assert.equal(
     isStaleLocalEngineRecord(
-      keylessDoc({ engine: "parakeet", model: "parakeet-tdt-0.6b-v3", engineRev: "v6" })
+      keylessDoc({ engine: "parakeet", model: "parakeet-tdt-0.6b-v3", engineRev: LOCAL_ASR_ENGINE_REVISION })
     ),
     false
   );

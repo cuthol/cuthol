@@ -1,6 +1,6 @@
 import { DiagnosticDoc } from "./docs_types.js";
 
-export const W1C2_DOCS: DiagnosticDoc[] = [
+export const LIVE_DOCS: DiagnosticDoc[] = [
   {
     code: "G601",
     title: "Live edit blocked while user paused the agent",

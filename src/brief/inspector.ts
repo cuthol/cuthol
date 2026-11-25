@@ -83,7 +83,7 @@ function isAudioOnlyKind(kind: string): boolean {
  * Composition cue one-liner with its stem switch (`mix` is the default when
  * absent). An explicit switch is always shown; a default switch is shown only
  * when the composition actually holds audible elements (same static scan as
- * the G416 gate), so silent compositions stay quiet in the brief.
+ * the G416 gate), so silent compositions stay quiet in the one-line summary.
  */
 function withCueFx(summary: string, cue: LaneCue): string {
   const fx = describeFxShort(cue.fx);

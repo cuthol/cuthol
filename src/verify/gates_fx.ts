@@ -36,7 +36,7 @@ export function verifySpineFx(
   const cueIds = new Set(seq.lanes.flatMap((lane) => lane.cues.map((cue) => cue.id)));
   for (const owner of owners) {
     if (!itemFxNeedsCheck(owner)) continue;
-    // [ed G382] orphan `fx.*` envelopes on an item with no fx at all: the
+    // [G382] orphan `fx.*` envelopes on an item with no fx at all: the
     // stage compiler returns early with no entries and never reports them
     // (older builds wrote them silently). WARN here; orphans on items that
     // do carry fx still surface as G119 ERROR from the stage build below.
@@ -87,7 +87,7 @@ export function verifySpineFx(
           }
         }
       }
-      // [fxcheck:A G320–G329] instance check: run the compiled chain on a card.
+      // [G320–G329] instance check: run the compiled chain on a card.
       const chain = flattenFxStageParts(parts).join(",");
       if (chain) {
         for (const f of checkFxChain(chain, {
@@ -102,7 +102,7 @@ export function verifySpineFx(
               : DIAGNOSTICS.FX_CHECK_PROBE_FAILED("fx", f.message)
           );
         }
-        // [fxcheck:A G320–G329] frozen check: one triple-render per changing fx envelope.
+        // [G320–G329] frozen check: one triple-render per changing fx envelope.
         for (const env of owner.envelopes) {
           const em = /^fx\.([^.]+)\.(.+)$/.exec(env.parameter);
           if (!em) continue;

@@ -12,7 +12,7 @@ function readTracked(rel: string): string {
 
 // Mirrors test-workspace/sk/data/katalog_bayrak.py, but reads the declared side
 // from the built catalog (so it fails on builds without the new entries).
-test("w0a: every flag the handlers read is declared by the catalog", () => {
+test("every flag the handlers read is declared by the catalog", () => {
   const cat = new Map<string, Set<string>>();
   const add = (g: string, f: string) => {
     if (!cat.has(g)) cat.set(g, new Set());
@@ -41,7 +41,7 @@ test("w0a: every flag the handlers read is declared by the catalog", () => {
   assert.deepEqual(missing, [], `flags read but undeclared: ${missing.join(", ")}`);
 });
 
-test("w0a: color block flags parsed outside cli_cmd files are declared too", () => {
+test("color block flags parsed outside cli_cmd files are declared too", () => {
   const cliParse = readTracked("src/color/cli_parse.ts");
   const keys = [...(cliParse.match(/^\s*(wb|exposure|tone|curve|wheel|hsl|sat|vibrance|look|amount|remove|patch)\?:/gm) ?? [])].map(
     (line) => line.trim().replace(/\?:$/, ""),
@@ -52,7 +52,7 @@ test("w0a: color block flags parsed outside cli_cmd files are declared too", () 
   for (const k of keys) assert.ok(declared.has(k), `color set lacks --${k}`);
 });
 
-test("w0a: cliOnly actions never reach the MCP surface", () => {
+test("cliOnly actions never reach the MCP surface", () => {
   const cliOnly = ACTION_SPECS.filter((a) => a.cliOnly);
   assert.ok(cliOnly.length > 10, `expected cliOnly actions, got ${cliOnly.length}`);
   for (const tool of TOOL_SPECS) {
@@ -66,7 +66,7 @@ test("w0a: cliOnly actions never reach the MCP surface", () => {
   assert.ok(colorSet && !colorSet.cliOnly);
 });
 
-test("w0a: explain is the one new MCP action, on the guide tool", () => {
+test("explain is the one new MCP action, on the guide tool", () => {
   const spec = findActionSpec("guide", "explain");
   assert.ok(spec && !spec.cliOnly);
   assert.deepEqual(spec.argv, ["explain"]);

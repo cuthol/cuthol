@@ -37,7 +37,7 @@ function captureStdout(fn: () => void): string {
   return chunks.join("\n");
 }
 
-test("w0a: color set --remove takes a value, live open --no-window stays boolean", () => {
+test("color set --remove takes a value, live open --no-window stays boolean", () => {
   const spec = mergedParams("color", "set");
   const booleans = specBooleanFlags(spec.params);
   assert.ok(!booleans.has("remove"));
@@ -59,7 +59,7 @@ test("w0a: color set --remove takes a value, live open --no-window stays boolean
   assert.equal(liveParsed.flags["dir"], "x");
 });
 
-test("w0a: unknown flag names the command, the closest flag and the accepted list", async () => {
+test("unknown flag names the command, the closest flag and the accepted list", async () => {
   const spec = mergedParams("library", "ingest");
   const msg = describeUnknownFlag("library", "ingest", "files", spec.params);
   assert.match(msg, /`--files` is not a flag of `library ingest`/);
@@ -78,12 +78,12 @@ test("w0a: unknown flag names the command, the closest flag and the accepted lis
   });
 });
 
-test("w0a: spine fx try --at accepts bare seconds and time literals", () => {
+test("spine fx try --at accepts bare seconds and time literals", () => {
   assert.equal(normalizeFxTryAt("0.5,1.5"), "0.5,1.5");
   assert.equal(normalizeFxTryAt("0.5s,1500ms"), "0.5,1.5");
 });
 
-test("w0a: every HELP_LINES command resolves and its --help lists every catalog flag", () => {
+test("every HELP_LINES command resolves and its --help lists every catalog flag", () => {
   const helpSrc = fs.readFileSync(path.join(ROOT, "src/cli_help.ts"), "utf8");
   const seen = new Set<string>();
   let checked = 0;
@@ -120,7 +120,7 @@ test("w0a: every HELP_LINES command resolves and its --help lists every catalog 
   assert.ok(checked > 40, `expected many resolved commands, got ${checked}`);
 });
 
-test("w0a: explain returns the G110 record", async () => {
+test("explain returns the G110 record", async () => {
   const rec = runExplain("CUTHOL-G110");
   assert.equal(rec.ok, true);
   assert.match(rec.text, /\[CUTHOL-G110\] Unknown or conflicting CLI flag/);

@@ -258,6 +258,7 @@ function renderThumbJpeg(projectDir: string, atMs: number, outFile: string): voi
  * never throws.
  */
 export function ensureSceneThumb(projectDir: string, sequence: any, scene: LiveSceneSummary): string | null {
+  if (scene?.audio_only) return null;
   try {
     setSceneThumbProjectDir(projectDir);
     const key = computeSceneThumbKey(sequence, scene, projectDir);
@@ -320,6 +321,7 @@ export async function refreshSceneThumbs(
   setSceneThumbProjectDir(projectDir);
   const index = readThumbIndex(projectDir);
   for (const scene of scenes) {
+    if (scene?.audio_only) continue;
     await new Promise((r) => setImmediate(r));
     try {
       const key = computeSceneThumbKey(sequence, scene, projectDir);

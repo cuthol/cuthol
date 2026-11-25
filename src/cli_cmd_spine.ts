@@ -147,7 +147,7 @@ function collectSpineFxParams(flags: Record<string, string | boolean>, command =
 }
 
 /**
- * `spine fx check` (brief A item 3 + continuation): definition check for one
+ * `spine fx check`: definition check for one
  * effect kind. Only kinds with an explicit non-ffmpeg backend pass as native;
  * anything else must resolve to a runnable filter template or it is a G326
  * ERROR. An ERROR finding fails the command (exit 1, `ok: false`), like

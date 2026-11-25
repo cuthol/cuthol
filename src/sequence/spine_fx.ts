@@ -178,7 +178,7 @@ export function addSpineFx(options: {
   enabled?: boolean;
 }): { fx: ClipFxSpec; item: string; clip?: string; revision: number; verification: VerificationReport } {
   const targetId = resolveTargetId(options);
-  // [fxcheck:A G320–G329] pre-write probe: ERROR rejects before anything is written.
+  // [G320–G329] pre-write probe: ERROR rejects before anything is written.
   {
     const { sequence: preSeq } = loadSequence(options.workspaceDir);
     const hasFilter = options.filter !== undefined && options.filter !== "";
@@ -249,7 +249,7 @@ export function setSpineFx(options: {
   enabled?: boolean;
 }): { fx: ClipFxSpec; item: string; clip?: string; revision: number; verification: VerificationReport } {
   const targetId = resolveTargetId(options);
-  // [fxcheck:A G320–G329] pre-write probe on the would-be entry state.
+  // [G320–G329] pre-write probe on the would-be entry state.
   {
     const { sequence: preSeq } = loadSequence(options.workspaceDir);
     const clip = preSeq.spine.clips.find((c) => c.id === targetId);

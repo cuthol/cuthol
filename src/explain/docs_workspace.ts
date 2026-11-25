@@ -1,7 +1,7 @@
 import { DiagnosticDoc } from "./docs_types.js";
 
-/** W1G diagnostic records: revision/journal, easing, lanes, tempo, external changes, setup, settings, MCP reload. */
-export const W1G_DOCS: DiagnosticDoc[] = [
+/** Diagnostic records: revision/journal, easing, lanes, tempo, external changes, setup, settings, MCP reload. */
+export const WORKSPACE_DOCS: DiagnosticDoc[] = [
   {
     code: "G109",
     title: "Stale revision guard stopped the write",

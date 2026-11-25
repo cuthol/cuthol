@@ -44,7 +44,7 @@ export function createDiagnostic(
 
 /**
  * One repeat occurrence: the affected subject plus the shared detail that groups it.
- * [w1b repeats] loops that collect the same code for many items in one pass push
+ * [repeats] loops that collect the same code for many items in one pass push
  * through `pushRepeatDiagnostic`; the first occurrence keeps the single-item text and
  * the second one upgrades the line to the aggregated text (count + id range + shared
  * value, every id in `subject_ids`).
@@ -147,7 +147,7 @@ export const DIAGNOSTICS = {
   // presets, layers and envelopes (schema/verify) · CUTHOL-G530..G549 shader pass and effect
   // render · CUTHOL-G694..G699 effect visibility in Cuthol Live. G119 (envelope on a
   // non-animatable param) keeps its meaning for every backend. ---
-  // [fx:A G170–G179] effect catalog, keyframe points, value at t
+  // [G170–G179] effect catalog, keyframe points, value at t
   ENVELOPE_BEAT_NO_GRID: (assetHandle: string) =>
     createDiagnostic(
       "CUTHOL-G170",
@@ -211,7 +211,7 @@ export const DIAGNOSTICS = {
       `Add a keyframe with 'cuthol spine envelope point add --clip ${targetId} --param ${parameter} --at <t> --value <n>'; rule: 'cuthol explain G176'.`,
       targetId
     ),
-  // [fx:B G180–G189] mask and motion blur
+  // [G180–G189] mask and motion blur
   INVALID_MASK_SPEC: (clipId: string, detail: string) =>
     createDiagnostic(
       "CUTHOL-G180",
@@ -242,7 +242,7 @@ export const DIAGNOSTICS = {
       `The user paused the agent in the Cuthol Live window (paused since ${since}) and is editing the timeline, so '${operation}' was not applied in this run; the agent holds the Live lock contract while paused.`,
       `Do not retry yet. Run 'cuthol live wait'; it returns when the user resumes, with a summary of their edits. Read-only commands still work; rule: 'cuthol explain G601'.`
     ),
-  // [live:A G602–G605]
+  // [G602–G605]
   LIVE_SERVER_START_FAILED: (dir: string) =>
     createDiagnostic(
       "CUTHOL-G602",
@@ -251,7 +251,7 @@ export const DIAGNOSTICS = {
       `The Cuthol Live server for '${dir}' did not start within 10 s in this run (startup timeout 10 s).`,
       `Check '.cuthol/live/server.log' in the project, stop any stale server with 'cuthol live stop --dir "${dir}"', and retry 'cuthol live open'; rule: 'cuthol explain G602'.`
     ),
-  // [live:B G606–G608]
+  // [G606–G608]
   LIVE_WINDOW_OPEN_FAILED: (detail: string) =>
     createDiagnostic(
       "CUTHOL-G606",
@@ -269,7 +269,7 @@ export const DIAGNOSTICS = {
       `Check that the scene's source media exists and 'cuthol monitor frame' works for the project, then re-open the Live window; rule: 'cuthol explain G607'.`,
       sceneId
     ),
-  // [live:C G609–G612]
+  // [G609–G612]
   LIVE_PROXY_ENCODE_FAILED: (handle: string, detail: string) =>
     createDiagnostic(
       "CUTHOL-G609",
@@ -302,7 +302,7 @@ export const DIAGNOSTICS = {
       `Exact preview frame at ${atMs}ms could not be rendered in this run (${detail}); the window shows the approximate preview instead.`,
       `Run 'cuthol monitor frame --at ${atMs}ms' to see the full error; rule: 'cuthol explain G612'.`
     ),
-  // [live:D G613–G615]
+  // [G613–G615]
   LIVE_CONFIG_INVALID_MODE: (where: string, value: string) =>
     createDiagnostic(
       "CUTHOL-G613",
@@ -319,7 +319,7 @@ export const DIAGNOSTICS = {
       `Could not write the Cuthol Live user setting to '${file}' in this run: ${reason}.`,
       `Check that the folder exists and is writable, or set the project-level mode instead ('cuthol live config --mode ask|on|off'); rule: 'cuthol explain G614'.`
     ),
-  // [live:E G616–G617]
+  // [G616–G617]
   LIVE_NOTE_COORDS_FAILED: (detail: string) =>
     createDiagnostic(
       "CUTHOL-G616",
@@ -336,7 +336,7 @@ export const DIAGNOSTICS = {
       `Live note contact sheet could not be rendered in this run (${detail}); the packet is queued without an image.`,
       `Run 'cuthol monitor frame' for the note's timestamp to see the full error; the note text still reaches the agent; rule: 'cuthol explain G617'.`
     ),
-  // [live:F G618–G619]
+  // [G618–G619]
   LIVE_EDIT_REVISION_CONFLICT: (
     action: string,
     detail: string,
@@ -357,7 +357,7 @@ export const DIAGNOSTICS = {
       `Live edit '${action}' on '${target}' failed in this run: ${detail}.`,
       `Fix the underlying problem (see the command diagnostic above) and retry. If the timeline looks wrong, undo the paused session's edits one step at a time; rule: 'cuthol explain G619'.`
     ),
-  // [settings G620–G624]
+  // [G620–G624]
   SETTINGS_UNKNOWN_KEY: (key: string) =>
     createDiagnostic(
       "CUTHOL-G620",
@@ -398,7 +398,7 @@ export const DIAGNOSTICS = {
       `Setting '${key}' is locked by environment variable ${variable} in this run; unset it to change the stored value.`,
       `Unset ${variable} and re-run, or keep the environment value; rule: 'cuthol explain G624'.`
     ),
-  // [doctor G625–G629]
+  // [G625–G629]
   DOCTOR_FFMPEG_MISSING: () =>
     createDiagnostic(
       "CUTHOL-G625",
@@ -415,7 +415,7 @@ export const DIAGNOSTICS = {
       "No Chrome/Chromium browser was found for HyperFrames rendering.",
       "Install Google Chrome or Microsoft Edge and retry."
     ),
-  // [setup G630–G634]
+  // [G630–G634]
   SETUP_CONFIG_UNPARSEABLE: (file: string) =>
     createDiagnostic(
       "CUTHOL-G630",
@@ -456,7 +456,7 @@ export const DIAGNOSTICS = {
       `Could not write '${file}': ${reason}.`,
       `Check that the folder exists and is writable, then re-run the same 'cuthol setup' command; rule: 'cuthol explain G634'.`
     ),
-  // [setup G250–G254] pinned ffmpeg install
+  // [G250–G254] pinned ffmpeg install
   FFMPEG_SETUP_FAILED: (step: string, detail: string) =>
     createDiagnostic(
       "CUTHOL-G250",
@@ -497,7 +497,7 @@ export const DIAGNOSTICS = {
       `Installed ffmpeg failed its version check: ${detail}`,
       `Remove the install folder and re-run 'cuthol setup --ffmpeg --apply'; rule: 'cuthol explain G254'.`
     ),
-  // [lane-mute G125–G126]
+  // [G125–G126]
   LANE_MUTE_SPINE: () =>
     createDiagnostic(
       "CUTHOL-G125",
@@ -507,7 +507,7 @@ export const DIAGNOSTICS = {
       "Mute a spine clip with 'cuthol spine mute --clip <id>', or pass a lane id ('ln_*') to 'cuthol lane mute --lane <id>'; rule: 'cuthol explain G125'.",
       "spine"
     ),
-  // [edit-check G140–G149]       envelope parameter names, cue frame-grid alignment, monitor argument checks
+  // [G140–G149]       envelope parameter names, cue frame-grid alignment, monitor argument checks
   ENVELOPE_UNKNOWN_PARAMETER: (parameter: string, targetId: string, suggestion: string | null) =>
     createDiagnostic(
       "CUTHOL-G140",
@@ -561,7 +561,7 @@ export const DIAGNOSTICS = {
       `Monitor sheet ignores 'start'/'end' when several 'at' timestamps are given (${detail}).`,
       `Drop 'start'/'end' to silence this, or drop 'at' to sample the window; rule: 'cuthol explain G144'.`,
     ),
-  // [boundary G520–G529]         composition boundary frames, boundary continuity (verify), render input hygiene
+  // [G520–G529]         composition boundary frames, boundary continuity (verify), render input hygiene
   BOUNDARY_CONTINUITY_MATCH: (laneId: string, atMs: number, diff: number) =>
     createDiagnostic(
       "CUTHOL-G520",
@@ -578,7 +578,7 @@ export const DIAGNOSTICS = {
       `Boundary on '${laneId}' at ${atMs}ms changes the picture (mean pixel difference ${diff.toFixed(2)} between the last frame of the outgoing composition and the first frame of the incoming one; gate G5 compares boundary frames).`,
       `Check the two compositions around ${atMs}ms when the cut should be seamless ('cuthol monitor frame --at ${atMs}ms'); rule: 'cuthol explain G521'.`,
     ),
-  // [live-preview G670–G679]     Live preview reloads, preloading, watchdog
+  // [G670–G679]     Live preview reloads, preloading, watchdog
   LIVE_PREVIEW_RESYNCED: (reason: string) =>
     createDiagnostic(
       "CUTHOL-G670",
@@ -642,7 +642,7 @@ export const DIAGNOSTICS = {
       `Reload the Live window page manually; the preview keeps running with warnings only.`,
       cueId
     ),
-  // [live-notes G680–G689]       Live note measurement, server instances, incident log
+  // [G680–G689]       Live note measurement, server instances, incident log
   LIVE_NOTE_MEASURE_OFFLOADED: (detail: string) =>
     createDiagnostic(
       "CUTHOL-G680",
@@ -667,7 +667,7 @@ export const DIAGNOSTICS = {
       `Live window reported a preview incident in this run: ${detail}.`,
       "See the newest file under '.cuthol/live/incidents/' ('cuthol live status' names it); rule: 'cuthol explain G682'."
     ),
-  // [comp-runtime G450–G459]     sequence clock, shared project assets, runtime files, lint resolution
+  // [G450–G459]     sequence clock, shared project assets, runtime files, lint resolution
   SEQ_TIME_CLAMPED: (helper: string, detail: string) =>
     createDiagnostic(
       "CUTHOL-G450",
@@ -692,7 +692,7 @@ export const DIAGNOSTICS = {
       `Lint finding '${code}' downgraded to info: ${reason}; the check fired on a pattern that is safe here.`,
       `No action needed; the finding stays visible as info for inspection; rule: 'cuthol explain G452'.`
     ),
-  // [comp-contract G460–G469]    runtime contract probe, script check on add/verify, automatic adopt
+  // [G460–G469]    runtime contract probe, script check on add/verify, automatic adopt
   EXTERNAL_COMPOSITION_EDITS_AUTO_ADOPTED: (comps: string[]) =>
     createDiagnostic(
       "CUTHOL-G460",
@@ -709,8 +709,8 @@ export const DIAGNOSTICS = {
       `${String(count)} empty ranges show only the stage backdrop (${String(totalMs)}ms in total; gate G3 backdrop check).`,
       `Run 'cuthol verify' for the full per-range list, or cover the ranges with spine or lane cues; rule: 'cuthol explain G461'.`
     ),
-  // [local-speech G237–G239]
-  // [sk-w2 G770–G774]
+  // [G237–G239]
+  // [G770–G774]
   CUE_SHEET_FILE_NOT_FOUND: (tried: string[]) =>
     createDiagnostic(
       "CUTHOL-G770",
@@ -719,9 +719,9 @@ export const DIAGNOSTICS = {
       `Cue sheet file not found (looked in ${tried.map((t) => `'${t}'`).join(" and ")}).`,
       `Pass an absolute path, or place the file at one of those paths and retry.`
     ),
-  // [script-ext G433, G438–G439]
-  // [monitor-scaffold G214–G216]
-  // [color-schema G130–G139]   colour stage / Look validation, cluster and scope checks (verify)
+  // [G433, G438–G439]
+  // [G214–G216]
+  // [G130–G139]   colour stage / Look validation, cluster and scope checks (verify)
   COLOR_BLOCK_AMOUNT_RANGE: (subject: string, block: string, amount: unknown) =>
     createDiagnostic(
       "CUTHOL-G130",
@@ -794,7 +794,7 @@ export const DIAGNOSTICS = {
       `Copy the grade ('cuthol color set --item ${item} --patch <stage of ${graded[0]}>' or 'cuthol color look create --from-item ${graded[0]}' then bind it), or say why it differs; rule: 'cuthol explain G137'.`,
       item
     ),
-  // [color-measure G240–G248]  frame sampling, map, solve, prediction inputs
+  // [G240–G248]  frame sampling, map, solve, prediction inputs
   COLOR_FRAME_SAMPLE_FAILED: (item: string, detail: string) =>
     createDiagnostic(
       "CUTHOL-G240",
@@ -820,8 +820,8 @@ export const DIAGNOSTICS = {
       `Colour solve '${mode}' needs target frames but got 0; there is nothing to solve against.`,
       `Pass target frames or a reference file to 'cuthol color solve'; rule: 'cuthol explain G242'.`
     ),
-  // [color-render G440–G449]   stage compile, LUT self-test, input transform, keyframed colour
-  // [color-scan G510–G514]     post-render colour check against the prediction
+  // [G440–G449]   stage compile, LUT self-test, input transform, keyframed colour
+  // [G510–G514]     post-render colour check against the prediction
   COLOR_RENDER_GRADE_OK: (summary: string, subjectIds?: string[]) =>
     createDiagnostic(
       "CUTHOL-G510",
@@ -851,7 +851,7 @@ export const DIAGNOSTICS = {
       items[0]?.id,
       items.map((i) => i.id)
     ),
-  // [color-cli G640–G649]      `cuthol color` command errors
+  // [G640–G649]      `cuthol color` command errors
   COLOR_COMMAND_FAILED: (action: string, reason: string) =>
     createDiagnostic(
       "CUTHOL-G640",
@@ -869,7 +869,7 @@ export const DIAGNOSTICS = {
       `Check the id with 'cuthol brief --lens flow' and retry; rule: 'cuthol explain G641'.`,
       item
     ),
-  // [color-live G650–G654]     Live colour endpoints and panel
+  // [G650–G654]     Live colour endpoints and panel
   COLOR_LIVE_LUT_FAILED: (item: string, detail: string) =>
     createDiagnostic(
       "CUTHOL-G650",
@@ -910,7 +910,7 @@ export const DIAGNOSTICS = {
       `Colour map for spine item '${item}' is unavailable in this run: ${detail}; the graded preview still works.`,
       `The text map needs the measurement build (sampleItemFrames + colorMap); retry after the render warms the cache; rule: 'cuthol explain G654'.`
     ),
-  // [output G515–G519, G660–G664] 4K/alpha presets, timeline export
+  // [G515–G519, G660–G664] 4K/alpha presets, timeline export
   OUTPUT_ALPHA_CODEC_SELECTED: (codec: string, container: string, reason: string) =>
     createDiagnostic(
       "CUTHOL-G515",
@@ -1043,7 +1043,9 @@ export const DIAGNOSTICS = {
       "SYS",
       "ERROR",
       `ASR provider '${provider}' cannot detect the speech language automatically, and no '--lang' was given, so transcription cannot start.`,
-      `Re-run with an explicit language, e.g. 'cuthol speech transcribe --handle <id> --lang en --provider ${provider}'; rule: 'cuthol explain G213'.`
+      provider === "local"
+        ? `Re-run with an explicit language, e.g. 'cuthol speech transcribe --handle <id> --lang en --provider local' (local Parakeet covers 25 European languages (en, es, fr, de, bg, hr, cs, da, nl, et, fi, el, hu, it, lv, lt, mt, pl, pt, ro, sk, sl, sv, ru, uk; Turkish is not covered)), or detect the language with 'cuthol speech transcribe --handle <id> --provider local --engine whisper'; rule: 'cuthol explain G213'.`
+        : `Re-run with an explicit language, e.g. 'cuthol speech transcribe --handle <id> --lang en --provider ${provider}'; rule: 'cuthol explain G213'.`
     ),
 
   // --- System & Workspace (SYS) ---
@@ -1622,6 +1624,34 @@ export const DIAGNOSTICS = {
     );
   },
 
+  // [G790–G791] digital silence in the rendered mix fails the render.
+  RENDER_AUDIO_DIGITAL_SILENCE: (
+    issues: Array<{
+      item_id: string;
+      check_at_ms: number;
+      measured_offset_ms: number;
+      similarity: number;
+      detail: string;
+    }>,
+    outputPath: string
+  ) => {
+    const summary = issues
+      .map(
+        (x) =>
+          `${x.item_id}@${Math.round(x.check_at_ms)}ms (${x.detail}, offset=${x.measured_offset_ms >= 0 ? "+" : ""}${x.measured_offset_ms.toFixed(1)}ms, similarity=${x.similarity.toFixed(2)})`
+      )
+      .join("; ");
+    const firstId = issues[0]?.item_id;
+    return createDiagnostic(
+      "CUTHOL-G790",
+      "G5_SIGNAL",
+      "ERROR",
+      `Post-render audio health check found digital silence at ${issues.length} point(s) where a source has signal: ${summary}. The output file was kept at '${outputPath}' for inspection (gate G5 fails the render on lost audio).`,
+      `Check the start time and audio chain of '${firstId ?? "cue/clip"}' with 'cuthol spine show' and re-render with 'cuthol render --preset draft_480p'; rule: 'cuthol explain G790'.`,
+      firstId
+    );
+  },
+
   REVISION_MISMATCH: (expectedRev: number, actualRev: number) =>
     createDiagnostic(
       "CUTHOL-G109",
@@ -1631,7 +1661,7 @@ export const DIAGNOSTICS = {
       `See what changed with 'cuthol workspace journal list', then re-run the same command with '--expect-rev ${actualRev}'; rule: 'cuthol explain G109'.`
     ),
 
-  // [fxcheck:A G320–G329] fx instance check (card run + sentinel) and frozen-param check
+  // [G320–G329] fx instance check (card run + sentinel) and frozen-param check
   FX_CHECK_SKIPPED_NO_FFMPEG: () =>
     createDiagnostic(
       "CUTHOL-G320",
@@ -1709,7 +1739,7 @@ export const DIAGNOSTICS = {
       suggestion ??
         "List checkable kinds with 'cuthol spine fx catalog' (clip kinds are 'ffmpeg', 'motion' or 'ext:<extension>/<name>'); rule: 'cuthol explain G326'."
     ),
-  // [fxtry:D G345–G359] fx sandbox, `spine fx try` grid and `spine fx check --full`
+  // [G345–G359] fx sandbox, `spine fx try` grid and `spine fx check --full`
   FX_TRY_FAILED: (kind: string, detail: string) =>
     createDiagnostic(
       "CUTHOL-G345",
@@ -1750,7 +1780,7 @@ export const DIAGNOSTICS = {
       `fx full check for kind '${kind}' in this run: manifest cost_class '${declared}' contradicts the measured '${measured}' (1080p per-frame probe).`,
       "Update the manifest 'cost_class' to the measured value, then re-run 'cuthol spine fx check --kind' on this kind; rule: 'cuthol explain G349'."
     ),
-  // [preset:P G360–G374] motion presets anchored to the clip and extension fx-new
+  // [G360–G374] motion presets anchored to the clip and extension fx-new
   PRESET_UNKNOWN: (preset: string, detail: string) =>
     createDiagnostic(
       "CUTHOL-G360",
@@ -1855,7 +1885,7 @@ export const DIAGNOSTICS = {
       `fx skeleton '${fxName}' added to extension '${extName}' in this run (kind 'ext:${extName}/${fxName}').`,
       `Try it with 'cuthol spine fx try --kind ext:${extName}/${fxName}' and check it with 'cuthol spine fx check --kind ext:${extName}/${fxName}'; rule: 'cuthol explain G372'.`
     ),
-  // [fxtpl:C G340–G344] fx template placeholder and quoting rules (one rule per template)
+  // [G340–G344] fx template placeholder and quoting rules (one rule per template)
   FX_TEMPLATE_UNTERMINATED_QUOTE: (extName: string, fxName: string) =>
     createDiagnostic(
       "CUTHOL-G340",
@@ -1872,7 +1902,7 @@ export const DIAGNOSTICS = {
       `extension '${extName}' fx '${fxName}': '${param}' parameter value contains a single quote (') and cannot go inside a single-quoted template region (the filter would parse it as the region end).`,
       `Remove the quote from the '${param}' value or move the placeholder outside the quoted region; rule: 'cuthol explain G341'.`
     ),
-  // [fxfix:F G375–G379] effect-authoring fixes (delivery verdict, console window, guide CLI)
+  // [G375–G379] effect-authoring fixes (delivery verdict, console window, guide CLI)
   GUIDE_TOPIC_UNKNOWN: (topic: string) =>
     createDiagnostic(
       "CUTHOL-G375",
@@ -1881,7 +1911,7 @@ export const DIAGNOSTICS = {
       `guide topic '${topic}' is not available (no such skill, reference or extension README).`,
       "Run 'cuthol guide' for the catalog of topics, or pass a skill name, '<skill>/<reference>' or 'ext:<name>'; rule: 'cuthol explain G375'."
     ),
-  // [sk-w0a G765-G769] Catalog-driven CLI help/parsing/explain range.
+  // [G765-G769] Catalog-driven CLI help/parsing/explain range.
   EXPLAIN_MISSING_QUERY: () =>
     createDiagnostic(
       "CUTHOL-G765",
@@ -1890,7 +1920,7 @@ export const DIAGNOSTICS = {
       "explain needs a diagnostic code or topic.",
       "Use this command: cuthol explain <code|topic> (e.g. cuthol explain CUTHOL-G110)."
     ),
-  // [kz1 G778–G779] JSON flag file references and quote-stripped JSON
+  // [G778–G779] JSON flag file references and quote-stripped JSON
   JSON_FLAG_FAILED: (flag: string, command: string, received: string, expected: string, fixCommand: string) => {
     const stripped = received.trim().length > 0 && /[{,[]\s*[A-Za-z_][A-Za-z0-9_]*\s*:/.test(received);
     const preview = received.length > 60 ? `${received.slice(0, 60)}…` : received;
@@ -2180,7 +2210,7 @@ export const DIAGNOSTICS = {
       clipId
     ),
 
-  // [p1fx:W0 G264–G266] cue fx stage
+  // [G264–G266] cue fx stage
   CUE_FX_TEXT_UNSUPPORTED: (cueId: string) =>
     createDiagnostic(
       "CUTHOL-G264",
@@ -2217,7 +2247,7 @@ export const DIAGNOSTICS = {
       `Use 'cuthol spine fx' on a spine clip or a visual lane cue instead; audio shaping lives in the audio chain; rule: 'cuthol explain G271'.`,
       cueId
     ),
-  // [p1fx:A G267–G270] fx stage render
+  // [G267–G270] fx stage render
   COMPOSITION_TEMPORAL_FX_SINGLEFRAME: (cueId: string, filter: string) =>
     createDiagnostic(
       "CUTHOL-G267",
@@ -2237,8 +2267,8 @@ export const DIAGNOSTICS = {
       cueIds[0],
       cueIds
     ),
-  // [p1fx:B G271–G275] fx surface
-  // [p1fx:C G276–G279] text cue fx
+  // [G271–G275] fx surface
+  // [G276–G279] text cue fx
   CUE_FX_TEXT_LAYER_EMPTY: (cueId: string) =>
     createDiagnostic(
       "CUTHOL-G276",
@@ -2355,7 +2385,7 @@ export const DIAGNOSTICS = {
       subjectId
     ),
 
-  // [fxcheck:B G330–G339]
+  // [G330–G339]
   EXTENSION_TRANSITION_FIELD_UNQUOTED_PROGRESS: (extName: string, trName: string, field: string) =>
     createDiagnostic(
       "CUTHOL-G330",
@@ -2552,7 +2582,7 @@ export const DIAGNOSTICS = {
       cueId
     ),
 
-  // [szb G786–G789] audio fade validation for lane cues and spine clips.
+  // [G786–G789] audio fade validation for lane cues and spine clips.
   INVALID_AUDIO_FADE: (itemId: string, detail: string) =>
     createDiagnostic(
       "CUTHOL-G786",
@@ -2584,7 +2614,7 @@ export const DIAGNOSTICS = {
       cueIds[0],
       cueIds
     ),
-  // [kz2 G780–G781] browser launch failures (non-default home): launch names
+  // [G780–G781] browser launch failures (non-default home): launch names
   // browser path, profile folder and the browser's own error with a fitting fix.
   BROWSER_LAUNCH_FAILED: (cueId: string, reason: string) =>
     createDiagnostic(
@@ -2745,7 +2775,7 @@ export const DIAGNOSTICS = {
 
   // --- end of provider block ---
 
-  // [a1 G760–G764] speech provider notes
+  // [G760–G764] speech provider notes
   DEEPGRAM_AUTO_ENGLISH_NO_FILLERS: () =>
     createDiagnostic(
       "CUTHOL-G760",
@@ -2819,7 +2849,7 @@ export const DIAGNOSTICS = {
     );
   },
 
-  // [mcp-reload G635–G639]       MCP server noticing a newer Cuthol build on disk
+  // [G635–G639]       MCP server noticing a newer Cuthol build on disk
   MCP_RELOADED_NEWER_BUILD: (from: string, to: string) =>
     createDiagnostic(
       "CUTHOL-G635",
@@ -2876,8 +2906,8 @@ export const DIAGNOSTICS = {
       `Composition '${cueId}' declares ${compSize} but the stage is ${stageSize}; the composition HTML is not rewritten, so the picture is scaled to fit.`,
       `Resize the composition or match the stage ('cuthol workspace stage --size ${stageSize}'); rule: 'cuthol explain G154'.`
     ),
-  // [canvas G150–G159]           free stage size, size suggestion from sources, stage resize and rescale
-  // [tempo G160–G169]            sequence tempo (stage.tempo): validation, render/monitor/export mapping
+  // [G150–G159]           free stage size, size suggestion from sources, stage resize and rescale
+  // [G160–G169]            sequence tempo (stage.tempo): validation, render/monitor/export mapping
   INVALID_TEMPO: (raw: string) =>
     createDiagnostic(
       "CUTHOL-G160",
@@ -2886,7 +2916,7 @@ export const DIAGNOSTICS = {
       `Invalid tempo '${raw}': sequence rate must be 0.5..2.0 (1 = realtime; applied at render/monitor/export, absent = 1).`,
       `Run 'cuthol workspace tempo --rate 1.1' with a rate in 0.5..2.0, or '--rate 1' to clear it; rule: 'cuthol explain G160'.`
     ),
-  // [u1 G750–G754]               spine-join audio fade setting (stage.audio_join_fade_ms)
+  // [G750–G754]               spine-join audio fade setting (stage.audio_join_fade_ms)
   INVALID_AUDIO_JOIN_FADE: (raw: string) =>
     createDiagnostic(
       "CUTHOL-G750",
@@ -2895,7 +2925,7 @@ export const DIAGNOSTICS = {
       `Invalid audio join fade '${raw}': fade length must be 0..100 ms (0 turns the join fades off; absent = 10 ms).`,
       `Run 'cuthol workspace audio-fade --ms 10' with a value in 0..100, or '--ms 0' to turn the join fades off; rule: 'cuthol explain G750'.`
     ),
-  // [multi-notes G690–G699]      Live notes across frames, scene boundaries, scene ranges
+  // [G690–G699]      Live notes across frames, scene boundaries, scene ranges
   LIVE_MULTI_NOTES_QUEUED: (id: string, cells: number, frames: number) =>
     createDiagnostic(
       "CUTHOL-G690",
@@ -2913,8 +2943,8 @@ export const DIAGNOSTICS = {
       "Open the sheet for the kept cells; read the remaining pins from the note lines; rule: 'cuthol explain G691'."
     ),
 
-  // [p2mo:W0 G280–G282] motion layers on placement: resolver, `motion` kind, pixel-stage predicate
-  // [p2mo:A G283-G287] layer combination and expressions
+  // [G280–G282] motion layers on placement: resolver, `motion` kind, pixel-stage predicate
+  // [G283-G287] layer combination and expressions
   PLACEMENT_EXPR_TOO_COMPLEX: (points: number, cap: number) =>
     createDiagnostic(
       "CUTHOL-G283",
@@ -2923,7 +2953,7 @@ export const DIAGNOSTICS = {
       `Placement envelope with ${points} points exceeds the ffmpeg expression budget (cap ${cap} points); the combined graph would fail in ffmpeg, so the render stops.`,
       `Split the envelope into fewer than ${cap} points or shorter clips before rendering; rule: 'cuthol explain G283'.`
     ),
-  // [p2mo:B G288–G291] motion surface and verify
+  // [G288–G291] motion surface and verify
   MOTION_OPACITY_CLAMPED: (item: string, range: string, layers: string) =>
     createDiagnostic(
       "CUTHOL-G288",
@@ -2940,9 +2970,9 @@ export const DIAGNOSTICS = {
       `Item '${item}' channel ${channel} combined range ${range} crosses or touches 0 via layers ${layers}; a zero scale collapses the item to nothing (gate G4 motion check).`,
       `Keep the combined scale away from 0 ('cuthol spine envelope --clip ${item} --param ${channel} --points <...>'); rule: 'cuthol explain G289'.`
     ),
-  // [p2mo:C G292–G293] live window
-  // [p2mo:D G294–G297] moving text
-  // [shader:W0 G700–G704] fx pre-pass split: a spine clip chain cut at an fx entry runs its prefix as a separate ffmpeg pass
+  // [G292–G293] live window
+  // [G294–G297] moving text
+  // [G700–G704] fx pre-pass split: a spine clip chain cut at an fx entry runs its prefix as a separate ffmpeg pass
   FX_PREPASS_FAILED: (id: string, detail: string) =>
     createDiagnostic(
       "CUTHOL-G700",
@@ -2983,7 +3013,7 @@ export const DIAGNOSTICS = {
       `Fx pre-pass '${id}' could not take the lock for '${outPath}' and the file never completed.`,
       "Re-run the render; check for a stale '.lock' file next to the intermediate if it keeps failing."
     ),
-  // [shader:E1A G705–G719] shader clip effects (GLSL) on spine clips, rendered through the pre-pass
+  // [G705–G719] shader clip effects (GLSL) on spine clips, rendered through the pre-pass
   SHADER_CHECK_DEFERRED: (kind: string) =>
     createDiagnostic(
       "CUTHOL-G705",
@@ -3057,8 +3087,8 @@ export const DIAGNOSTICS = {
       `Shader '${file}' was not compiled in a browser yet (no cached result for its content hash), so only the static scan ran (gate G4 needs the browser compile for the full check).`,
       "Run 'cuthol extension enable --name <name>' for its extension to compile it, then re-run this command; rule: 'cuthol explain G711'."
     ),
-  // [fix:A G530–G534] render output
-  // [fix:B G692–G696] live server (reserved; B1 needs no new diagnostic: failures keep the G612 contract)
+  // [G530–G534] render output
+  // [G692–G696] live server (reserved; B1 needs no new diagnostic: failures keep the G612 contract)
   LIVE_NOTE_COORDS_PIN_SCOPED: (frame: number, kept: number, total: number) =>
     createDiagnostic(
       "CUTHOL-G692",
@@ -3075,14 +3105,14 @@ export const DIAGNOSTICS = {
       `Pin measurement for frame ${frame} found nothing in the covering compositions in this run, so the remaining compositions were measured too.`,
       "No action needed; the element answer matches the whole-frame measurement; rule: 'cuthol explain G693'."
     ),
-  // [fix:C G642–G646] live window
-  // [fix:D G250–G254] ingest, brief, scaffold
-  // [b040:A G255–G256] placement readers
-  // [b040:B G257–G259] fx chain checks
-  // [b040:C G260–G261] motion blur across segments
-  // [b040:D G262–G263] composition transparency staging
+  // [G642–G646] live window
+  // [G250–G254] ingest, brief, scaffold
+  // [G255–G256] placement readers
+  // [G257–G259] fx chain checks
+  // [G260–G261] motion blur across segments
+  // [G262–G263] composition transparency staging
 
-  // [k79w2:K G720–G724] small fixes: speech test isolation, faster first verify, empty composition warning
+  // [G720–G724] small fixes: speech test isolation, faster first verify, empty composition warning
   EMPTY_COMPOSITION_RENDER: (cueId: string) =>
     createDiagnostic(
       "CUTHOL-G720",
@@ -3156,7 +3186,7 @@ export const DIAGNOSTICS = {
       `Script probe ran ${count} composition jobs with shared-browser concurrency.`,
       "No action needed."
     ),
-  // [live-shader:E1BL G730–G734]
+  // [G730–G734]
   LIVE_SHADER_UNKNOWN_ITEM: (item: string) =>
     createDiagnostic(
       "CUTHOL-G730",
@@ -3205,7 +3235,7 @@ export const DIAGNOSTICS = {
 
   // ---------------------------------------------------------------------------------------------------
 
-  // [ed G380–G389] silent-edit guards: orphan fx envelopes, empty splits, transcript-less captions.
+  // [G380–G389] silent-edit guards: orphan fx envelopes, empty splits, transcript-less captions.
   ENVELOPE_FX_ORPHAN: (ownerId: string, parameter: string, fxId: string, fxIds: string[]) =>
     createDiagnostic(
       "CUTHOL-G380",
@@ -3273,7 +3303,7 @@ export const DIAGNOSTICS = {
 
   // ---------------------------------------------------------------------------------------------------
 
-  // [u3 G740–G749] cleanup join-edge loudness: `speech verify-cleanup` summary and `verify` INFO
+  // [G740–G749] cleanup join-edge loudness: `speech verify-cleanup` summary and `verify` INFO
   JOIN_EDGE_SUMMARY: (summaryLine: string) =>
     createDiagnostic(
       "CUTHOL-G740",
@@ -3370,6 +3400,26 @@ export function createSubprocessFailureDiagnostic(options: {
   const commandLength = estimateCommandLineLength(executable, args);
   const limitChars = getPlatformCommandLineLimit();
   const singleArgMax = args.reduce((max, a) => (a.length > max ? a.length : max), 0);
+  // The subprocess produced frames and then died (killed or crashed): the input
+  // was readable and the tool was on PATH, so the corrupt-input/PATH hint would
+  // mislead. Name the last frame instead and point at re-running.
+  const progressedMatch = /frame=(\d+)/.exec(options.proc.lastProgress ?? "");
+  const progressedFrames = progressedMatch ? Number(progressedMatch[1]) : 0;
+  if (progressedFrames > 0 && !options.proc.stalled) {
+    const endedStatusInfo =
+      options.proc.status !== null && options.proc.status !== undefined
+        ? `exit_code=${options.proc.status}`
+        : options.proc.signal
+          ? `signal=${options.proc.signal}`
+          : "status=null";
+    return createDiagnostic(
+      "CUTHOL-SYS04",
+      "SYS",
+      "ERROR",
+      `'${options.tool}' subprocess ended after frame ${progressedFrames} (${endedStatusInfo}); the output file is incomplete.`,
+      `Re-run the same render; a repeat stall is reported as CUTHOL-SUBPROCESS_STALLED with the last progress.`
+    );
+  }
   const err = options.proc.error as NodeJS.ErrnoException | undefined;
   const errCode = err?.code ?? "";
 

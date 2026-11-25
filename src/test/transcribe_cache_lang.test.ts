@@ -28,6 +28,7 @@ import { appendSpineClip } from "../sequence/spine.js";
 import { generateSequenceCaptions } from "../speech/captions.js";
 import { cleanupClipDialogue } from "../speech/cleanup.js";
 import { TranscriptDocument } from "../speech/providers.js";
+import { LOCAL_ASR_ENGINE_REVISION } from "../speech/local_engine.js";
 import { loadCachedTranscriptForAsset, localAsrCachePrefix, transcribeLibraryAsset } from "../speech/transcribe.js";
 import { fakeLocalSpeechInstall } from "./fixtures.js";
 
@@ -292,8 +293,8 @@ test("stale whole-file local record is re-transcribed once with the current engi
   });
   assert.equal(res.cached, false);
   assert.ok(res.transcript.text.includes("hello"));
-  assert.equal(res.transcript.engineRev, "v6");
-  assert.ok(readKey(wsDir, "vid_01", "local@v6:en")?.text.includes("hello"));
+  assert.equal(res.transcript.engineRev, LOCAL_ASR_ENGINE_REVISION);
+  assert.ok(readKey(wsDir, "vid_01", `${localAsrCachePrefix()}:en`)?.text.includes("hello"));
 
   const again = await transcribeLibraryAsset({
     workspaceDir: wsDir,
