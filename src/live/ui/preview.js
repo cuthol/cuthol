@@ -7,6 +7,7 @@
 // effects) raises the "Approximate" badge with an "Exact frame" button.
 import { DEFAULT_SHORTCUTS, loadShortcuts, matchShortcut, resolveShortcuts } from "./shortcuts.js";
 import { createGrader } from "./color.js";
+import { createShaderFx } from "./shader_fx.js";
 
 const SPEEDS = [1, 2, 0.5];
 const PROXY_POLL_MS = 2500;
@@ -536,17 +537,37 @@ export function mount(root, ctx) {
     if ((el.tagName === "VIDEO" || el.tagName === "IMG") && el.style.objectFit !== fit) el.style.objectFit = fit;
   }
 
-  function needsApprox(item) {
+  // Items whose only non-motion fx are Live-shown shaders are not approximate
+  // (shaderCovered, filled by maybeShade); everything else keeps today's badge.
+  const shaderCovered = new Set();
+  function nonShaderApprox(item) {
     if (!item) return false;
     const g = item.treatments?.color_grade;
     if (g && (g.brightness !== 0 || g.contrast !== 1 || g.saturation !== 1 || g.temperature_k !== 6500 || g.lut_uri)) return true;
     const t = item.treatments;
     if (t && (t.cutout?.mode !== undefined && t.cutout.mode !== "none" || t.mask || t.motion_blur?.enabled || t.reframe?.enabled)) return true;
-    if (Array.isArray(item.fx) && item.fx.some((e) => e && e.kind !== "motion")) return true;
     const tr = item.transition_out;
     if (tr && typeof tr.kind === "object") return true;
     if (tr && typeof tr.kind === "string" && !["dissolve", "fade"].includes(tr.kind)) return true;
     return false;
+  }
+  function fxApprox(item) {
+    if (!Array.isArray(item?.fx) || !item.fx.some((e) => e && e.kind !== "motion" && e.enabled !== false)) return false;
+    if (shaderCovered.has(item.id)) {
+      // A shader running after an unshown ffmpeg fx still shows an approximation.
+      return item.fx.some((e) => e && e.enabled !== false && e.kind !== "motion" && !(typeof e.kind === "string" && e.kind.startsWith("ext:")));
+    }
+    return true;
+  }
+  function needsApprox(item) {
+    if (!item) return false;
+    return nonShaderApprox(item) || fxApprox(item);
+  }
+  function needsExactButton(item) {
+    // The Exact-frame button stays available for Live-shown shader items.
+    if (!item) return false;
+    if (nonShaderApprox(item)) return true;
+    return Array.isArray(item.fx) && item.fx.some((e) => e && e.kind !== "motion" && e.enabled !== false);
   }
 
   // -- spine rendering --------------------------------------------------------
@@ -1172,13 +1193,18 @@ export function mount(root, ctx) {
     const cap = renderCaptions(t);
     renderCueAudio(t);
     const approx = layers.some((l) => needsApprox(l.clip)) || comps.some((c) => needsApprox(c.cue)) || needsApprox(cap);
+    const exactable = approx || layers.some((l) => needsExactButton(l.clip));
     badge.hidden = !approx;
-    exactBtn.hidden = !approx;
+    exactBtn.hidden = !exactable;
     timeLabel.textContent = `${formatTC(t, fps)} / ${formatTC(durationMs, fps)}`;
     lastT = t;
   }
 
   // -- transport -------------------------------------------------------------------------
+  // While playing, the window may make no server request for seconds (buffered
+  // media), which idle pre-production would read as idle: re-post the advancing
+  // playhead so playback keeps holding the gate. Cleared on every pause path.
+  let playheadBeat = null;
   function setPlaying(v) {
     v = !!v && !!seq && durationMs > 0;
     if (v && nowMs() >= durationMs - 1) {
@@ -1191,9 +1217,31 @@ export function mount(root, ctx) {
       anchorT = clamp(store.state.playheadMs ?? 0, 0, durationMs);
       anchorPerf = performance.now();
       store.set({ playheadMs: anchorT, playing: true }, "playhead");
+      try {
+        if (playheadBeat) clearInterval(playheadBeat);
+        playheadBeat = setInterval(() => {
+          try {
+            const p = api.post("/api/playhead", { ms: Math.round(nowMs()) });
+            if (p && typeof p.catch === "function") p.catch(() => {});
+          } catch {
+            // playhead hint is best-effort
+          }
+        }, 3000);
+      } catch {
+        // playhead hint is best-effort
+      }
     } else if (store.state.playing) {
       const t = nowMs();
       store.set({ playheadMs: t, playing: false }, "playhead");
+      // Pausing settles the playhead: tell the server for idle pre-production.
+      try {
+        if (playheadBeat) clearInterval(playheadBeat);
+        playheadBeat = null;
+        const p = api.post("/api/playhead", { ms: Math.round(t) });
+        if (p && typeof p.catch === "function") p.catch(() => {});
+      } catch {
+        // playhead hint is best-effort
+      }
     }
     btns.play.innerHTML = store.state.playing ? ICONS.pause : ICONS.play;
   }
@@ -1414,6 +1462,94 @@ export function mount(root, ctx) {
   const grader = createGrader(ctx);
   ctx.colorGrade = grader;
   window.__cutholGrade = grader;
+  const shaderFx = createShaderFx(ctx);
+  window.__cutholShaderFx = shaderFx;
+  let shadeTimer = 0;
+  let lastShadeKey = "";
+  // Mirrors maybeGrade's slot handling: the shaded picture belongs only to the
+  // visible slot's clip; when the visible slot has no shader fx the shader
+  // canvas is removed so it never paints over the other slot's clip.
+  // The shaded picture belongs only to its own clip's slot: inside a dissolve
+  // the outgoing (held) layer keeps its shading on its own slot, like the
+  // grade canvas stays on its own slot, while other slots play unshaded.
+  function shadePick(t) {
+    const layers = spineLayers(t);
+    for (const layer of layers) {
+      const fxList = (layer.clip?.fx ?? []).filter((e) => e && e.kind !== "motion" && e.enabled !== false);
+      if (!fxList.length) continue;
+      const wantKey = `${layer.clip.id}@${srcForAsset(layer.clip.asset_handle)}`;
+      const slot = slots.find((s) => s.key === wantKey && s.el.style.visibility !== "hidden" && s.el.readyState >= 2)
+        ?? slots.find((s) => s.key === wantKey);
+      if (!slot) continue;
+      return { layer, clip: layer.clip, fxList, slot };
+    }
+    return null;
+  }
+  async function maybeShade() {
+    if (shadeTimer) return;
+    shadeTimer = setTimeout(async () => {
+      shadeTimer = 0;
+      const t = nowMs();
+      const pick = shadePick(t);
+      const vis = pick?.slot ?? slots.find((s) => s.el.style.visibility !== "hidden") ?? slots[0];
+      const clip = pick?.clip ?? null;
+      const fxList = pick?.fxList ?? [];
+      const fxIds = fxList.map((e) => e.id).join(",");
+      if (!clip || !vis || !fxIds) {
+        if (lastShadeKey !== "") { shaderFx.stop(); shaderCovered.clear(); lastShadeKey = ""; }
+        return;
+      }
+      const layer = pick.layer;
+      // Refresh every tick: the grader attaches on its own timer, so the
+      // grade source may appear after the shader key was first set.
+      try {
+        const pl = clip.placement ?? {};
+        const cr = pl.crop ?? {};
+        shaderFx.setGeometry({
+          crop: [((cr.left_pct ?? 0) / 100), ((cr.top_pct ?? 0) / 100), ((cr.right_pct ?? 0) / 100), ((cr.bottom_pct ?? 0) / 100)],
+          fit: pl.fit_mode === "contain" ? 1 : (pl.fit_mode === "fill" || pl.fit_mode === "stretch" ? 2 : 0),
+          mirror: [pl.mirror_x ? -1 : 1, pl.mirror_y ? -1 : 1],
+          aspect: (typeof stageW === "number" && typeof stageH === "number" && stageH > 0) ? stageW / stageH : 16 / 9,
+        });
+        shaderFx.setGradeSource(grader.state.item === clip.id && grader.state.video === vis.el ? grader.state.canvas : null);
+      } catch {}
+      const key = `${clip.id}|${fxIds}|r${store.state.revision ?? 0}`;
+      // A held dissolve layer is frozen at its end frame, like the monitor.
+      const frozenSec = layer.hold ? layer.localMs / 1000 : null;
+      const timeNow = () => frozenSec ?? (nowMs() - clip.timeline_in_ms) / 1000;
+      // A paused seek keeps the same key but a new local time: redraw once.
+      if (key === lastShadeKey) {
+        if (!store.state.playing && shaderFx.state.video) {
+          try {
+            shaderFx.drawFrame(timeNow(), fps, clip.envelopes ?? []);
+          } catch (e) { console.error("[shader] redraw", e); }
+        }
+        return;
+      }
+      lastShadeKey = key;
+      try {
+        const r = await shaderFx.attach(vis.el, clip.id);
+        if (r && r.shaded) {
+          shaderCovered.add(clip.id);
+          const envs = clip.envelopes ?? [];
+          try { shaderFx.drawFrame(timeNow(), fps, envs); } catch (e) { console.error("[shader] draw", e); }
+          shaderFx.loop(timeNow, () => fps, () => (clipAt(nowMs())?.clip?.envelopes ?? []));
+        }
+        else { shaderCovered.delete(clip.id); }
+        if (r && r.error) {
+          badge.hidden = false;
+          badge.textContent = `Approximate — shader ${r.error.fx}: ${String(r.error.detail).slice(0, 160)} [CUTHOL-G732]`;
+        }
+      } catch (e) { console.error("[shader] attach", e); }
+      // The badge depends on shaderCovered / the error notice above, both
+      // set here after render() already ran: refresh it on the same frame.
+      lastT = -1;
+      try { render(nowMs(), false); } catch (e) { console.error("[shader] badge render", e); }
+    }, 150);
+  }
+  store.on("delta", maybeShade);
+  store.on("playhead", maybeShade);
+  store.on("state", maybeShade);
   const gradeBtn = btns.grade ?? root.querySelector('[data-act="grade"]');
   function colorItemAt(t) {
     if (!seq) return null;

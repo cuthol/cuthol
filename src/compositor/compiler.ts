@@ -38,6 +38,42 @@ export function presetPixFormatFilter(preset: RenderPreset): string {
   return isAlphaPreset(preset) ? BT709_TO_YUVA420P : BT709_TO_YUV420P;
 }
 
+/**
+ * One pre-pass job: the prefix of a spine clip chain (source input through the
+ * fx-stage cut) rendered once to an intermediate file the main graph reads
+ * back. The intermediate keeps the prefix's own pixel format; no conversion
+ * is added, so the split is lossless.
+ *
+ * A job without `kind` is the original ffmpeg pre-pass. A shader cut adds
+ * `kind: "shader"` with the ordered steps the shader worker runs between the
+ * prefix decode and the intermediate encode. The field stays absent for
+ * ffmpeg jobs so plans without shader effects stay byte-identical.
+ */
+export interface PrePassJob {
+  id: string;
+  inputArgs: string[];
+  filterComplex: string;
+  outPath: string;
+  pixFmt: string;
+  kind?: "shader";
+  shader?: ShaderPrePassSpec;
+}
+
+/**
+ * What the shader worker runs for one pre-pass: the prefix (an ffmpeg graph
+ * over the clip's source input, ending in `format=rgba` / `rgba64le`) decoded
+ * to raw frames, then the ordered steps (shader passes and ffmpeg steps), then
+ * an FFV1 encode of the results. Uniform values are evaluated per frame at
+ * the item-local time (`frame n` → `n/fps` seconds).
+ */
+export interface ShaderPrePassSpec {
+  steps: import("./compile_fx_stage.js").FxShaderRunStep[];
+  /** Frames per second of the render (per-frame time base). */
+  fps: number;
+  /** Intermediate pixel format (`rgba` or `rgba64le`). */
+  pixFmt: "rgba" | "rgba64le";
+}
+
 export interface CompiledRenderPlan {
   inputArgs: string[];
   filterComplex: string;
@@ -51,6 +87,34 @@ export interface CompiledRenderPlan {
   assFilePaths: string[];
   hyperframesBlobs: string[];
   directVideoBlobPath?: string | null;
+  /** Present only when the compile cut at least one spine clip chain. */
+  prePasses?: PrePassJob[];
+}
+
+/**
+ * Internal trigger for the fx-stage pre-pass split (test-only, never user
+ * facing: no CLI flag, no MCP parameter, no documented variable). `clip` is a
+ * spine clip id or `*` for every spine clip with pixel fx entries;
+ * `afterEntry` counts pixel entries before the cut (`0` = before the first).
+ */
+export interface ForceFxSplit {
+  clip?: string;
+  afterEntry: number;
+}
+
+/**
+ * Reads the internal pre-pass trigger in one place. An explicit compile
+ * option wins; otherwise `CUTHOL_FORCE_FX_SPLIT=<clip|*>:<k>` (same shape as
+ * `CUTHOL_RENDER_SEGMENT_MAX_CLIPS`). Returns null when no cut is forced.
+ */
+export function resolveForceFxSplit(options?: CompileSequenceOptions): ForceFxSplit | null {
+  if (options?.forceFxSplit) return options.forceFxSplit;
+  const raw = (process.env.CUTHOL_FORCE_FX_SPLIT ?? "").trim();
+  if (!raw) return null;
+  const m = /^([^:]*):(\d+)$/.exec(raw);
+  if (!m) return null;
+  const clip = m[1] === "" || m[1] === "*" ? undefined : m[1];
+  return { clip, afterEntry: Number(m[2]) };
 }
 
 export interface CompileSequenceOptions {
@@ -62,6 +126,8 @@ export interface CompileSequenceOptions {
   workers?: number;
   useGpu?: boolean;
   includeAudio?: boolean;
+  /** Internal pre-pass trigger (see `ForceFxSplit`); test-only. */
+  forceFxSplit?: ForceFxSplit;
 }
 
 export interface DrawnVisualLayer {
@@ -102,6 +168,10 @@ export interface VideoGraphCompileContext {
   winEndPadSec: string;
   currentVideoPad: string;
   vStepCounter: number;
+  /** Resolved pre-pass trigger (null without a cut); read from env in one place. */
+  forceFxSplit: ForceFxSplit | null;
+  /** Pre-pass jobs emitted by spine compiles that cut a chain. */
+  prePasses: PrePassJob[];
 }
 
 function ensureSequenceVideoProbes(seq: CutholSequence, paths: WorkspacePaths): void {
@@ -209,6 +279,8 @@ function initVideoGraphCompileContext(
     winEndPadSec,
     currentVideoPad: "",
     vStepCounter: 0,
+    forceFxSplit: resolveForceFxSplit(compileOptions),
+    prePasses: [],
   };
 
   const alpha = isAlphaPreset(preset);
@@ -369,5 +441,6 @@ export function compileSequenceRenderPlan(
     assFilePaths: ctx.assFilePaths,
     hyperframesBlobs: ctx.hyperframesBlobs,
     directVideoBlobPath,
+    ...(ctx.prePasses.length > 0 ? { prePasses: ctx.prePasses } : null),
   };
 }

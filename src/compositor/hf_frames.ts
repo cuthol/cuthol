@@ -866,27 +866,276 @@ export interface MeasuredAlphaBboxPct {
  * or ProRes 4444 .mov video and writes <absCompDir>/assets/cuthol-bbox.json so measureCuePixelBox
  * places the monitor/verification bounding box around the real custom graphic instead of guessing.
  */
-export function recordCompositionAlphaBboxSidecar(
-  absCompDir: string,
-  mediaPath: string,
-  atSec?: number
-): MeasuredAlphaBboxPct | null {
+function readAlphaSidecarRaw(absCompDir: string): Record<string, unknown> | null {
   try {
-    if (!fs.existsSync(mediaPath)) return null;
-    let effectiveMediaPath = mediaPath;
+    const bboxPath = path.join(path.resolve(absCompDir), "assets/cuthol-bbox.json");
+    if (!fs.existsSync(bboxPath)) return null;
+    const raw = JSON.parse(fs.readFileSync(bboxPath, "utf8")) as Record<string, unknown>;
+    return raw && typeof raw === "object" ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+export interface AlphaEmptyRanges {
+  emptyRanges: Array<[number, number]>;
+  allEmpty: boolean;
+  frameCount: number;
+}
+
+function mergeEmptyFlagsToRanges(flags: boolean[], fps: number, durationSec: number): Array<[number, number]> {
+  const ranges: Array<[number, number]> = [];
+  let start = -1;
+  for (let i = 0; i < flags.length; i++) {
+    if (flags[i] && start < 0) start = i;
+    if (!flags[i] && start >= 0) {
+      ranges.push([
+        Number((start / fps).toFixed(3)),
+        Number(Math.min(durationSec, (i) / fps).toFixed(3)),
+      ]);
+      start = -1;
+    }
+  }
+  if (start >= 0) {
+    ranges.push([Number((start / fps).toFixed(3)), Number(durationSec.toFixed(3))]);
+  }
+  return ranges;
+}
+
+/**
+ * One ffmpeg pass over every frame of a transparent capture at 64x36,
+ * returning per-frame emptiness (max alpha <= 12) merged into cue-local
+ * second ranges. `empty: true` only when all frames are empty.
+ */
+export function probeEveryFrameAlphaEmpty(
+  mediaPath: string,
+  fps: number,
+  durationSec: number
+): AlphaEmptyRanges | null {
+  try {
+    const safeFps = Math.max(1, fps);
+    const safeDur = Math.max(0.1, durationSec);
+    const probeW = 64;
+    const probeH = 36;
+    const args: string[] = ["-v", "error"];
     if (isPngSequenceBlobDir(mediaPath)) {
       const info = inspectPngSequenceDir(mediaPath);
       if (!info.valid || info.frameCount <= 0) return null;
-      const midIdx = Math.floor(info.frameCount / 2);
-      const midPng = resolveFramePngInPngSequenceDir(mediaPath, midIdx);
-      if (!midPng) return null;
-      effectiveMediaPath = midPng;
+      args.push(
+        "-framerate", String(safeFps),
+        "-start_number", "1",
+        "-i", path.join(path.resolve(mediaPath), "frame_%06d.png")
+      );
+    } else {
+      if (!fs.existsSync(mediaPath)) return null;
+      args.push("-i", mediaPath);
     }
+    args.push(
+      "-vf", `scale=${probeW}:${probeH}:flags=neighbor,format=rgba`,
+      "-frames:v", "1000000",
+      "-f", "rawvideo",
+      "-pix_fmt", "rgba",
+      "pipe:1"
+    );
+    const proc = spawnWatchedSync("ffmpeg", args, {
+      maxBuffer: 1024 * 1024 * 256,
+      step: "ffmpeg alpha every-frame",
+    });
+    const buf = proc.stdout as Buffer;
+    if (proc.status !== 0 || !buf || buf.length < probeW * probeH * 4) return null;
+    const frameBytes = probeW * probeH * 4;
+    const frameCount = Math.floor(buf.length / frameBytes);
+    if (frameCount <= 0) return null;
+    const flags: boolean[] = [];
+    for (let f = 0; f < frameCount; f++) {
+      let maxA = 0;
+      const base = f * frameBytes;
+      for (let i = 3; i < frameBytes; i += 4) {
+        const a = buf[base + i];
+        if (a > maxA) {
+          maxA = a;
+          if (maxA > 12) break;
+        }
+      }
+      flags.push(maxA <= 12);
+    }
+    const allEmpty = flags.every(Boolean);
+    return {
+      emptyRanges: allEmpty ? [[0, Number(safeDur.toFixed(3))]] : mergeEmptyFlagsToRanges(flags, safeFps, safeDur),
+      allEmpty,
+      frameCount,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeEmptyAlphaSidecar(absCompDir: string): void {
+  try {
+    // A single-frame probe must never clobber the authoritative 5-sample
+    // sidecar (or a drawn bbox) with "empty": one empty instant does not mean
+    // the cue draws nothing.
+    const existing = readAlphaSidecarRaw(absCompDir);
+    if (existing && (existing.left_pct !== undefined || Array.isArray(existing.samples))) return;
+    const bboxPath = path.join(path.resolve(absCompDir), "assets/cuthol-bbox.json");
+    fs.mkdirSync(path.dirname(bboxPath), { recursive: true });
+    fs.writeFileSync(bboxPath, JSON.stringify({ empty: true }, null, 2), "utf8");
+  } catch {
+    // ignore sidecar write failure
+  }
+}
+
+function probeSinglePngAlphaBbox(pngPath: string, probeW: number, probeH: number): MeasuredAlphaBboxPct | null {
+  try {
+    const proc = spawnWatchedSync("ffmpeg", [
+      "-v", "error",
+      "-i", pngPath,
+      "-vf",
+      `scale=${probeW}:${probeH}:flags=neighbor:in_color_matrix=bt709:out_color_matrix=bt709,format=rgba`,
+      "-frames:v", "1",
+      "-f", "rawvideo",
+      "-pix_fmt", "rgba",
+      "pipe:1",
+    ], {
+      maxBuffer: probeW * probeH * 4 + 65536,
+      step: "ffmpeg alpha bbox",
+    });
+    const buf = proc.stdout as Buffer;
+    if (proc.status !== 0 || !buf || buf.length < probeW * probeH * 4) return null;
+    let minX = probeW;
+    let minY = probeH;
+    let maxX = -1;
+    let maxY = -1;
+    for (let y = 0; y < probeH; y++) {
+      for (let x = 0; x < probeW; x++) {
+        if (buf[(y * probeW + x) * 4 + 3] > 12) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+        }
+      }
+    }
+    if (maxX < minX || maxY < minY) return null;
+    return {
+      left_pct: Number((minX / probeW).toFixed(4)),
+      top_pct: Number((minY / probeH).toFixed(4)),
+      right_pct: Number(((maxX + 1) / probeW).toFixed(4)),
+      bottom_pct: Number(((maxY + 1) / probeH).toFixed(4)),
+      width_pct: Number(((maxX - minX + 1) / probeW).toFixed(4)),
+      height_pct: Number(((maxY - minY + 1) / probeH).toFixed(4)),
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function recordCompositionAlphaBboxSidecar(
+  absCompDir: string,
+  mediaPath: string,
+  atSec?: number,
+  probeCtx?: { fps: number; durationSec: number }
+): MeasuredAlphaBboxPct | null {
+  try {
+    if (!fs.existsSync(mediaPath)) return null;
     const probeW = 320;
     const probeH = 180;
+    // Transparent captures: decide emptiness from every frame in one ffmpeg
+    // pass at 64x36; the box stays the middle frame's box exactly.
+    if (isPngSequenceBlobDir(mediaPath)) {
+      const info = inspectPngSequenceDir(mediaPath);
+      if (!info.valid || info.frameCount <= 0) return null;
+      const n = info.frameCount;
+      const middleIdx = Math.floor(n / 2);
+      const middlePng = resolveFramePngInPngSequenceDir(mediaPath, middleIdx);
+      const middleBox = middlePng ? probeSinglePngAlphaBbox(middlePng, probeW, probeH) : null;
+      if (probeCtx) {
+        const every = probeEveryFrameAlphaEmpty(mediaPath, probeCtx.fps, probeCtx.durationSec);
+        if (!every) return middleBox;
+        const bboxPath = path.join(path.resolve(absCompDir), "assets/cuthol-bbox.json");
+        fs.mkdirSync(path.dirname(bboxPath), { recursive: true });
+        if (every.allEmpty) {
+          fs.writeFileSync(bboxPath, JSON.stringify({ empty: true }, null, 2), "utf8");
+          return null;
+        }
+        // The box stays the middle frame's box exactly; only when
+        // the middle frame itself is empty, use the nearest non-empty frame
+        // so a brief pop is not reported as drawing nothing. `empty: true`
+        // is written only when all frames are empty.
+        let box = middleBox;
+        if (!box) {
+          let bestDist = Infinity;
+          for (let i = 0; i < n; i++) {
+            const png = resolveFramePngInPngSequenceDir(mediaPath, i);
+            if (!png) continue;
+            const b = probeSinglePngAlphaBbox(png, probeW, probeH);
+            if (b && Math.abs(i - middleIdx) < bestDist) {
+              bestDist = Math.abs(i - middleIdx);
+              box = b;
+              if (bestDist === 0) break;
+            }
+          }
+        }
+        if (!box) return middleBox;
+        fs.writeFileSync(
+          bboxPath,
+          JSON.stringify(
+            every.emptyRanges.length > 0 ? { ...box, empty_ranges: every.emptyRanges } : box,
+            null, 2
+          ),
+          "utf8"
+        );
+        return box;
+      }
+      if (!middleBox) {
+        writeEmptyAlphaSidecar(absCompDir);
+        return null;
+      }
+      const bboxPath = path.join(path.resolve(absCompDir), "assets/cuthol-bbox.json");
+      fs.mkdirSync(path.dirname(bboxPath), { recursive: true });
+      const existing = readAlphaSidecarRaw(absCompDir);
+      const extra =
+        existing && Array.isArray((existing as Record<string, unknown>).empty_ranges)
+          ? { empty_ranges: (existing as Record<string, unknown>).empty_ranges }
+          : existing && Array.isArray((existing as Record<string, unknown>).samples) && Array.isArray((existing as Record<string, unknown>).emptyAt)
+            ? { samples: (existing as Record<string, unknown>).samples, emptyAt: (existing as Record<string, unknown>).emptyAt }
+            : {};
+      fs.writeFileSync(bboxPath, JSON.stringify({ ...middleBox, ...extra }, null, 2), "utf8");
+      return middleBox;
+    }
+    let effectiveMediaPath = mediaPath;
+    // Full-capture callers pass probeCtx: decide emptiness from every frame
+    // and measure the box at a drawn instant (middle of the cue, or the
+    // middle of the largest drawn span when the middle itself is empty).
+    let everyForMov: AlphaEmptyRanges | null = null;
+    let boxSecForMov: number | null = null;
+    if (probeCtx && !effectiveMediaPath.endsWith(".png")) {
+      everyForMov = probeEveryFrameAlphaEmpty(effectiveMediaPath, probeCtx.fps, probeCtx.durationSec);
+      if (everyForMov?.allEmpty) {
+        const bboxPath = path.join(path.resolve(absCompDir), "assets/cuthol-bbox.json");
+        fs.mkdirSync(path.dirname(bboxPath), { recursive: true });
+        fs.writeFileSync(bboxPath, JSON.stringify({ empty: true }, null, 2), "utf8");
+        return null;
+      }
+      if (everyForMov) {
+        const mid = probeCtx.durationSec / 2;
+        const inEmpty = everyForMov.emptyRanges.some(([a, b]) => mid >= a && mid < b);
+        if (inEmpty) {
+          let best: [number, number] | null = null;
+          let prev = 0;
+          const bounds = [...everyForMov.emptyRanges].sort((x, y) => x[0] - y[0]);
+          for (const [a, b] of [...bounds, [probeCtx.durationSec, probeCtx.durationSec]] as Array<[number, number]>) {
+            if (a > prev && (!best || a - prev > best[1] - best[0])) best = [prev, a];
+            prev = Math.max(prev, b);
+          }
+          if (best) boxSecForMov = (best[0] + best[1]) / 2;
+        }
+      }
+    }
     const args: string[] = ["-v", "error"];
-    if (atSec !== undefined && atSec > 0 && !effectiveMediaPath.endsWith(".png")) {
-      args.push("-ss", atSec.toFixed(3));
+    const seekSec = boxSecForMov ?? (atSec !== undefined && atSec > 0 ? atSec : null);
+    if (seekSec !== null && seekSec > 0 && !effectiveMediaPath.endsWith(".png")) {
+      args.push("-ss", seekSec.toFixed(3));
     }
     args.push(
       "-i",
@@ -925,7 +1174,15 @@ export function recordCompositionAlphaBboxSidecar(
       }
     }
 
-    if (maxX < minX || maxY < minY) return null;
+    if (maxX < minX || maxY < minY) {
+      if (probeCtx && everyForMov && !everyForMov.allEmpty) {
+        // The probed instant is empty but other frames draw: not an empty
+        // cue. Keep any authoritative sidecar; never write {empty:true}.
+        return null;
+      }
+      writeEmptyAlphaSidecar(absCompDir);
+      return null;
+    }
     const bbox: MeasuredAlphaBboxPct = {
       left_pct: Number((minX / probeW).toFixed(4)),
       top_pct: Number((minY / probeH).toFixed(4)),
@@ -935,9 +1192,29 @@ export function recordCompositionAlphaBboxSidecar(
       height_pct: Number(((maxY - minY + 1) / probeH).toFixed(4)),
     };
 
+    if (probeCtx && !effectiveMediaPath.endsWith(".png")) {
+      const every = everyForMov ?? probeEveryFrameAlphaEmpty(effectiveMediaPath, probeCtx.fps, probeCtx.durationSec);
+      const bboxPath = path.join(path.resolve(absCompDir), "assets/cuthol-bbox.json");
+      fs.mkdirSync(path.dirname(bboxPath), { recursive: true });
+      if (every?.allEmpty) {
+        fs.writeFileSync(bboxPath, JSON.stringify({ empty: true }, null, 2), "utf8");
+        return null;
+      }
+      if (every && every.emptyRanges.length > 0) {
+        fs.writeFileSync(bboxPath, JSON.stringify({ ...bbox, empty_ranges: every.emptyRanges }, null, 2), "utf8");
+        return bbox;
+      }
+    }
     const bboxPath = path.join(path.resolve(absCompDir), "assets/cuthol-bbox.json");
     fs.mkdirSync(path.dirname(bboxPath), { recursive: true });
-    fs.writeFileSync(bboxPath, JSON.stringify(bbox, null, 2), "utf8");
+    const existing = readAlphaSidecarRaw(absCompDir);
+    const extra =
+      existing && Array.isArray(existing.empty_ranges)
+        ? { empty_ranges: existing.empty_ranges }
+        : existing && Array.isArray(existing.samples) && Array.isArray(existing.emptyAt)
+          ? { samples: existing.samples, emptyAt: existing.emptyAt }
+          : {};
+    fs.writeFileSync(bboxPath, JSON.stringify({ ...bbox, ...extra }, null, 2), "utf8");
     return bbox;
   } catch {
     return null;

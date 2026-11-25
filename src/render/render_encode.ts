@@ -15,6 +15,11 @@ import {
   RenderPreset,
 } from "../compositor/compiler.js";
 import {
+  acquireShaderReadLocks,
+  releaseShaderReadLocks,
+  requirePlanPrePasses,
+} from "./pre_pass.js";
+import {
   BT709_COLOR_OUTPUT_ARGS,
   buildAlphaCodecArgs,
   buildVideoCodecArgs,
@@ -44,6 +49,10 @@ import {
 
 export interface PreparedSequenceRender {
   tTotal0: number;
+  /** Shader intermediate files this render's plan(s) referenced. */
+  usedShaderFiles: string[];
+  /** Read-lock releases held until this render's encode ends (released before the cap runs). */
+  shaderReadReleases: Array<() => void>;
   paths: WorkspacePaths;
   sequence: CutholSequence;
   verification: VerificationReport;
@@ -64,11 +73,34 @@ export interface RenderEncodeStageResult {
   compileAndOverlaysMs: number;
   encodeMs: number;
   singleStageUsed: boolean;
+  /** Shader intermediate files this render's plan(s) referenced. */
+  usedShaderFiles: string[];
   renderWidth: number;
   renderHeight: number;
   fps: number;
   activeEncoder: VideoEncoderCodec;
   encoderFallback: RenderEncoderFallback | null;
+}
+
+/** Shader intermediate files a compiled plan references ("used by this render"). */
+function shaderOutPathsOf(plan: CompiledRenderPlan): string[] {
+  return (plan.prePasses ?? [])
+    .filter((job) => job.kind === "shader")
+    .map((job) => job.outPath);
+}
+
+/**
+ * Records a plan's shader files on the render and holds read locks on them
+ * until the encode ends, so a concurrent cap enforcement never deletes a file
+ * this render is about to read. Segment encodes run in this process, so every
+ * segment plan's files are collected here.
+ */
+function trackShaderIntermediates(prep: PreparedSequenceRender, plan: CompiledRenderPlan): void {
+  const files = shaderOutPathsOf(plan);
+  for (const f of files) {
+    if (!prep.usedShaderFiles.includes(f)) prep.usedShaderFiles.push(f);
+  }
+  for (const release of acquireShaderReadLocks(files)) prep.shaderReadReleases.push(release);
 }
 
 let cachedAlphaCodec: AlphaVideoCodec | null = null;
@@ -258,6 +290,8 @@ export function renderSingleSegmentPath(prep: PreparedSequenceRender): RenderEnc
   // NVENC is used for Cuthol's own composite encode only; HyperFrames encodes overlays on the CPU
   // (its GPU encode is not faster here and its rate control cannot be set from outside).
   const plan = compileSequenceRenderPlan(sequence, paths, preset, { workers });
+  requirePlanPrePasses(plan, { cwd: paths.rootDir, step: "ffmpeg pre-pass" }, "render");
+  trackShaderIntermediates(prep, plan);
   const compileAndOverlaysMs = Date.now() - tCompile0 + overlayPrepassMs;
   const renderWidth = plan.renderWidth;
   const renderHeight = plan.renderHeight;
@@ -416,6 +450,7 @@ export function renderSingleSegmentPath(prep: PreparedSequenceRender): RenderEnc
     }
   } finally {
     progressFinish("encode");
+    releaseShaderReadLocks(prep.shaderReadReleases);
     if (fs.existsSync(filterScriptPath)) {
       try {
         fs.unlinkSync(filterScriptPath);
@@ -429,6 +464,7 @@ export function renderSingleSegmentPath(prep: PreparedSequenceRender): RenderEnc
     compileAndOverlaysMs,
     encodeMs,
     singleStageUsed,
+    usedShaderFiles: [...prep.usedShaderFiles],
     renderWidth,
     renderHeight,
     fps,
@@ -849,6 +885,8 @@ export function renderMultiSegmentPath(prep: PreparedSequenceRender): RenderEnco
       includeAudio: false,
       workers,
     });
+    requirePlanPrePasses(segPlan, { cwd: paths.rootDir, step: "ffmpeg pre-pass" }, "render segment");
+    trackShaderIntermediates(prep, segPlan);
     renderWidth = segPlan.renderWidth;
     renderHeight = segPlan.renderHeight;
     fps = segPlan.fps;
@@ -916,6 +954,7 @@ export function renderMultiSegmentPath(prep: PreparedSequenceRender): RenderEnco
     compileAndOverlaysMs,
     encodeMs,
     singleStageUsed: false,
+    usedShaderFiles: [...prep.usedShaderFiles],
     renderWidth,
     renderHeight,
     fps,
@@ -924,5 +963,6 @@ export function renderMultiSegmentPath(prep: PreparedSequenceRender): RenderEnco
   };
   } finally {
     progressFinish("encode");
+    releaseShaderReadLocks(prep.shaderReadReleases);
   }
 }

@@ -349,6 +349,7 @@ test("4. Live Cloud API Integration (ElevenLabs with-timestamps TTS + Deepgram N
     handle: asrTargetAsset.handle,
     provider: "deepgram",
     language: "tr",
+    keyterms: ["Cuthol"],
   });
   assert.equal(asrCached.cached, true);
 

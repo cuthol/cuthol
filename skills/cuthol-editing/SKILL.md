@@ -69,6 +69,7 @@ the media are rejected (G202).
 | `envelope_point_add / _move / _remove(clip, param, at, value?, to?)` | One keyframe at a time (`at` item-local; `sequence_time=true` for timeline time, `beat`+`beats_of` for beat time). Details: `references/effects.md`. |
 | `value(item, param, at, sequence_time?)` | Value of an animated parameter at a time, without rendering. Details: `references/effects.md`. |
 | `grade(…)` / `fx_catalog / fx_add / fx_set / fx_remove / fx_list` | Constant colour grade; effect chain on a spine clip or lane cue (`item=sp_XX|cue_XX`, `ext:<ext>/<fx>` or raw `filter=`). One fx stage for clips and cues: the effect receives the item's own fitted pixels (RGBA after a colour stage, BT.709); `t` is item-local seconds; size is the item's fitted size. `alpha: keep` (default) leaves the alpha plane untouched, `process` runs on it too (blur, shift, distortion). Details: `references/effects.md`. |
+| `fx_preset(item, preset, params?, beats?)` / `fx_preset(item, fx?, reapply, all?)` | Keyframe template anchored to the clip (`ext:<ext>/<name>`; `start`/`end`/percent/beat anchors); `verify` warns when a later trim/speed/split breaks it, `--reapply` regenerates. Details: `references/effects.md` ("Presets"). |
 
 ## Motion layers
 

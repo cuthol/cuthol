@@ -98,6 +98,18 @@ Providers have no `extension run` entry point; they run through
 `speech.providers` (project defaults), and `library.search` / `library.fetch`.
 Use `extension show` to inspect a provider's manifest section and script.
 
+## Write an effect in five steps
+
+1. Write the template: manifest `fx` entry with `video_filter` (`{{param}}`
+   placeholders), `params`, `animatable`, `alpha`.
+2. `cuthol spine fx try --kind ext:<name>/<fx>` — see it in seconds (one PNG
+   grid; `--sweep p=a..b` for rows, `--at t1,t2` for columns).
+3. `cuthol spine fx check --kind ext:<name>/<fx>` — quick card probe.
+4. `cuthol spine fx check --kind ext:<name>/<fx> --full` — delivery check
+   through the real clip chain (card variants, neutral, stacked, envelopes,
+   cost class). Fix every ERROR; explain every WARN.
+5. Use it: `cuthol spine fx add --item <sp_XX> --kind ext:<name>/<fx>`.
+
 ## Reproducibility, secrets, traps
 
 - `extension.enable` pins `{name, version, content_hash, scope, enabled_at}`

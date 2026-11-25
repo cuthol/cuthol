@@ -20,6 +20,7 @@ import {
   applyOutgoingTransitionPosition,
   buildIncomingTransitionFilters,
   buildOutgoingTransitionFilters,
+  extIncomingTransitionScaleFactor,
   incomingTransitionScaleFactor,
   transitionHoldTailMs,
 } from "../compositor/compile_spine_transition.js";
@@ -277,18 +278,19 @@ test("easing shapes extension progress; cubic_bezier rides the shared solver", (
   }
 });
 
-test("scaled entry compiles to a guarded scale+pad and a fade", () => {
+test("scaled entry compiles to a dynamic-scale factor and a fade", () => {
   const { wsDir, tmp } = setupTwoClipProject();
   try {
     const seq = setTransition(wsDir, { kind: "ext:trdemo/olcekli_giris", duration_ms: 400, easing: "linear" });
     const ctx = fakeCtx(seq, wsDir);
     const [sp01, sp02] = seq.spine.clips;
-    const guarded = "if(lt(t,0.400),(0.8+0.2*(min(max((t/0.4),0),1))),1)";
     assert.deepEqual(buildIncomingTransitionFilters(ctx, { clip: sp02, incomingTransition: sp01.transition_out }), [
-      `scale=w='iw*(${guarded})':h='ih*(${guarded})':eval=frame`,
-      "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black@0",
       "fade=t=in:st=0:d=0.400:alpha=1",
     ]);
+    assert.equal(
+      extIncomingTransitionScaleFactor(ctx, sp02, sp01.transition_out),
+      "if(lt(t,0.400),(0.8+0.2*(min(max((t/0.4),0),1))),1)"
+    );
     assert.deepEqual(
       buildOutgoingTransitionFilters(ctx, { i: 0, clip: sp01, hasNextClip: true, outTrans: sp01.transition_out }),
       ["tpad=stop_mode=clone:stop_duration=0.400"]

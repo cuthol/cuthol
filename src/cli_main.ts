@@ -26,7 +26,7 @@ import {
   strFlag,
   numFlag,
 } from "./cli_args.js";
-import { printHelp } from "./cli_help.js";
+import { printHelp, runGuideCommand } from "./cli_help.js";
 import { drainLiveInbox } from "./live/live_inbox.js";
 import {
   activeCliAction,
@@ -157,7 +157,11 @@ export async function runCli(argv: string[] = process.argv.slice(2), invokedPath
       );
       return;
     }
-    printHelp();
+    if (group === "help") {
+      printHelp(action);
+    } else {
+      printHelp(group, action);
+    }
     return;
   }
 
@@ -233,6 +237,9 @@ export async function runCli(argv: string[] = process.argv.slice(2), invokedPath
     case "export":
       if ((await runExportCommand(ctx)) !== CLI_NOT_HANDLED) return;
       break;
+    case "guide":
+      runGuideCommand(workspaceDir, flags);
+      return;
   }
 
   printHelp();

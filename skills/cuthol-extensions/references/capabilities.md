@@ -252,6 +252,15 @@ params={"dir": "left"})`; CLI `cuthol spine transition --clip sp_01 --kind
 ext:myext/push --duration 400ms --param dir=left`). No JS: a transition is
 ffmpeg filter/expression templates with `{{placeholder}}` substitution.
 
+Base composite: underneath the transition's own fields the outgoing clip's
+last frame is held (a `tpad` clone) under the incoming clip for the whole
+window, both at full opacity and at their base overlay positions — so with no
+fields set (or with only `outgoing_filter`, measured: window-mid frame is the
+incoming clip, a hard cut) the transition looks like a cut. Drive a crossfade
+through `outgoing_filter`/`incoming_filter` (fade the held outgoing out and
+the incoming in) and movement through `incoming_x`/`incoming_y` and
+`outgoing_x`/`outgoing_y` (a push) or `incoming_scale` (a zoom).
+
 Fields per transition (all optional except the name): `description`, `params`
 (same schema as processor params), `hold_outgoing` (default `true`; `false` =
 fade-like, outgoing not held under incoming), `outgoing_filter` /
@@ -289,3 +298,23 @@ with `[CUTHOL-G122]` (never a silent dissolve); bad params with `[CUTHOL-G123]`
 audio hard-cuts at the clip boundary exactly as with builtins. An extension
 whose transitions are in use cannot be disabled until those transitions are
 replaced (G122). `extension.show` returns the `transitions` manifest section.
+
+Field → allowed placeholders → notes (all fields also accept the transition's
+own `params`; chain fields run in local clip time `t`, overlay fields in
+sequence time `t`):
+
+| Field | Placeholders | Notes |
+|---|---|---|
+| `outgoing_filter` | `t0`, `dur`, `p` | Per-frame filter chain. `{{p}}` expands with commas, so it must sit inside single quotes (`eq=brightness='0.5*({{p}})'`), the same quoted-`{{p}}` rule as fx templates; unquoted `{{p}}` is `[CUTHOL-G330]` at load. `t1`/`W`/`H`/`x`/`y` are rejected (`[CUTHOL-G112]`): sequence-time values are meaningless in local clip time. Param values holding `,` are rejected (`[CUTHOL-G123]`). |
+| `incoming_filter` | `t0`, `dur`, `p` | Same as `outgoing_filter` (per-frame). |
+| `incoming_scale` | `t0`, `dur`, `p` | Centered scale factor, per-frame. The factor feeds the same dynamic-scale path as the built-in `zoom_in` (folded into the clip's scale and centred in the overlay): the picture really shrinks/grows around its centre, and the chain frame size never changes. A time-varying `scale` filter in the chain would change the frame size mid-stream and crash ffmpeg (measured exit 3221225477 even with a `pad` after it), so chain `scale` is never emitted. |
+| `incoming_x` / `incoming_y` | `t0`, `t1`, `dur`, `p`, `W`, `H`, `x`, `y` | Per-frame overlay expressions. Guard builtin-style: `if(lt(t,{{t1}}),<motion>,{{x}})`. |
+| `outgoing_x` / `outgoing_y` | `t0`, `t1`, `dur`, `p`, `W`, `H`, `x`, `y` | Same as `incoming_x`/`incoming_y`, on the outgoing (held) side. |
+
+Backstop check: every `ext:` transition in the sequence gets one short
+encoder-free render over its own window (`verify`, and at write time in
+`spine transition` for `ext:` kinds, where an `[CUTHOL-G331]` ERROR rejects and
+nothing is written). A non-zero exit — including a crash — is `[CUTHOL-G331]`
+naming the clip, the kind and the field when stderr tells it; a timeout
+(~15 s) or missing ffmpeg is `[CUTHOL-G332]` (WARN). Results cache outside the
+sequence and journal by transition definition hash + duration + ffmpeg version.

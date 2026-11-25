@@ -112,7 +112,20 @@ async function startFixture(): Promise<Fixture> {
         if (routeLiveFrameRequest(dir, req, res, Number(url.searchParams.get("at")))) return;
       }
       const proxy = http.request(
-        { host: "127.0.0.1", port: info.port, path: req.url, method: req.method, headers: { ...req.headers, host: `127.0.0.1:${info.port}` } },
+        // The wrap rewrites Host so the real server accepts the request; the
+        // Origin (port of the wrap) must follow, or the server's POST origin
+        // check would reject window writes (e.g. the playhead hint) with 403.
+        {
+          host: "127.0.0.1",
+          port: info.port,
+          path: req.url,
+          method: req.method,
+          headers: {
+            ...req.headers,
+            host: `127.0.0.1:${info.port}`,
+            ...(req.headers.origin ? { origin: `http://127.0.0.1:${info.port}` } : {}),
+          },
+        },
         (pres) => {
           res.writeHead(pres.statusCode ?? 500, pres.headers);
           pres.pipe(res);

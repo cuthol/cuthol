@@ -175,3 +175,8 @@ and never reused; they may appear in old projects and logs.
 | G154 | G4 WARN | Composition declares data-width/height different from the stage (HTML never rewritten) -> resize the composition or the stage. |
 | G690 | G5 INFO | Multi-scene note packet queued with per-frame contact-sheet cells; the sheet attaches to the stored packet when ready. |
 | G691 | G5 WARN | Contact-sheet cells dropped by the sheet cap; the packet names the dropped count. |
+| G720 | G4 WARN | Transparent overlay capture drew nothing across sampled frames -> check the timeline starts visible, GSAP is loaded and nothing hides the root. |
+| G721 | G4 WARN | Cached empty sidecar with unchanged composition files -> same suggestion as G720. |
+| G722 | G4 WARN | Composition draws nothing at the requested frame time -> check entry time and root visibility. |
+| G723 | G4 WARN | Composition empty in every active sheet tile -> same suggestion as G720. |
+| G724 | SYS INFO | Script probe ran N composition jobs with shared-browser concurrency -> no action. |

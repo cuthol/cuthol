@@ -225,6 +225,24 @@ export const OUTPUT_ACTION_SPECS: ActionSpec[] = [
   },
   {
     tool: "extension",
+    action: "fx_new",
+    argv: ["extension", "fx-new"],
+    summary: "Add an effect skeleton to an extension manifest (clip filter, transition, or motion preset) plus a 'How to try it' README section.",
+    mutates: true,
+    params: [
+      { name: "ext", type: "string", description: "Extension name.", required: true },
+      { name: "name", type: "string", description: "New fx/preset name.", required: true },
+      {
+        name: "role",
+        type: "string",
+        description: "Skeleton role.",
+        enum: ["clip", "transition", "motion"],
+        required: true,
+      },
+    ],
+  },
+  {
+    tool: "extension",
     action: "run",
     argv: ["extension", "run"],
     summary: "Run an extension processor (producing a cached, journaled library asset) or multi-step recipe.",

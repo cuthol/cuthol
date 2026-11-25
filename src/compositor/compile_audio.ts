@@ -108,9 +108,16 @@ function buildRampedSliceFilterParts(options: {
   keepStartMs: number;
   keepDurationMs: number;
 }): string[] {
+  // Container-clock rebase: keep the requested trim start at output 0 and pad
+  // the leading stream-start gap with silence, so output t plays source
+  // (trimStart + t). `aresample=async=1:first_pts=0` backfills the gap when
+  // the stream starts after the file start (e.g. a phone recording whose
+  // audio stream starts 0.176 s after the video)
+  // and is a passthrough otherwise.
   const parts = [
     `atrim=start=${options.trimStartSec}:end=${options.trimEndSec}`,
-    `asetpts=PTS-STARTPTS`,
+    `asetpts=PTS-${options.trimStartSec}/TB`,
+    `aresample=async=1:first_pts=0`,
   ];
   if (options.padHeadMs > 0.0005) {
     parts.push(`adelay=${options.padHeadMs.toFixed(3)}|${options.padHeadMs.toFixed(3)}`);
@@ -245,9 +252,12 @@ function buildSingleAudioTrackFilterChain(options: {
         })()
       : buildAtempoChain(options.effectiveRate);
 
+  // Container-clock rebase (see buildRampedSliceFilterParts): output t plays
+  // source (srcIn + t); the async resample pads a leading stream-start gap.
   const aFilters: string[] = [
     `atrim=start=${options.srcInSec}:end=${options.srcOutSec}`,
-    `asetpts=PTS-STARTPTS`,
+    `asetpts=PTS-${options.srcInSec}/TB`,
+    `aresample=async=1:first_pts=0`,
     ...rateFilters,
   ];
 

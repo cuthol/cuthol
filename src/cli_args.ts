@@ -46,6 +46,7 @@ const BOOLEAN_FLAGS = new Set([
   "remove",
   // [color boolean flags]
   "graded",
+  "enabled",
   "replace",
   // [spine treatment boolean flags]
   "full",
@@ -106,6 +107,8 @@ export const KNOWN_CLI_FLAGS = new Set([
   "expect-rev",
   "allow-protected",
   "name",
+  "ext",
+  "role",
   "file",
   "handle",
   "target-lufs",
@@ -164,6 +167,8 @@ export const KNOWN_CLI_FLAGS = new Set([
   "duration",
   "easing",
   "param",
+  "sweep",
+  "on",
   "points",
   "lane",
   "anchor",
@@ -243,6 +248,9 @@ export const KNOWN_CLI_FLAGS = new Set([
   "value",
   "beat",
   "beats-of",
+  "beats",
+  "reapply",
+  "points-file",
 ]);
 
 function levenshtein(a: string, b: string): number {

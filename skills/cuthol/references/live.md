@@ -66,3 +66,14 @@ dragging previews an unsaved LUT, releasing commits
 `color set --item <id> --patch '<json>' --reason taste`; the edit reaches you
 as a short human-edit line after `live_wait`. A Grade button wipes between
 the graded and ungraded paused frame.
+
+## Shader effects in the window
+
+A spine clip whose only non-motion fx are shader effects (`backend: "shader"`)
+shows the shaded picture in the window: the same `.glsl` runs in the Live
+WebGL2 canvas with the same `uv`/`ratio` and item-local `time`, so no
+"Approximate" badge appears (the Exact-frame button stays for comparison).
+A shader that fails to compile falls back to the unshaded video with a visible
+notice naming the fx and the compile-log line. Clip fx that are not shaders
+stay unshown; if a shader runs after an unshown ffmpeg fx the preview is
+marked approximate.

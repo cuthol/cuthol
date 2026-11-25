@@ -157,6 +157,22 @@ export interface LiveProgress {
   error?: { code: string; message: string; suggestion?: string };
 }
 
+// ---------------------------------------------------------------- playhead + prewarm (window -> server)
+
+/** The window's playhead, posted when playback pauses or a scrub settles. */
+export interface LivePlayhead {
+  schema: typeof LIVE_SCHEMA;
+  /** Playhead position in ms. */
+  ms: number;
+}
+
+/**
+ * Idle pre-production: when Live is idle the server runs the render's overlay
+ * stage over a window around the playhead in a background child, so the next
+ * exact frames hit cached composition overlays. Default on (`live.prewarm`);
+ * the disk cap is `live.prewarm_cap_gb` (default 2 GB, never deletes).
+ */
+
 // ---------------------------------------------------------------- notes (window -> agent)
 
 export interface LiveNoteElement {
@@ -296,6 +312,17 @@ export interface LiveWaveformResponse {
   bins_count: number;
   duration_ms: number;
   peaks: number[];
+}
+
+/** Ordered shader fx entry source of GET /api/live/shader?item=<id>. */
+export interface LiveShaderEntry {
+  id: string;
+  kind: string;
+  file: string;
+  source: string;
+  hash: string;
+  uniforms: string[];
+  params: Record<string, number | boolean | string>;
 }
 
 /** Graded-preview LUT payload of GET /api/color/lut and POST /api/color/preview. */

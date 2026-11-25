@@ -3,13 +3,46 @@
 // an ffmpeg video filter template with `{{param}}` placeholders, applied on the clip in the render graph
 // (compositor/compile_spine_fx.ts). The gate may add keys to ALLOWED_FX_KEYS (closed schema: unknown keys fail).
 import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
+import { fxTemplateQuoteState } from "../compositor/compile_fx_stage.js";
+import { parseShaderFileRef } from "../effects/shader_def.js";
 import { ExtensionParamDef, validateParamsMap } from "./ext_manifest.js";
 
 export interface ExtensionFxSpec {
   description?: string;
   params?: Record<string, ExtensionParamDef>;
-  /** ffmpeg video filter template, e.g. `"gblur=sigma={{sigma}}"`. */
+  /**
+   * ffmpeg video filter template, e.g. `"gblur=sigma={{sigma}}"`. Always set
+   * for backend "ffmpeg"; unset at runtime for backend "shader" (branch on
+   * `backend` first, never read this for a shader entry).
+   */
   video_filter: string;
+  /**
+   * Realisation backend: `"ffmpeg"` (default, `video_filter` template) or
+   * `"shader"` (a `.glsl` file run through the shader pre-pass).
+   */
+  backend?: "ffmpeg" | "shader";
+  /**
+   * GLSL source path for backend "shader", relative to the extension folder
+   * (e.g. `"shaders/blur.glsl"`). Params come from the file's uniforms.
+   */
+  shader?: string;
+  /**
+   * Per-param neutral values, e.g. `{ brightness: 0 }`: setting every param to
+   * its neutral must render (near-)identically to no fx (Y PSNR >= 60 dB).
+   * Declared per param in the manifest (`params.<name>.neutral`).
+   */
+  neutral?: Record<string, number>;
+  /**
+   * True when the effect changes duration or frame count on purpose
+   * (e.g. `tpad`, `fade` with history). The full check does not flag
+   * frame-count changes for these.
+   */
+  temporal?: boolean;
+  /**
+   * Measured per-frame cost class at 1080p: `light` / `medium` / `heavy`.
+   * The full check warns when the manifest value contradicts measurement.
+   */
+  cost_class?: "light" | "medium" | "heavy";
   /**
    * Alpha class of the effect: `keep` (default) leaves the item's alpha plane untouched,
    * `process` runs the effect on the alpha too. Nothing reads it yet.
@@ -22,7 +55,7 @@ export interface ExtensionFxSpec {
   animatable?: string[];
 }
 
-export const ALLOWED_FX_KEYS = new Set(["description", "params", "video_filter", "animatable", "alpha"]);
+export const ALLOWED_FX_KEYS = new Set(["description", "params", "video_filter", "backend", "shader", "animatable", "alpha", "temporal", "cost_class"]);
 
 export const EFFECT_NAME_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 
@@ -181,6 +214,20 @@ export function checkBuiltinFxFilterChain(chain: unknown): string | null {
   return null;
 }
 
+/**
+ * An unterminated single-quoted region in the template is a manifest error naming the fx.
+ * Uses the shared quote-state scanner from `compile_fx_stage` (one rule for render and load).
+ * Measured against ffmpeg (G340): ffmpeg's graph parser also treats `\` as escaping the next
+ * character inside quotes, so `eq=brightness='0.1\':eval=frame` is genuinely unterminated
+ * there too (the `\'` does not close the region; ffmpeg then reads `:eval=frame` into the
+ * expression). The scanner matches that behaviour.
+ */
+function assertFxTemplateQuotesClosedManifest(template: string, extName: string, fxName: string): void {
+  if (fxTemplateQuoteState(template, template.length)) {
+    throw new CutholError(DIAGNOSTICS.FX_TEMPLATE_UNTERMINATED_QUOTE(extName, fxName));
+  }
+}
+
 /** Every `{{name}}` in the template must be a declared param, otherwise compile would emit it raw. */
 function assertFxPlaceholdersDeclared(
   template: string,
@@ -215,6 +262,78 @@ function assertFxTemplateSafe(template: string, extName: string, fxName: string)
   }
 }
 
+/**
+ * Optional per-param `neutral` values live inside the shared param schema, which this
+ * file must not widen (it is shared with processors/planners/recipes). They are pulled
+ * out of the raw param objects here, validated, and returned beside the cleaned params.
+ */
+function extractFxNeutral(
+  rawParams: unknown,
+  extName: string,
+  fxName: string
+): { cleaned: unknown; neutral: Record<string, number> | undefined } {
+  if (!rawParams || typeof rawParams !== "object" || Array.isArray(rawParams)) {
+    return { cleaned: rawParams, neutral: undefined };
+  }
+  const neutral: Record<string, number> = {};
+  let found = false;
+  const cleaned: Record<string, unknown> = {};
+  for (const [pName, pVal] of Object.entries(rawParams as Record<string, unknown>)) {
+    if (!pVal || typeof pVal !== "object" || Array.isArray(pVal)) {
+      cleaned[pName] = pVal;
+      continue;
+    }
+    const pObj = pVal as Record<string, unknown>;
+    if (!("neutral" in pObj)) {
+      cleaned[pName] = pVal;
+      continue;
+    }
+    const n = (pObj as Record<string, unknown>).neutral;
+    if (typeof n !== "number" || !Number.isFinite(n)) {
+      throw new CutholError(
+        DIAGNOSTICS.INVALID_EXTENSION_MANIFEST(
+          extName,
+          `'fx.${fxName}.params.${pName}.neutral' must be a finite number (the value that renders like no fx).`
+        )
+      );
+    }
+    const { neutral: _dropped, ...rest } = pObj as Record<string, unknown>;
+    void _dropped;
+    cleaned[pName] = rest;
+    neutral[pName] = n;
+    found = true;
+  }
+  return { cleaned, neutral: found ? neutral : undefined };
+}
+
+/** `temporal` is a boolean flag (default false); anything else is a manifest error. */
+function parseFxTemporal(raw: unknown, extName: string, fxName: string): boolean | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "boolean") {
+    throw new CutholError(
+      DIAGNOSTICS.INVALID_EXTENSION_MANIFEST(
+        extName,
+        `'fx.${fxName}.temporal' must be a boolean (true when the effect changes duration or frame count on purpose).`
+      )
+    );
+  }
+  return raw;
+}
+
+/** `cost_class` is `light` / `medium` / `heavy`; anything else is a manifest error. */
+function parseFxCostClass(raw: unknown, extName: string, fxName: string): "light" | "medium" | "heavy" | undefined {
+  if (raw === undefined) return undefined;
+  if (raw !== "light" && raw !== "medium" && raw !== "heavy") {
+    throw new CutholError(
+      DIAGNOSTICS.INVALID_EXTENSION_MANIFEST(
+        extName,
+        `'fx.${fxName}.cost_class' must be "light", "medium" or "heavy" (given: ${JSON.stringify(raw)}).`
+      )
+    );
+  }
+  return raw;
+}
+
 /** `alpha` is `"keep"` (default) or `"process"`; anything else is a manifest error. */
 function parseFxAlpha(raw: unknown, extName: string, fxName: string): "keep" | "process" | undefined {
   if (raw === undefined) return undefined;
@@ -229,9 +348,83 @@ function parseFxAlpha(raw: unknown, extName: string, fxName: string): "keep" | "
   return raw;
 }
 
+/** `backend` is `"ffmpeg"` (default) or `"shader"`; anything else is a manifest error. */
+function parseFxBackend(raw: unknown, extName: string, fxName: string): "ffmpeg" | "shader" {
+  if (raw === undefined) return "ffmpeg";
+  if (raw !== "ffmpeg" && raw !== "shader") {
+    throw new CutholError(
+      DIAGNOSTICS.INVALID_EXTENSION_MANIFEST(
+        extName,
+        `'fx.${fxName}.backend' must be "ffmpeg" or "shader" (given: ${JSON.stringify(raw)}).`
+      )
+    );
+  }
+  return raw;
+}
+
+/**
+ * Parses a shader-backend fx entry. Params come from the `.glsl` file only:
+ * a manifest `params` map beside a shader entry is rejected (the file is the
+ * single source of truth), and so is `video_filter`, `animatable` and
+ * `neutral` (every numeric uniform is animatable; neutrals do not apply).
+ */
+function parseShaderFxEntry(
+  obj: Record<string, unknown>,
+  extName: string,
+  fxName: string,
+  extDir?: string
+): ExtensionFxSpec {
+  if (obj.video_filter !== undefined) {
+    throw new CutholError(
+      DIAGNOSTICS.INVALID_EXTENSION_MANIFEST(
+        extName,
+        `'fx.${fxName}' uses backend "shader": drop 'video_filter' (params and code live in the '.glsl' file).`
+      )
+    );
+  }
+  if (obj.params !== undefined) {
+    throw new CutholError(
+      DIAGNOSTICS.INVALID_EXTENSION_MANIFEST(
+        extName,
+        `'fx.${fxName}' uses backend "shader": params come from the '.glsl' uniforms only (remove 'params').`
+      )
+    );
+  }
+  if (obj.animatable !== undefined) {
+    throw new CutholError(
+      DIAGNOSTICS.INVALID_EXTENSION_MANIFEST(
+        extName,
+        `'fx.${fxName}' uses backend "shader": every numeric uniform is animatable (remove 'animatable').`
+      )
+    );
+  }
+  const { file, parsed } = parseShaderFileRef(obj.shader, extName, fxName, extDir);
+  const alpha = parseFxAlpha(obj.alpha, extName, fxName);
+  const temporal = parseFxTemporal(obj.temporal, extName, fxName);
+  const costClass = parseFxCostClass(obj.cost_class, extName, fxName);
+  const spec = {
+    ...(typeof obj.description === "string" ? { description: obj.description } : {}),
+    backend: "shader" as const,
+    shader: file,
+    ...(alpha !== undefined ? { alpha } : {}),
+    ...(temporal !== undefined ? { temporal } : {}),
+    ...(costClass !== undefined ? { cost_class: costClass } : {}),
+    // No `video_filter`: shader entries never reach the ffmpeg template path.
+    // The field stays required in the type so ffmpeg-only readers keep
+    // compiling; every reader branches on `backend` first.
+    video_filter: undefined as unknown as string,
+  } satisfies ExtensionFxSpec;
+  if (parsed) {
+    if (Object.keys(parsed.params).length > 0) (spec as { params?: unknown }).params = parsed.params;
+    if (parsed.animatable.length > 0) (spec as { animatable?: unknown }).animatable = parsed.animatable;
+  }
+  return spec;
+}
+
 export function parseManifestFxSection(
   raw: unknown,
-  extName: string
+  extName: string,
+  extDir?: string
 ): Record<string, ExtensionFxSpec> | undefined {
   if (raw === undefined) return undefined;
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -258,12 +451,23 @@ export function parseManifestFxSection(
         );
       }
     }
+    const backend = parseFxBackend(obj.backend, extName, fxName);
+    if (backend === "shader") {
+      out[fxName] = parseShaderFxEntry(obj, extName, fxName, extDir);
+      continue;
+    }
+    if (obj.shader !== undefined) {
+      throw new CutholError(
+        DIAGNOSTICS.INVALID_EXTENSION_MANIFEST(extName, `'fx.${fxName}.shader' needs '"backend": "shader"' (ffmpeg entries use 'video_filter').`)
+      );
+    }
     if (typeof obj.video_filter !== "string" || !obj.video_filter.trim()) {
       throw new CutholError(
         DIAGNOSTICS.INVALID_EXTENSION_MANIFEST(extName, `'fx.${fxName}.video_filter' is required (an ffmpeg filter).`)
       );
     }
-    const params = validateParamsMap(obj.params, extName, `fx.${fxName}`);
+    const { cleaned: cleanedParams, neutral } = extractFxNeutral(obj.params, extName, fxName);
+    const params = validateParamsMap(cleanedParams, extName, `fx.${fxName}`);
     const videoFilter = (obj.video_filter as string).trim();
     assertFxTemplateSafe(videoFilter, extName, fxName);
     const banned = checkBuiltinFxFilterChain(videoFilter);
@@ -275,14 +479,20 @@ export function parseManifestFxSection(
         )
       );
     }
+    assertFxTemplateQuotesClosedManifest(videoFilter, extName, fxName);
     assertFxPlaceholdersDeclared(videoFilter, params, extName, fxName);
     const animatable = parseFxAnimatable(obj.animatable, params, extName, fxName);
     const alpha = parseFxAlpha(obj.alpha, extName, fxName);
+    const temporal = parseFxTemporal(obj.temporal, extName, fxName);
+    const costClass = parseFxCostClass(obj.cost_class, extName, fxName);
     out[fxName] = {
       ...(typeof obj.description === "string" ? { description: obj.description } : {}),
       ...(Object.keys(params).length > 0 ? { params } : {}),
       ...(animatable.length > 0 ? { animatable } : {}),
       ...(alpha !== undefined ? { alpha } : {}),
+      ...(temporal !== undefined ? { temporal } : {}),
+      ...(costClass !== undefined ? { cost_class: costClass } : {}),
+      ...(neutral !== undefined ? { neutral } : {}),
       video_filter: videoFilter,
     };
   }

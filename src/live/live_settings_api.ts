@@ -120,6 +120,23 @@ const META: Record<SettingKey, SettingsOptionMeta> = {
     label: "Shortcuts",
     hint: "Window keyboard shortcuts; click a row and press the new key.",
   },
+  "live.prewarm": {
+    kind: "toggle",
+    label: "Pre-produce overlays",
+    hint: "While Live is idle, pre-produce composition overlays around the playhead so exact frames answer fast.",
+  },
+  "live.prewarm_cap_gb": {
+    kind: "number",
+    label: "Prewarm disk cap (GB)",
+    hint: "Stop pre-producing when overlay blobs exceed this. Nothing is ever deleted.",
+    min: 0,
+  },
+  "render.shader_cache_cap_gb": {
+    kind: "number",
+    label: "Shader cache cap (GB)",
+    hint: "Delete oldest-unused shader intermediates when they exceed this. The render never fails because of the cap.",
+    min: 0,
+  },
 };
 
 export interface SettingsEntryView {
@@ -452,11 +469,14 @@ export async function routeLiveSettingsRequest(
       // refuses it (G622) because window-only keys are not agent-settable.
       const before = resolveSetting(projectDir, key);
       let value = body?.value;
-      if (typeof value === "string" && (key === "render.workers" || key === "render.overlay_concurrency" || key === "render.stall_timeout_sec")) {
+      if (typeof value === "string" && (key === "render.workers" || key === "render.overlay_concurrency" || key === "render.stall_timeout_sec" || key === "live.prewarm_cap_gb" || key === "render.shader_cache_cap_gb")) {
         const n = Number(value.trim());
         value = value.trim().toLowerCase() === "auto" ? "auto" : Number.isFinite(n) ? n : value;
       }
       if (key === "render.gpu" && typeof value === "string") {
+        value = ["1", "true", "on"].includes(value.trim().toLowerCase());
+      }
+      if (key === "live.prewarm" && typeof value === "string") {
         value = ["1", "true", "on"].includes(value.trim().toLowerCase());
       }
       const r = setSetting(projectDir, key, value, "human");

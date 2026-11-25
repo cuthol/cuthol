@@ -16,6 +16,13 @@ import { buildCueOverlayEnableExpr } from "../core/frame_time.js";
 import { buildSpineClipTimingFilters, computeSpineClipEffectiveRate } from "./compile_spine_timing.js";
 import { buildSpineClipColorFilters } from "./compile_spine_color.js";
 import { buildItemFxStage, emitFxStageParts, fxStageWouldKeepAlpha, itemCarriesAlphaAtFx, SPINE_FX_ENTRY_CONVERTER, SPINE_FX_RGBA_EXIT, spineFxReceivedPixFmt } from "./compile_fx_stage.js";
+import type { FxShaderCutSpec, FxStagePart } from "./compile_fx_stage.js";
+import type { PrePassJob } from "./compiler.js";
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { getFfmpegVersionInfo } from "../core/ffmpeg_version.js";
+import { resolveCoordsChromePath } from "./coords_extract.js";
 import {
   applySpineClipEdgeToOverlay,
   buildSpineClipEdgeFilters,
@@ -31,6 +38,7 @@ import {
   applyOutgoingTransitionPosition,
   buildIncomingTransitionFilters,
   buildOutgoingTransitionFilters,
+  extIncomingTransitionScaleFactor,
   incomingTransitionScaleFactor,
   transitionHoldTailMs,
 } from "./compile_spine_transition.js";
@@ -61,6 +69,198 @@ import type { DrawnVisualLayer, VideoGraphCompileContext } from "./compiler.js";
 type SpineClipSpec = CutholSequence["spine"]["clips"][number];
 type EnvelopeSpec = SpineClipSpec["envelopes"][number];
 
+/**
+ * Registers the pre-pass job for a cut spine clip chain and returns the
+ * intermediate file path. The job's graph is the chain prefix (source input
+ * through the fx-stage cut) with no conversion appended, so the intermediate
+ * keeps the prefix's own pixel format. The key hashes the complete pre-pass
+ * arguments (input args including any `-ss`/`-t`, the full prefix graph, the
+ * fx entry format), the plan window (a short-windowed pre-pass is never
+ * mistaken for the full-length one), and the ffmpeg version.
+ */
+export function emitFxPrePass(
+  ctx: VideoGraphCompileContext,
+  params: {
+    clip: SpineClipSpec;
+    clipInputArgs: string[];
+    receivedPixFmt: string | null;
+    fxCutAfterEntry: number;
+    prefixFilters: string[];
+  }
+): string {
+  const ffmpegToken = getFfmpegVersionInfo().ffmpeg?.token ?? "unknown";
+  const key = JSON.stringify({
+    inputArgs: params.clipInputArgs,
+    prefixGraph: params.prefixFilters.join(","),
+    receivedPixFmt: params.receivedPixFmt,
+    cutAfterEntry: params.fxCutAfterEntry,
+    win: ctx.compileOptions?.activeWindowMs ?? null,
+    single: ctx.compileOptions?.singleFrameAtMs ?? null,
+    ffmpeg: ffmpegToken,
+  });
+  const hash = createHash("sha256").update(key).digest("hex").slice(0, 16);
+  const outPath = path.join(ctx.paths.blobsDir, `sh_fxpre_${hash}.nut`);
+  const prefixGraph = params.prefixFilters.join(",");
+  const job: PrePassJob = {
+    id: `fxpre_${params.clip.id}_${hash}`,
+    inputArgs: [...params.clipInputArgs],
+    filterComplex: `sws_flags=accurate_rnd+full_chroma_int;[0:v]${prefixGraph}[preout]`,
+    outPath,
+    pixFmt: params.receivedPixFmt ?? "unknown",
+  };
+  if (!ctx.prePasses.some((j) => j.outPath === outPath)) ctx.prePasses.push(job);
+  return outPath;
+}
+
+let cachedShaderChromeToken: string | null = null;
+
+/**
+ * Chrome identity for the shader pre-pass cache key: path, size and mtime
+ * (a browser update changes the binary). Cached per process; falls back to a
+ * constant when Chrome cannot be resolved, so planning never fails on it.
+ */
+function shaderChromeToken(): string {
+  if (cachedShaderChromeToken) return cachedShaderChromeToken;
+  try {
+    const exe = resolveCoordsChromePath();
+    const st = fs.statSync(exe);
+    cachedShaderChromeToken = `${exe}|${st.size}|${st.mtimeMs}`;
+  } catch {
+    cachedShaderChromeToken = "unknown-chrome";
+  }
+  return cachedShaderChromeToken;
+}
+
+/**
+ * Registers the pre-pass job for an automatic shader cut and returns the
+ * intermediate file path. The job's graph is the chain prefix (source input
+ * through the `format=rgba` / `rgba64le` exit); the worker runs the ordered
+ * shader/ffmpeg steps between decode and the FFV1 encode. The key hashes the
+ * complete pre-pass arguments plus shader file hashes, uniform values,
+ * envelopes, Chrome identity and GL mode (SwiftShader), the plan window, and
+ * the ffmpeg version.
+ */
+export interface ShaderNarrowWindow {
+  /** Item-local index of the first shaded frame. */
+  firstFrame: number;
+  /** Shaded frame count. */
+  frameCount: number;
+}
+
+/**
+ * Item-local frame window a shader pre-pass must shade for a windowed compile.
+ * `null` means the full clip: no window, no shader cut, or the window covers
+ * the whole clip (then the full-clip key/file is shared). Bounds come from the
+ * main graph's window (`winLeadStartMs` carries its temporal-filter lead-in),
+ * so the suffix trim of the finished chain stays valid unchanged.
+ */
+export function computeShaderNarrowWindow(args: {
+  activeWindowMs: [number, number] | undefined;
+  singleFrameAtMs: number | undefined;
+  hasShaderCut: boolean;
+  clipStartMs: number;
+  clipDurationMs: number;
+  winLeadStartMs: number;
+  winEndMs: number;
+  fps: number;
+}): ShaderNarrowWindow | null {
+  if (args.activeWindowMs === undefined && args.singleFrameAtMs === undefined) return null;
+  if (!args.hasShaderCut) return null;
+  const fps = Math.max(1, args.fps);
+  const total = Math.max(1, Math.round((args.clipDurationMs * fps) / 1000));
+  const first = Math.max(0, Math.min(total, Math.floor(((args.winLeadStartMs - args.clipStartMs) * fps) / 1000)));
+  const last = Math.max(
+    first + 1,
+    Math.min(total, Math.ceil((((args.winEndMs + 2000 / fps) - args.clipStartMs) * fps) / 1000))
+  );
+  if (first <= 0 && last >= total) return null;
+  return { firstFrame: first, frameCount: last - first };
+}
+
+/** Clip ids are sequence-local (`c1`, `sp_01`); keep the file mapping filesystem-safe. */
+function safeClipFileToken(clipId: string): string {
+  return clipId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 48) || "clip";
+}
+
+export function emitShaderPrePass(
+  ctx: VideoGraphCompileContext,
+  params: {
+    clip: SpineClipSpec;
+    clipInputArgs: string[];
+    prefixFilters: string[];
+    cut: FxShaderCutSpec;
+    /** Windowed shade range, or null for the full clip (shared full-clip file). */
+    narrow: ShaderNarrowWindow | null;
+  }
+): { outPath: string; narrowed: boolean } {
+  const ffmpegToken = getFfmpegVersionInfo().ffmpeg?.token ?? "unknown";
+  const win = params.narrow ? (ctx.compileOptions?.activeWindowMs ?? null) : null;
+  const single = params.narrow ? (ctx.compileOptions?.singleFrameAtMs ?? null) : null;
+  const steps = params.narrow
+    ? params.cut.steps.map((s) => (s.kind === "shader" ? { ...s, frameOffset: params.narrow!.firstFrame } : s))
+    : params.cut.steps;
+  const key = JSON.stringify({
+    inputArgs: params.clipInputArgs,
+    prefixGraph: params.prefixFilters.join(","),
+    steps,
+    pixFmt: params.cut.pixFmt,
+    fps: ctx.fps,
+    win,
+    single,
+    ffmpeg: ffmpegToken,
+    chrome: shaderChromeToken(),
+    gl: "swiftshader",
+    shaderWorker: 2,
+  });
+  const hash = createHash("sha256").update(key).digest("hex").slice(0, 16);
+  // A finished full-clip intermediate (same job without window, trim or frame
+  // offset) already shades every frame the window needs: reuse it (no new
+  // pre-pass runs) instead of shading a narrowed one.
+  if (params.narrow) {
+    const fullKey = JSON.stringify({
+      inputArgs: params.clipInputArgs,
+      prefixGraph: params.prefixFilters.join(","),
+      steps: params.cut.steps,
+      pixFmt: params.cut.pixFmt,
+      fps: ctx.fps,
+      win: null,
+      single: null,
+      ffmpeg: ffmpegToken,
+      chrome: shaderChromeToken(),
+      gl: "swiftshader",
+      shaderWorker: 2,
+    });
+    const fullHash = createHash("sha256").update(fullKey).digest("hex").slice(0, 16);
+    const fullOutPath = path.join(ctx.paths.blobsDir, `sh_fxshad_${fullHash}.nut`);
+    if (fs.existsSync(fullOutPath)) {
+      return { outPath: fullOutPath, narrowed: false };
+    }
+  }
+  const isSingle = params.narrow !== null && ctx.compileOptions?.singleFrameAtMs !== undefined;
+  const outPath = params.narrow
+    ? isSingle
+      ? path.join(ctx.paths.blobsDir, `sh_fxshad1_${safeClipFileToken(params.clip.id)}_${hash}.nut`)
+      : path.join(ctx.paths.blobsDir, `sh_fxshad_${hash}.nut`)
+    : path.join(ctx.paths.blobsDir, `sh_fxshad_${hash}.nut`);
+  // The trailing `setpts` restarts timestamps at zero: the worker decodes to
+  // rawvideo, whose CFR fill would otherwise duplicate the first window frame
+  // back to zero (a 6-frame window at frame 57 decoded as 63 frames).
+  const prefixGraph = params.narrow
+    ? `${params.prefixFilters.join(",")},trim=start_frame=${params.narrow.firstFrame}:end_frame=${params.narrow.firstFrame + params.narrow.frameCount},setpts=PTS-STARTPTS`
+    : params.prefixFilters.join(",");
+  const job: PrePassJob = {
+    id: `fxshad_${params.clip.id}_${hash}`,
+    inputArgs: [...params.clipInputArgs],
+    filterComplex: `sws_flags=accurate_rnd+full_chroma_int;[0:v]${prefixGraph}[preout]`,
+    outPath,
+    pixFmt: params.cut.pixFmt,
+    kind: "shader",
+    shader: { steps, fps: ctx.fps, pixFmt: params.cut.pixFmt },
+  };
+  if (!ctx.prePasses.some((j) => j.outPath === outPath)) ctx.prePasses.push(job);
+  return { outPath, narrowed: params.narrow !== null };
+}
+
 function buildSpineClipFilterChain(
   ctx: VideoGraphCompileContext,
   params: {
@@ -70,6 +270,10 @@ function buildSpineClipFilterChain(
     absAssetPath: string;
     isStill: boolean;
     inIdx: number;
+    /** Exact args of the clip's own source input (for the pre-pass job); single `-i`. */
+    clipInputArgs: string[];
+    /** Forced pre-pass cut position (pixel entries before the cut), or null/undefined. */
+    fxCutAfterEntry?: number | null;
     srcInSec: string;
     srcOutSec: string;
     tlInSec: string;
@@ -121,7 +325,11 @@ function buildSpineClipFilterChain(
 
   const spSxExpr = compilePlacementChannelExpr(clip, "scale_x", { timeBaseOffsetMs: 0, mode: "raw" });
   const spSyExpr = compilePlacementChannelExpr(clip, "scale_y", { timeBaseOffsetMs: 0, mode: "raw" });
-  const incomingScaleFactor = incomingTransitionScaleFactor(incomingTransition);
+  const incomingScaleFactor =
+    incomingTransitionScaleFactor(incomingTransition) ??
+    (incomingTransition && incomingTransition.kind.startsWith("ext:")
+      ? extIncomingTransitionScaleFactor(ctx, clip, incomingTransition)
+      : null);
   const spHasDynScale = Boolean(spSxExpr || spSyExpr || incomingScaleFactor);
   const xEnv = placementChannelHasEnvelopeInput(clip, "x_pct");
   const yEnv = placementChannelHasEnvelopeInput(clip, "y_pct");
@@ -203,11 +411,30 @@ function buildSpineClipFilterChain(
   vFilters.push(...colorFilters);
   // Stage 4: per-clip fx chain (one stage shared with lane cues). `keep` entries hold
   // the clip's alpha aside when it carries one at this point (alpha png / alpha mov).
+  // A forced pre-pass cut splits the emitted filters here: the prefix runs in a
+  // separate ffmpeg pass, the main graph reads the intermediate file back.
   const receivedPixFmt = spineFxReceivedPixFmt(clipColorSpec, asset, colorFilters);
   const itemHasAlpha = itemCarriesAlphaAtFx(receivedPixFmt, clipColorSpec, asset);
-  const fxParts = buildItemFxStage(ctx, { owner: clip, receivedPixFmt, itemHasAlpha });
+  const fxCut = params.fxCutAfterEntry;
+  const fxParts = buildItemFxStage(
+    ctx,
+    fxCut !== null && fxCut !== undefined
+      ? { owner: clip, receivedPixFmt, itemHasAlpha, cutAfterEntry: fxCut }
+      : { owner: clip, receivedPixFmt, itemHasAlpha }
+  );
+  const cutPartIdx = fxParts.findIndex((p) => p.type === "cut");
+  const shaderCutIdx = fxParts.findIndex((p) => p.type === "shader_cut");
+  const splitIdx = shaderCutIdx >= 0 ? shaderCutIdx : cutPartIdx;
+  const fxBefore: FxStagePart[] = splitIdx < 0 ? fxParts : fxParts.slice(0, splitIdx);
+  const fxAfter: FxStagePart[] = splitIdx < 0 ? [] : fxParts.slice(splitIdx + 1);
+  const fxShaderCut = shaderCutIdx >= 0 && fxParts[shaderCutIdx].type === "shader_cut"
+    ? (fxParts[shaderCutIdx] as Extract<FxStagePart, { type: "shader_cut" }>).cut
+    : null;
   // Index of the fx stage's exit converter; switched to an RGBA exit below when the chain stays RGBA.
-  const { exitFilterIdx: fxExitIdx } = emitFxStageParts(ctx, vFilters, fxParts);
+  const { exitFilterIdx: fxExitBefore } = emitFxStageParts(ctx, vFilters, fxBefore);
+  const fxCutVFilterIdx = splitIdx < 0 ? -1 : vFilters.length;
+  const { exitFilterIdx: fxExitAfter } = emitFxStageParts(ctx, vFilters, fxAfter);
+  const fxExitIdx = splitIdx < 0 ? fxExitBefore : fxExitAfter;
 
   // Stage 4b: mask (in the clip's own frame, before placement, so it moves with the clip).
   // The first mask filter establishes the alpha plane when the chain is still planar YUV.
@@ -279,6 +506,16 @@ function buildSpineClipFilterChain(
     spRgbaIdx,
     spUsesRgba,
     fxExitIdx,
+    fxCut:
+      fxCutVFilterIdx >= 0
+        ? {
+            vFilterIdx: fxCutVFilterIdx,
+            clipInputArgs: params.clipInputArgs,
+            receivedPixFmt,
+            afterEntry: fxCut ?? 0,
+            shader: fxShaderCut,
+          }
+        : null,
   });
 }
 
@@ -317,6 +554,17 @@ function appendSpineClipTransitionsAndScale(
     spUsesRgba: boolean;
     /** Index of the fx stage's exit converter in `vFilters`, or -1 without fx. */
     fxExitIdx: number;
+    /**
+     * Forced pre-pass cut: vFilters index of the cut plus the source input
+     * args and formats the pre-pass job needs, or null without a cut.
+     */
+    fxCut: {
+      vFilterIdx: number;
+      clipInputArgs: string[];
+      receivedPixFmt: string | null;
+      afterEntry: number;
+      shader: FxShaderCutSpec | null;
+    } | null;
   }
 ): {
   clipPad: string;
@@ -463,6 +711,7 @@ function appendSpineClipTransitionsAndScale(
   if (
     ctx.compileOptions?.singleFrameAtMs !== undefined &&
     ctx.compileOptions?.singleFrameEarlyTrim !== false &&
+    params.fxCut === null &&
     !(outTrans && outTrans.duration_ms > 0) &&
     !(incomingTransition && incomingTransition.duration_ms > 0)
   ) {
@@ -486,7 +735,55 @@ function appendSpineClipTransitionsAndScale(
   }
 
   const clipPad = `[v_sp_${i}]`;
-  ctx.filterChains.push(`[${inIdx}:v]${vFilters.join(",")}${clipPad}`);
+  const fxCut = params.fxCut;
+  // Windowed compiles shade only the frames the window needs: the narrowed
+  // intermediate starts at item-local `firstFrame`, so its timeline mapping
+  // shifts by that offset (microsecond precision: AVTB quantizes identically
+  // to the full-clip mapping). Full-file reuse needs no remap.
+  const narrowCandidate = computeShaderNarrowWindow({
+    activeWindowMs: ctx.compileOptions?.activeWindowMs,
+    singleFrameAtMs: ctx.compileOptions?.singleFrameAtMs,
+    hasShaderCut: fxCut?.shader != null,
+    clipStartMs,
+    clipDurationMs: clip.duration_ms,
+    winLeadStartMs,
+    winEndMs,
+    fps,
+  });
+  if (fxCut !== null) {
+    // A cut (forced test split or automatic shader cut): the prefix runs as a
+    // pre-pass job, the main chain reads the intermediate file back. `settb=AVTB`
+    // right after the new input matches the microsecond timeline the rest of
+    // the chain was compiled for.
+    let intermediate: string;
+    if (fxCut.shader) {
+      const emitted = emitShaderPrePass(ctx, {
+        clip,
+        clipInputArgs: fxCut.clipInputArgs,
+        prefixFilters: vFilters.slice(0, fxCut.vFilterIdx),
+        cut: fxCut.shader,
+        narrow: narrowCandidate,
+      });
+      intermediate = emitted.outPath;
+      if (emitted.narrowed && narrowCandidate) {
+        const baseSec = (clip.timeline_in_ms + (narrowCandidate.firstFrame * 1000) / fps) / 1000;
+        const setptsIdx = vFilters.findIndex((e) => e === `setpts=PTS+${tlInSec}/TB`);
+        if (setptsIdx >= 0) vFilters[setptsIdx] = `setpts=PTS+${baseSec.toFixed(6)}/TB`;
+      }
+    } else {
+      intermediate = emitFxPrePass(ctx, {
+        clip,
+        clipInputArgs: fxCut.clipInputArgs,
+        receivedPixFmt: fxCut.receivedPixFmt,
+        fxCutAfterEntry: fxCut.afterEntry,
+        prefixFilters: vFilters.slice(0, fxCut.vFilterIdx),
+      });
+    }
+    const preIdx = ctx.addInput(["-i", intermediate]);
+    ctx.filterChains.push(`[${preIdx}:v]settb=AVTB,${vFilters.slice(fxCut.vFilterIdx).join(",")}${clipPad}`);
+  } else {
+    ctx.filterChains.push(`[${inIdx}:v]${vFilters.join(",")}${clipPad}`);
+  }
 
   return {
     clipPad,
@@ -610,6 +907,13 @@ export function compileSpineClip(ctx: VideoGraphCompileContext, i: number): void
   const asset = ctx.libMap.get(clip.asset_handle);
   if (!asset || !asset.probe.has_video) return;
 
+  // Forced pre-pass cut for this clip (internal test trigger; lane cues never cut).
+  const force = ctx.forceFxSplit;
+  const fxCutAfterEntry =
+    force && (!force.clip || force.clip === clip.id) ? force.afterEntry : null;
+  const fxCutArmed =
+    fxCutAfterEntry !== null && (clip.fx ?? []).some((f) => f.enabled !== false);
+
   // If this clip has a cross-transition (`dissolve`, `wipe_left`, `wipe_right`, `slide_up`, `zoom_in`)
   // into `clips[i+1]`, hold its final frame under `clips[i+1]` during the transition duration so there is ZERO dip to backdrop!
   const hasNextClip = i < seq.spine.clips.length - 1;
@@ -634,6 +938,7 @@ export function compileSpineClip(ctx: VideoGraphCompileContext, i: number): void
   });
   const isStaticStillClip =
     isStillGraphic(asset) &&
+    !fxCutArmed &&
     !stillHasNonMotionEnvelope &&
     (!clip.transition_out || clip.transition_out.duration_ms <= 0) &&
     (!incomingTransition || incomingTransition.duration_ms <= 0) &&
@@ -670,10 +975,11 @@ export function compileSpineClip(ctx: VideoGraphCompileContext, i: number): void
   // In single-frame compiles the picture is decoded once; `tpad=clone` in the
   // timing block covers the clip (the looped range is identical content).
   const singleFrameStill = compileOptions?.singleFrameAtMs !== undefined && isStill;
-  const inIdx = isStill
+  // Exact args of this clip's own source input: a pre-pass job replays them 1:1.
+  const clipInputArgs: string[] = isStill
     ? singleFrameStill
-      ? ctx.addInput(["-framerate", String(fps), "-i", absAssetPath])
-      : ctx.addInput([
+      ? ["-framerate", String(fps), "-i", absAssetPath]
+      : [
           "-loop",
           "1",
           "-framerate",
@@ -682,8 +988,9 @@ export function compileSpineClip(ctx: VideoGraphCompileContext, i: number): void
           (clip.source_out_ms / 1000 + 2 / fps).toFixed(3),
           "-i",
           absAssetPath,
-        ])
-    : ctx.addInput(clipSeek!.inputArgs);
+        ]
+    : [...clipSeek!.inputArgs];
+  const inIdx = ctx.addInput(clipInputArgs);
 
   const srcInSec = clipSeek ? clipSeek.localSrcInSec : (clip.source_in_ms / 1000).toFixed(3);
   const srcOutSec = clipSeek ? clipSeek.localSrcOutSec : (clip.source_out_ms / 1000).toFixed(3);
@@ -700,6 +1007,8 @@ export function compileSpineClip(ctx: VideoGraphCompileContext, i: number): void
     absAssetPath,
     isStill,
     inIdx,
+    clipInputArgs,
+    fxCutAfterEntry: fxCutArmed ? fxCutAfterEntry : null,
     srcInSec,
     srcOutSec,
     tlInSec,

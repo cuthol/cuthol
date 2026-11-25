@@ -25,10 +25,13 @@ export const SETTING_KEYS = [
   "render.overlay_concurrency",
   "render.output_dir",
   "render.stall_timeout_sec",
+  "render.shader_cache_cap_gb",
   "cache.dir",
   "live.mode",
   "live.browser",
   "live.shortcuts",
+  "live.prewarm",
+  "live.prewarm_cap_gb",
 ] as const;
 
 export type SettingKey = (typeof SETTING_KEYS)[number];
@@ -40,8 +43,11 @@ const AGENT_SETTABLE: ReadonlySet<string> = new Set([
   "render.overlay_concurrency",
   "render.output_dir",
   "render.stall_timeout_sec",
+  "render.shader_cache_cap_gb",
   "cache.dir",
   "live.mode",
+  "live.prewarm",
+  "live.prewarm_cap_gb",
 ]);
 
 const ENCODERS = ["auto", "nvenc", "amf", "qsv", "vaapi", "videotoolbox", "x264"];
@@ -123,6 +129,8 @@ export function defaultSettingValue(key: SettingKey): unknown {
       return "output";
     case "render.stall_timeout_sec":
       return 300;
+    case "render.shader_cache_cap_gb":
+      return 2;
     case "cache.dir":
       return path.join(os.homedir(), ".cuthol", "cache");
     case "live.mode":
@@ -131,6 +139,10 @@ export function defaultSettingValue(key: SettingKey): unknown {
       return "auto";
     case "live.shortcuts":
       return { ...DEFAULT_SHORTCUTS };
+    case "live.prewarm":
+      return true;
+    case "live.prewarm_cap_gb":
+      return 2;
     default:
       return null;
   }
@@ -151,6 +163,8 @@ export function settingEnvVar(key: SettingKey): string | null {
       return null;
     case "render.stall_timeout_sec":
       return "CUTHOL_STALL_TIMEOUT_SEC";
+    case "render.shader_cache_cap_gb":
+      return "CUTHOL_SHADER_CACHE_CAP_GB";
     case "cache.dir":
       return "CUTHOL_CACHE_DIR";
     case "live.mode":
@@ -158,6 +172,10 @@ export function settingEnvVar(key: SettingKey): string | null {
     case "live.browser":
     case "live.shortcuts":
       return null;
+    case "live.prewarm":
+      return "CUTHOL_LIVE_PREWARM";
+    case "live.prewarm_cap_gb":
+      return "CUTHOL_LIVE_PREWARM_CAP_GB";
     default:
       return null;
   }
@@ -225,6 +243,21 @@ export function validateSettingValue(key: SettingKey, value: unknown): unknown {
       // (chrome, edge, firefox, brave, ...). An id no longer installed falls back to auto.
       if (v !== "auto" && !/^[a-z0-9][a-z0-9._-]{0,39}$/.test(v)) throw invalid('"auto" or a browser id such as chrome, edge, firefox');
       return v;
+    }
+    case "live.prewarm": {
+      if (typeof value === "boolean") return value;
+      if (typeof value === "string") {
+        const v = value.trim().toLowerCase();
+        if (["1", "true", "on", "yes"].includes(v)) return true;
+        if (["0", "false", "off", "no"].includes(v)) return false;
+      }
+      throw invalid("true|false");
+    }
+    case "live.prewarm_cap_gb":
+    case "render.shader_cache_cap_gb": {
+      const n = typeof value === "number" ? value : typeof value === "string" ? Number(value.trim()) : NaN;
+      if (!Number.isFinite(n) || n <= 0 || n > 100) throw invalid("a positive number of GB (up to 100)");
+      return n;
     }
     case "live.shortcuts": {
       if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid("an action-to-key map");

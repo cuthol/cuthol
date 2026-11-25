@@ -1422,6 +1422,238 @@ export const DIAGNOSTICS = {
       `Check the current revision with 'cuthol brief --lens overview' or 'cuthol workspace journal list' and use '--expect-rev ${actualRev}'.`
     ),
 
+  // [fxcheck:A G320–G329] fx instance check (card run + sentinel) and frozen-param check
+  FX_CHECK_SKIPPED_NO_FFMPEG: () =>
+    createDiagnostic(
+      "CUTHOL-G320",
+      "G4_STAGE",
+      "WARN",
+      "ffmpeg is not on PATH; the fx instance check was skipped.",
+      "Install ffmpeg 8.x (ffmpeg and ffprobe) and put it on PATH, then retry."
+    ),
+  FX_CHECK_TIMEOUT: (itemId: string, fxId: string, kind: string) =>
+    createDiagnostic(
+      "CUTHOL-G321",
+      "G4_STAGE",
+      "WARN",
+      `fx instance check timed out for '${itemId}' fx '${fxId}' (${kind}); skipped, never blocking.`,
+      "Retry the check with 'cuthol spine fx check --kind <kind>'; a persistent timeout means the filter hangs on real frames too.",
+      itemId
+    ),
+  FX_CHECK_FAILED: (itemId: string, fxId: string, kind: string, filter: string | undefined, detail: string, template?: string) =>
+    createDiagnostic(
+      "CUTHOL-G322",
+      "G4_STAGE",
+      "ERROR",
+      `fx instance check failed on '${itemId}' fx '${fxId}' (${kind})${filter ? ` in filter '${filter}'` : ""}: ${detail}${template ? ` [template: ${template}]` : ""}`,
+      "Fix the effect template or parameters (unknown option, bad expression syntax) and retry; run 'cuthol spine fx check --kind <kind>' for an isolated probe. Options of one filter are separated by ':' (',' starts a new filter); an envelope placeholder inside single quotes needs no extra quotes of its own.",
+      itemId
+    ),
+  FX_CHECK_PROBE_FAILED: (filterName: string, detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G323",
+      "G4_STAGE",
+      "WARN",
+      `frozen-param probe for filter '${filterName}' could not render (${detail}); skipped.`,
+      "Check that ffmpeg runs ('ffmpeg -version') and retry 'cuthol spine fx check --kind <kind>'."
+    ),
+  FX_PARAM_FROZEN: (filterName: string) =>
+    createDiagnostic(
+      "CUTHOL-G324",
+      "G4_STAGE",
+      "ERROR",
+      `parameter does not change per frame in filter '${filterName}' (evaluated once); check whether its options accept per-frame expressions (for 'eq' add 'eval=frame').`,
+      "Add the filter's per-frame evaluation flag to the template (e.g. ':eval=frame' for 'eq') or remove the envelope from the non-animatable option."
+    ),
+  FX_CHECK_NATIVE_BACKEND: (kind: string, via: string) =>
+    createDiagnostic(
+      "CUTHOL-G325",
+      "G4_STAGE",
+      "INFO",
+      `kind '${kind}' uses the native backend: validated by ${via}.`,
+      "No card probe is needed for this kind."
+    ),
+  FX_CHECK_UNKNOWN_KIND: (kind: string, detail: string, suggestion?: string) =>
+    createDiagnostic(
+      "CUTHOL-G326",
+      "G4_STAGE",
+      "ERROR",
+      `fx check for kind '${kind}' failed: ${detail}`,
+      suggestion ??
+        "List checkable kinds with 'cuthol spine fx catalog' (clip kinds are 'ffmpeg', 'motion' or 'ext:<extension>/<name>')."
+    ),
+  // [fxtry:D G345–G359] fx sandbox, `spine fx try` grid and `spine fx check --full`
+  FX_TRY_FAILED: (kind: string, detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G345",
+      "G4_STAGE",
+      "ERROR",
+      `fx try for kind '${kind}' failed: ${detail}`,
+      "Check the kind with 'cuthol spine fx check --kind <kind>'; list kinds with 'cuthol spine fx catalog'."
+    ),
+  FX_TRY_UNKNOWN_ITEM: (item: string) =>
+    createDiagnostic(
+      "CUTHOL-G346",
+      "G4_STAGE",
+      "ERROR",
+      `fx try --on '${item}' matches no spine clip in this project.`,
+      "Pass a spine clip id (sp_XX) from this project, or drop '--on' to use the generated card."
+    ),
+  FX_FULL_NEUTRAL_FAIL: (kind: string, param: string, psnr: number) =>
+    createDiagnostic(
+      "CUTHOL-G347",
+      "G4_STAGE",
+      "ERROR",
+      `fx full check for kind '${kind}': neutral value of '${param}' is not neutral (Y PSNR ${psnr.toFixed(1)} dB < 60 dB against no fx).`,
+      "Fix the manifest 'neutral' value for the parameter so it renders (near-)identically to no fx, or remove it."
+    ),
+  FX_FULL_TEMPORAL_CHANGE: (kind: string, what: string) =>
+    createDiagnostic(
+      "CUTHOL-G348",
+      "G4_STAGE",
+      "WARN",
+      `fx full check for kind '${kind}': ${what}.`,
+      "Declare 'temporal: true' in the manifest fx entry when the effect changes duration or frame count on purpose."
+    ),
+  FX_FULL_COST_MISMATCH: (kind: string, declared: string, measured: string) =>
+    createDiagnostic(
+      "CUTHOL-G349",
+      "G4_STAGE",
+      "WARN",
+      `fx full check for kind '${kind}': manifest cost_class '${declared}' contradicts the measured '${measured}'.`,
+      "Update the manifest 'cost_class' to the measured value."
+    ),
+  // [preset:P G360–G374] motion presets anchored to the clip and extension fx-new
+  PRESET_UNKNOWN: (preset: string, detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G360",
+      "G4_STAGE",
+      "ERROR",
+      `preset '${preset}' cannot be applied: ${detail}`,
+      "List available presets with 'cuthol spine fx catalog'."
+    ),
+  PRESET_BAD_PARAM: (preset: string, detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G361",
+      "G4_STAGE",
+      "ERROR",
+      `preset '${preset}' got a bad parameter: ${detail}`,
+      "Pass the preset parameters as '--param name=value' within the declared min/max range."
+    ),
+  PRESET_BAD_CHANNEL: (preset: string, channel: string) =>
+    createDiagnostic(
+      "CUTHOL-G362",
+      "G4_STAGE",
+      "ERROR",
+      `preset '${preset}' targets unknown channel '${channel}'.`,
+      "Use one of the target kind's channels (x_pct, y_pct, rotation_deg, scale_x, scale_y, opacity for 'motion')."
+    ),
+  PRESET_VALUE_OUT_OF_RANGE: (preset: string, channel: string, value: number) =>
+    createDiagnostic(
+      "CUTHOL-G363",
+      "G4_STAGE",
+      "ERROR",
+      `preset '${preset}' computes value ${value} on channel '${channel}', outside the parameter range.`,
+      "Adjust the '--param' values so every generated point stays within the parameter's min/max range."
+    ),
+  PRESET_ANCHORS_CROSS: (preset: string, detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G364",
+      "G4_STAGE",
+      "ERROR",
+      `preset '${preset}' anchors cross on this clip: ${detail}`,
+      "Use a longer clip or smaller offsets so start-anchored points stay before end-anchored points."
+    ),
+  PRESET_LANE_CUE: (item: string) =>
+    createDiagnostic(
+      "CUTHOL-G365",
+      "G4_STAGE",
+      "ERROR",
+      `presets apply to spine clips in this version, not to '${item}'.`,
+      "Pass a spine clip id (sp_XX) from this project."
+    ),
+  PRESET_BEATS_MISSING: (preset: string) =>
+    createDiagnostic(
+      "CUTHOL-G366",
+      "G4_STAGE",
+      "ERROR",
+      `preset '${preset}' repeats on every beat but no beat grid was given.`,
+      "Pass '--beats <aud_XX>' with a music asset that has a beat grid (run 'library beats' first)."
+    ),
+  PRESET_BAD_EXPRESSION: (preset: string, expr: string) =>
+    createDiagnostic(
+      "CUTHOL-G367",
+      "G4_STAGE",
+      "ERROR",
+      `preset '${preset}' has a bad value expression '${expr}'.`,
+      "Use only numbers, declared param names, 'rand(i)', parentheses and + - * /."
+    ),
+  PRESET_TOO_MANY_POINTS: (preset: string, count: number, extraSec: string) =>
+    createDiagnostic(
+      "CUTHOL-G368",
+      "G4_STAGE",
+      "WARN",
+      `preset '${preset}' writes ${count} points on one channel (estimated extra render time ${extraSec} at draft_480p; higher presets cost more).`,
+      "Reduce the repetition count or pattern length if the render gets too slow."
+    ),
+  PRESET_DRIFTED: (fxId: string, what: string, item: string) =>
+    createDiagnostic(
+      "CUTHOL-G369",
+      "G4_STAGE",
+      "WARN",
+      `preset points of '${fxId}' no longer match their anchors: ${what} (reapply overwrites hand edits).`,
+      `Regenerate with 'cuthol spine fx preset --item ${item} --fx ${fxId} --reapply'.`
+    ),
+  FX_NEW_EXISTS: (extName: string, fxName: string) =>
+    createDiagnostic(
+      "CUTHOL-G370",
+      "G4_STAGE",
+      "ERROR",
+      `extension '${extName}' already has an fx entry '${fxName}'.`,
+      "Pick a different name or edit the existing entry."
+    ),
+  FX_NEW_UNKNOWN_ROLE: (role: string) =>
+    createDiagnostic(
+      "CUTHOL-G371",
+      "G4_STAGE",
+      "ERROR",
+      `unknown fx role '${role}'.`,
+      "Use one of: clip, transition, motion."
+    ),
+  FX_NEW_WROTE_SKELETON: (extName: string, fxName: string) =>
+    createDiagnostic(
+      "CUTHOL-G372",
+      "G4_STAGE",
+      "INFO",
+      `fx skeleton '${fxName}' added to extension '${extName}'.`,
+      "Try it with 'cuthol spine fx try' and check it with 'cuthol spine fx check --kind'."
+    ),
+  // [fxtpl:C G340–G344] fx template placeholder and quoting rules (one rule per template)
+  FX_TEMPLATE_UNTERMINATED_QUOTE: (extName: string, fxName: string) =>
+    createDiagnostic(
+      "CUTHOL-G340",
+      "G4_STAGE",
+      "ERROR",
+      `extension '${extName}' fx '${fxName}': 'fx.${fxName}.video_filter' has an unterminated single-quoted region (a ' without its closing ').`,
+      `Close the quoted region in 'fx.${fxName}.video_filter' or remove the stray quote.`
+    ),
+  FX_TEMPLATE_QUOTED_STATIC_QUOTE: (extName: string, fxName: string, param: string) =>
+    createDiagnostic(
+      "CUTHOL-G341",
+      "G4_STAGE",
+      "ERROR",
+      `extension '${extName}' fx '${fxName}': '${param}' parameter value contains a single quote (') and cannot go inside a quoted template region.`,
+      `Remove the quote from the '${param}' value or move the placeholder outside the quoted region.`
+    ),
+  // [fxfix:F G375–G379] effect-authoring fixes (delivery verdict, console window, guide CLI)
+  GUIDE_TOPIC_UNKNOWN: (topic: string) =>
+    createDiagnostic(
+      "CUTHOL-G375",
+      "G1_SCHEMA",
+      "ERROR",
+      `guide topic '${topic}' is not available.`,
+      "Run 'cuthol guide' for the catalog of topics, or pass a skill name, '<skill>/<reference>' or 'ext:<name>'."
+    ),
   UNKNOWN_FLAG: (flag: string, command: string, suggestionFix: string) =>
     createDiagnostic(
       "CUTHOL-G110",
@@ -1857,6 +2089,36 @@ export const DIAGNOSTICS = {
       subjectId
     ),
 
+  // [fxcheck:B G330–G339]
+  EXTENSION_TRANSITION_FIELD_UNQUOTED_PROGRESS: (extName: string, trName: string, field: string) =>
+    createDiagnostic(
+      "CUTHOL-G330",
+      "G1_SCHEMA",
+      "ERROR",
+      `Transition '${trName}' in extension '${extName}' uses '{{p}}' outside single quotes in '${field}': the eased-progress expansion contains commas that split ffmpeg filter options.`,
+      `Quote the '{{p}}' expansion in '${field}' (e.g. "eq=brightness='0.5*({{p}})'"), so the commas stay inside one filter option; 'cuthol extension show --name ${extName}' prints the manifest section.`,
+      trName
+    ),
+
+  EXTENSION_TRANSITION_BACKSTOP_FAILED: (kind: string, clipId: string, detail: string, field?: string) =>
+    createDiagnostic(
+      "CUTHOL-G331",
+      "G1_SCHEMA",
+      "ERROR",
+      `Extension transition '${kind}' on clip '${clipId}' fails a short encoder-free render over its own window${field ? ` (failing part: '${field}')` : ""}: ${detail}`,
+      `Fix the transition template${field ? ` field '${field}'` : ""} ('cuthol extension show --name <name>') so the windowed render passes, or replace the transition; the render would fail the same way.`,
+      clipId
+    ),
+
+  EXTENSION_TRANSITION_BACKSTOP_SKIPPED: (reason: string) =>
+    createDiagnostic(
+      "CUTHOL-G332",
+      "SYS",
+      "WARN",
+      `The extension-transition backstop render was skipped (${reason}); ext: transitions are unchecked in this run.`,
+      `Install ffmpeg 8.x on PATH and retry 'verify' so the transition window is actually rendered once; a skipped backstop hides a render-time crash.`
+    ),
+
   // ---------------------------------------------------------------------------------------------------
 
   // --- Colour (LUT, temperature, colour envelopes): codes CUTHOL-G124, CUTHOL-G414 ---
@@ -2287,6 +2549,121 @@ export const DIAGNOSTICS = {
     ),
   // [p2mo:C G292–G293] live window
   // [p2mo:D G294–G297] moving text
+  // [shader:W0 G700–G704] fx pre-pass split: a spine clip chain cut at an fx entry runs its prefix as a separate ffmpeg pass
+  FX_PREPASS_FAILED: (id: string, detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G700",
+      "G4_STAGE",
+      "ERROR",
+      `Fx pre-pass '${id}' failed (${detail}); the main graph cannot render without its intermediate file.`,
+      "Re-run the render; the pre-pass retries from scratch. If it keeps failing, inspect the pre-pass filter graph."
+    ),
+  FX_PREPASS_OUTPUT_MISSING: (id: string, outPath: string) =>
+    createDiagnostic(
+      "CUTHOL-G701",
+      "G4_STAGE",
+      "ERROR",
+      `Fx pre-pass '${id}' finished without a complete intermediate file at '${outPath}'.`,
+      "Re-run the render; the pre-pass retries from scratch."
+    ),
+  FX_PREPASS_UNAVAILABLE: (where: string) =>
+    createDiagnostic(
+      "CUTHOL-G702",
+      "G4_STAGE",
+      "ERROR",
+      `Render path '${where}' compiled a plan with fx pre-passes but cannot run them; rendering without the cut would silently change the picture.`,
+      "Run the render through a path that executes plan pre-passes first."
+    ),
+  FX_PREPASS_INPUT_MISMATCH: (id: string) =>
+    createDiagnostic(
+      "CUTHOL-G703",
+      "G4_STAGE",
+      "ERROR",
+      `Fx pre-pass '${id}' does not replay exactly one source input; refusing to guess the pre-pass input mapping.`,
+      "Report this as a compiler bug with the clip id and the plan dump."
+    ),
+  FX_PREPASS_LOCKED: (id: string, outPath: string) =>
+    createDiagnostic(
+      "CUTHOL-G704",
+      "G4_STAGE",
+      "ERROR",
+      `Fx pre-pass '${id}' could not take the lock for '${outPath}' and the file never completed.`,
+      "Re-run the render; check for a stale '.lock' file next to the intermediate if it keeps failing."
+    ),
+  // [shader:E1A G705–G719] shader clip effects (GLSL) on spine clips, rendered through the pre-pass
+  SHADER_CHECK_DEFERRED: (kind: string) =>
+    createDiagnostic(
+      "CUTHOL-G705",
+      "G4_STAGE",
+      "WARN",
+      `fx definition check passed with a warning on 'definition' fx '${kind}': shader effects are not checked by spine fx check yet.`,
+      "No action needed; the shader is compiled when the clip renders."
+    ),
+  SHADER_MANIFEST: (detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G706",
+      "G4_STAGE",
+      "ERROR",
+      `Invalid shader effect: ${detail}`,
+      "Fix the extension manifest or the '.glsl' file and re-enable the extension."
+    ),
+  SHADER_WORKER_FAILED: (id: string, detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G707",
+      "G4_STAGE",
+      "ERROR",
+      `Shader pre-pass '${id}' failed (${detail}); the main graph cannot render without its intermediate file.`,
+      "Re-run the render; the shader pass retries from scratch. If it keeps failing, inspect the shader file and line."
+    ),
+  SHADER_FRAME_TIMEOUT: (id: string, frame: number, timeoutMs: number) =>
+    createDiagnostic(
+      "CUTHOL-G708",
+      "G4_STAGE",
+      "ERROR",
+      `Shader pre-pass '${id}' timed out on frame ${frame} after ${timeoutMs}ms (the shader may loop forever).`,
+      "Fix the shader so every invocation terminates, then re-run the render."
+    ),
+  SHADER_LANE_REJECTED: (item: string, fxId: string) =>
+    createDiagnostic(
+      "CUTHOL-G709",
+      "G4_STAGE",
+      "ERROR",
+      `Shader effect '${fxId}' on '${item}' is not supported: shader effects apply to spine clips in this version.`,
+      "Move the effect to a spine clip, or use an ffmpeg effect on the lane cue."
+    ),
+  SHADER_COMPILE_ERROR: (file: string, line: number, detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G710",
+      "G4_STAGE",
+      "ERROR",
+      `Shader '${file}' failed to compile (line ${line}): ${detail}`,
+      "Fix the '.glsl' file at the reported line and re-enable the extension (or re-run the check)."
+    ),
+  SHADER_SINGLE_FRAME_LOST: (atMs: number, detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G712",
+      "G4_STAGE",
+      "ERROR",
+      `Single-frame render at ${atMs}ms failed: its shader intermediate vanished and re-running the shader pre-pass did not bring it back (${detail}); no neighbouring frame is substituted.`,
+      "Re-run the command; if it keeps failing, inspect the shader file and the blobs directory for disk or lock problems."
+    ),
+  SHADER_CACHE_ENFORCED: (deleted: number, beforeMb: string, afterMb: string) =>
+    createDiagnostic(
+      "CUTHOL-G713",
+      "G4_STAGE",
+      "INFO",
+      `Shader intermediates exceeded the render.shader_cache_cap_gb cap: deleted ${deleted} file(s) (${beforeMb} MB -> ${afterMb} MB).`,
+      "No action needed; intermediates re-shade on demand. Raise render.shader_cache_cap_gb to keep more."
+    ),
+  // Browser compile result missing for a shader content hash: the static scan ran instead.
+  SHADER_NOT_COMPILED_YET: (file: string) =>
+    createDiagnostic(
+      "CUTHOL-G711",
+      "G4_STAGE",
+      "WARN",
+      `Shader '${file}' was not compiled in a browser yet (no cached result for its content hash): only the static scan ran.`,
+      "Run 'extension enable' for its extension to compile it, then re-run this command."
+    ),
   // [fix:A G530–G534] render output
   // [fix:B G692–G696] live server (reserved; B1 needs no new diagnostic: failures keep the G612 contract)
   LIVE_NOTE_COORDS_PIN_SCOPED: (frame: number, kept: number, total: number) =>
@@ -2311,6 +2688,94 @@ export const DIAGNOSTICS = {
   // [b040:B G257–G259] fx chain checks
   // [b040:C G260–G261] motion blur across segments
   // [b040:D G262–G263] composition transparency staging
+
+  // [k79w2:K G720–G724] small fixes: speech test isolation, faster first verify, empty composition warning
+  EMPTY_COMPOSITION_RENDER: (cueId: string) =>
+    createDiagnostic(
+      "CUTHOL-G720",
+      "G4_STAGE",
+      "WARN",
+      `Composition cue '${cueId}' draws nothing: the captured transparent overlay is empty across sampled frames.`,
+      "Check that the timeline starts visible, GSAP is loaded and nothing hides the root."
+    ),
+  EMPTY_COMPOSITION_VERIFY: (cueId: string) =>
+    createDiagnostic(
+      "CUTHOL-G721",
+      "G4_STAGE",
+      "WARN",
+      `Composition cue '${cueId}' draws nothing: its cached overlay sidecar is marked empty and composition files are unchanged.`,
+      "Check that the timeline starts visible, GSAP is loaded and nothing hides the root."
+    ),
+  EMPTY_COMPOSITION_FRAME: (cueId: string, at: string) =>
+    createDiagnostic(
+      "CUTHOL-G722",
+      "G4_STAGE",
+      "WARN",
+      `Composition '${cueId}' draws nothing at ${at}: the transparent capture alpha is empty there (it may not have entered yet).`,
+      "Check that the timeline starts visible, GSAP is loaded and nothing hides the root."
+    ),
+  EMPTY_COMPOSITION_SHEET: (cueId: string) =>
+    createDiagnostic(
+      "CUTHOL-G723",
+      "G4_STAGE",
+      "WARN",
+      `Composition cue '${cueId}' draws nothing in any sheet tile where it is active.`,
+      "Check that the timeline starts visible, GSAP is loaded and nothing hides the root."
+    ),
+  SCRIPT_PROBE_BATCH: (count: number) =>
+    createDiagnostic(
+      "CUTHOL-G724",
+      "SYS",
+      "INFO",
+      `Script probe ran ${count} composition jobs with shared-browser concurrency.`,
+      "No action needed."
+    ),
+  // [live-shader:E1BL G730–G734]
+  LIVE_SHADER_UNKNOWN_ITEM: (item: string) =>
+    createDiagnostic(
+      "CUTHOL-G730",
+      "G5_SIGNAL",
+      "ERROR",
+      `Live shader request for unknown spine item '${item}'.`,
+      `List clip ids with 'cuthol spine show' and retry with a spine clip id.`,
+      item
+    ),
+  LIVE_SHADER_SOURCE_FAILED: (item: string, detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G731",
+      "G5_SIGNAL",
+      "ERROR",
+      `Live shader sources for '${item}' could not be resolved (${detail}).`,
+      `Re-enable the extension ('cuthol extension enable --name <ext>') and retry.`,
+      item
+    ),
+  LIVE_SHADER_COMPILE_FAILED: (fxId: string, file: string, line: number, detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G732",
+      "G5_SIGNAL",
+      "WARN",
+      `Live shader '${fxId}' ('${file}') failed to compile (line ${line}): ${detail}. The preview shows the unshaded video.`,
+      `Fix the '.glsl' file at the reported line and re-enable the extension.`,
+      fxId
+    ),
+  LIVE_SHADER_ENTRY_FAILED: (item: string, detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G733",
+      "G5_SIGNAL",
+      "ERROR",
+      `Live shader entry '${item}' failed (${detail}).`,
+      `Check the clip's fx list ('cuthol spine fx --clip ${item}') and the extension state.`,
+      item
+    ),
+  LIVE_SHADER_APPROXIMATED: (item: string, detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G734",
+      "G5_SIGNAL",
+      "INFO",
+      `Live preview of '${item}' is approximate for shaders (${detail}).`,
+      `Use the Exact frame button to compare with the render.`,
+      item
+    ),
 
   // ---------------------------------------------------------------------------------------------------
 } as const;

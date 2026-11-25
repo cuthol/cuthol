@@ -57,7 +57,7 @@ export function resolveDraftOverlayRes(explicit?: string | null): DraftOverlayRe
  * - Mode B (`scene_host`): Mounts `backdropVideoPath` as `<video class="clip">` inside the composition and renders `.mp4` (`--video-frame-format png`).
  * - Opaque standalone (`transparent: false`): H.264 `.mp4` (with optional stage backdrop colour/still image baked in when no moving footage sits underneath).
  */
-export function renderHyperFramesCompositionToMp4(options: {
+export interface CompositionBlobKeyOptions {
   compositionDir: string;
   entryHtml: string;
   blobsDir: string;
@@ -71,11 +71,28 @@ export function renderHyperFramesCompositionToMp4(options: {
   backdropVideoPath?: string;
   opaqueBackdropColor?: string;
   backdropImagePath?: string;
-  workers?: number;
-  useGpu?: boolean;
-  crf?: number;
-}): string {
-  const tStart = Date.now();
+}
+
+/**
+ * Computes exactly the blob identity `renderHyperFramesCompositionToMp4` uses for
+ * the same options (entry read, backdrop sanitizing, native-size adjustment, extension),
+ * shared so the render path and the single-frame lookup cannot drift.
+ */
+function computeCompositionBlobKey(options: CompositionBlobKeyOptions): {
+  absCompDir: string;
+  compName: string;
+  entryPath: string;
+  htmlSource: string;
+  wantGreenStage: boolean;
+  durationSec: number;
+  alphaFormat: AlphaOverlayFormat;
+  hash: string;
+  hashInfo: ReturnType<typeof syncScalarVarsAndComputeCompositionHash>;
+  ext: OverlayBlobExt;
+  useTrueAlpha: boolean;
+  expectedFrames: number;
+  outBlob: string;
+} {
   const absCompDir = path.resolve(options.compositionDir);
   const compName = path.basename(absCompDir) || "main";
   const entryPath = path.join(absCompDir, options.entryHtml);
@@ -96,9 +113,10 @@ export function renderHyperFramesCompositionToMp4(options: {
   const rawHtmlSource = fs.readFileSync(entryPath, "utf8");
   // Upgrade any legacy #00FF00 background on body/#root to true CSS `transparent` when rendering with alpha or stage backdrop.
   // The cleaned HTML lives only in memory and in staged work-folder copies; the user's entry file on disk is never rewritten.
-  const wantGreenStage =
+  const wantGreenStage = Boolean(
     (useTrueAlpha || options.opaqueBackdropColor || options.backdropImagePath) &&
-    needsLegacyGreenSanitize(rawHtmlSource);
+    needsLegacyGreenSanitize(rawHtmlSource)
+  );
   const htmlSource = wantGreenStage ? sanitizeLegacyGreenBackground(rawHtmlSource) : rawHtmlSource;
 
   const hashOptions = {
@@ -131,7 +149,6 @@ export function renderHyperFramesCompositionToMp4(options: {
   }
   const { hash, scalarVars, isSceneHost, nativeWidth, nativeHeight, targetWidth, targetHeight } = hashInfo;
 
-  fs.mkdirSync(options.blobsDir, { recursive: true });
   const ext: OverlayBlobExt = !useTrueAlpha
     ? "mp4"
     : alphaFormat === "pngseq"
@@ -140,6 +157,83 @@ export function renderHyperFramesCompositionToMp4(options: {
         ? "ffv1.mov"
         : "mov";
   const outBlob = path.join(options.blobsDir, `hf_comp_${hash}.${ext}`);
+  return {
+    absCompDir,
+    compName,
+    entryPath,
+    htmlSource,
+    wantGreenStage,
+    durationSec,
+    alphaFormat,
+    hash,
+    hashInfo,
+    ext,
+    useTrueAlpha,
+    expectedFrames,
+    outBlob,
+  };
+}
+
+/**
+ * Cache-only lookup of the render overlay blob for a single-frame compile: computes
+ * exactly the key `renderHyperFramesCompositionToMp4` computes for the same options and
+ * returns the cached blob path, or null on a miss. It never starts HyperFrames, never
+ * writes the composition cache state file, never records an overlay outcome and never
+ * touches the overlay collector. The only disk write it may perform is the one the
+ * single-frame path already performs (`syncScalarVarsAndComputeCompositionHash` syncing
+ * `assets/cuthol-vars.json`); the still-slice PNG the backdrop decision needs is built
+ * by the caller.
+ */
+export function lookupCachedCompositionBlobForSingleFrame(
+  options: CompositionBlobKeyOptions
+): { cachedBlobPath: string; isExactTargetRes: boolean } | null {
+  const { absCompDir, entryPath, hashInfo, ext, useTrueAlpha, expectedFrames } =
+    computeCompositionBlobKey(options);
+  const mode = options.mode ?? "overlay_alpha";
+  const cacheLookup = resolveCachedCompositionVideoBlob({
+    absCompDir,
+    entryPath,
+    blobsDir: options.blobsDir,
+    ext,
+    expectedFrames: useTrueAlpha && ext === "pngseq" ? expectedFrames : undefined,
+    durationMs: options.durationMs,
+    transparent: options.transparent,
+    mode,
+    backdropImagePath: options.backdropImagePath,
+    hashInfo,
+  });
+  if (!cacheLookup.cachedBlobPath) return null;
+  return {
+    cachedBlobPath: cacheLookup.cachedBlobPath,
+    isExactTargetRes: cacheLookup.isExactTargetRes,
+  };
+}
+
+export function renderHyperFramesCompositionToMp4(options: CompositionBlobKeyOptions & {
+  workers?: number;
+  useGpu?: boolean;
+  crf?: number;
+}): string {
+  const tStart = Date.now();
+  const {
+    absCompDir,
+    compName,
+    entryPath,
+    htmlSource,
+    wantGreenStage,
+    durationSec,
+    alphaFormat,
+    hash,
+    hashInfo,
+    ext,
+    useTrueAlpha,
+    expectedFrames,
+    outBlob,
+  } = computeCompositionBlobKey(options);
+  const mode = options.mode ?? "overlay_alpha";
+  const { scalarVars, isSceneHost, nativeWidth, nativeHeight, targetWidth, targetHeight } = hashInfo;
+
+  fs.mkdirSync(options.blobsDir, { recursive: true });
 
   const persistStateForBlob = (resolvedBlob: string, isExactRes: boolean, matchedBackdrop?: string): void => {
     const prev = readCompositionCacheState(options.blobsDir, absCompDir);
@@ -373,7 +467,7 @@ export function renderHyperFramesCompositionToMp4(options: {
       ...(scriptErrors.length > 0 ? { script_errors: scriptErrors } : {}),
     });
     if (useTrueAlpha) {
-      recordCompositionAlphaBboxSidecar(absCompDir, outBlob, durationSec * 0.5);
+      recordCompositionAlphaBboxSidecar(absCompDir, outBlob, durationSec * 0.5, { fps: options.fps, durationSec });
     }
   };
 

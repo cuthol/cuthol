@@ -131,7 +131,7 @@ test("settings: CUTHOL_SETTINGS_FILE=0 disables the user file", () => {
   withEnv({ CUTHOL_SETTINGS_FILE: "0", CUTHOL_PROJECT_DIR: dir, CUTHOL_WORKERS: undefined }, () => {
     assert.deepEqual(resolveSetting(dir, "render.workers"), { value: "auto", source: "default", set_by: null });
     assert.throws(() => setSetting(dir, "render.workers", 4), /G623/);
-    assert.deepEqual(listSettings(dir).length, 10);
+    assert.deepEqual(listSettings(dir).length, 13);
   });
 });
 

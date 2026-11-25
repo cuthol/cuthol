@@ -370,7 +370,11 @@ export function annotateRgb24BufferToCanvas(
               ? [192, 132, 252, 235]
               : [74, 222, 128, 235];
 
-          canvas.strokeRect(bx, by, bw, bh, 2, boxColor);
+          if (cue.kind === "composition" && rootDir && compositionOverlayEmptyAt(rootDir, cueForBox, localOffsetMs)) {
+            strokeDashedRect(canvas, bx, by, bw, bh, boxColor);
+          } else {
+            canvas.strokeRect(bx, by, bw, bh, 2, boxColor);
+          }
           const label = `${cue.id}:${cue.kind}`;
           const badgeW = label.length * 6 + 8;
           const badgeX = Math.max(2, Math.min(width - badgeW - 2, bx));
@@ -397,6 +401,132 @@ export function annotateRgb24BufferToCanvas(
     : null;
 
   return { canvas, metrics, diagnostic };
+}
+
+function compositionSidecarPath(projectDir: string, cue: LaneCue): string | null {
+  try {
+    const dir = cue.composition?.composition_dir;
+    if (!dir) return null;
+    const abs = path.isAbsolute(dir) ? dir : path.resolve(projectDir, dir);
+    return path.join(abs, "assets/cuthol-bbox.json");
+  } catch {
+    return null;
+  }
+}
+
+function compositionFilesChangedSince(projectDir: string, cue: LaneCue, sidecar: string): boolean {
+  // Same exclusion set as the overlay cache content hash: bridge-generated
+  // files (`assets/cuthol-data.*`, `.cuthol-*` metadata) are rewritten by
+  // renders and must not count as composition edits.
+  const isExcluded = (rel: string, name: string): boolean =>
+    name.startsWith(".cuthol-") ||
+    name.startsWith(".tmp.") ||
+    name === "cuthol-bbox.json" ||
+    rel === "assets/cuthol-data.json" ||
+    rel === "assets/cuthol-data.js" ||
+    rel === "assets/cuthol-bbox.json";
+  try {
+    const sidecarMtime = fs.statSync(sidecar).mtimeMs;
+    const dir = cue.composition?.composition_dir;
+    if (!dir) return false;
+    const abs = path.isAbsolute(dir) ? dir : path.resolve(projectDir, dir);
+    const stack: Array<{ dir: string; rel: string }> = [{ dir: abs, rel: "" }];
+    while (stack.length > 0) {
+      const { dir: d, rel: relPrefix } = stack.pop() as { dir: string; rel: string };
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(d, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const e of entries) {
+        if (isExcluded(relPrefix ? `${relPrefix}/${e.name}` : e.name, e.name)) continue;
+        const full = path.join(d, e.name);
+        if (full === sidecar) continue;
+        try {
+          if (e.isDirectory()) {
+            if (e.name === ".hyperframes" || e.name === "snapshots" || e.name === "renders") continue;
+            stack.push({ dir: full, rel: relPrefix ? `${relPrefix}/${e.name}` : e.name });
+          } else if (e.isFile() && fs.statSync(full).mtimeMs > sidecarMtime) return true;
+        } catch {
+          continue;
+        }
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export function isEmptyCompositionSidecar(projectDir: string, cue: LaneCue): boolean {
+  try {
+    const dir = cue.composition?.composition_dir;
+    if (!dir) return false;
+    const abs = path.isAbsolute(dir) ? dir : path.resolve(projectDir, dir);
+    const sidecar = path.join(abs, "assets/cuthol-bbox.json");
+    if (!fs.existsSync(sidecar)) return false;
+    const raw = JSON.parse(fs.readFileSync(sidecar, "utf8")) as { empty?: boolean };
+    return raw?.empty === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True when the cue's transparent overlay capture is empty at the cue-local
+ * time: the sidecar is either fully empty, or its per-frame `empty_ranges`
+ * (cue-local seconds, written by the every-frame probe) cover this offset.
+ * Opaque-mp4 overlay frames never write the sidecar. Old `samples`/`emptyAt`
+ * sidecars are still honored as a fallback.
+ */
+function compositionOverlayEmptyAt(projectDir: string, cue: LaneCue, offsetMs: number): boolean {
+  try {
+    const dir = cue.composition?.composition_dir;
+    if (!dir) return false;
+    const abs = path.isAbsolute(dir) ? dir : path.resolve(projectDir, dir);
+    const sidecar = path.join(abs, "assets/cuthol-bbox.json");
+    if (!fs.existsSync(sidecar)) return false;
+    const raw = JSON.parse(fs.readFileSync(sidecar, "utf8")) as {
+      empty?: boolean;
+      empty_ranges?: Array<[number, number]>;
+      samples?: number[];
+      emptyAt?: number[];
+    };
+    if (raw?.empty === true) {
+      return !compositionFilesChangedSince(projectDir, cue, sidecar);
+    }
+    if (compositionFilesChangedSince(projectDir, cue, sidecar)) return false;
+    if (Array.isArray(raw?.empty_ranges)) {
+      const t = Math.max(0, offsetMs / 1000);
+      return raw.empty_ranges.some(
+        ([a, b]) => Number.isFinite(a) && Number.isFinite(b) && t >= a && t < b
+      );
+    }
+    if (!Array.isArray(raw?.samples) || !Array.isArray(raw?.emptyAt)) return false;
+    const dur = Math.max(1, cue.duration_ms || 1);
+    const f = Math.min(1, Math.max(0, offsetMs / dur));
+    let best = raw.samples[0];
+    for (const s of raw.samples) {
+      if (Math.abs(s - f) < Math.abs(best - f)) best = s;
+    }
+    return raw.emptyAt.includes(best);
+  } catch {
+    return false;
+  }
+}
+
+function strokeDashedRect(canvas: PngCanvas, x: number, y: number, w: number, h: number, color: RgbaColor): void {
+  const dash = 6;
+  const t = 2;
+  for (let ix = x; ix < x + w; ix += dash * 2) {
+    canvas.fillRect(ix, y, Math.min(dash, x + w - ix), t, color);
+    canvas.fillRect(ix, y + h - t, Math.min(dash, x + w - ix), t, color);
+  }
+  for (let iy = y; iy < y + h; iy += dash * 2) {
+    canvas.fillRect(x, iy, t, Math.min(dash, y + h - iy), color);
+    canvas.fillRect(x + w - t, iy, t, Math.min(dash, y + h - iy), color);
+  }
 }
 
 function activeCompositionCuesAt(sequence: CutholSequence, tMs: number): LaneCue[] {
@@ -528,11 +658,27 @@ export function captureMonitorFrame(options: {
       : diagnostic
         ? [diagnostic]
         : [];
+  const activeCompCues = activeCompositionCuesAt(sequence, clampedMs);
   const scriptDiagnostics = collectCompositionScriptDiagnostics(
     sequence,
     paths.rootDir,
-    activeCompositionCuesAt(sequence, clampedMs)
+    activeCompCues
   );
+  // Transparent captures only: the sidecar (assets/cuthol-bbox.json with
+  // empty:true) is written solely by the transparent-overlay capture path
+  // (PNG sequence / alpha mov). Frames composited from a render overlay
+  // (opaque mp4) never get this sidecar, so they are never flagged here.
+  // Frames are checked against the sidecar regardless of pixel content:
+  // the box comes from layout, not pixels, so an empty draw still shows it.
+  const emptyDiagnostics: CutholDiagnostic[] = [];
+  for (const cue of activeCompCues) {
+    const offsetMs = Math.max(0, clampedMs - resolveCueStartMs(sequence, cue));
+    if (compositionOverlayEmptyAt(paths.rootDir, cue, offsetMs)) {
+      emptyDiagnostics.push(
+        DIAGNOSTICS.EMPTY_COMPOSITION_FRAME(cue.id, `${Math.round(clampedMs)}ms`)
+      );
+    }
+  }
 
   return {
     ok: true,
@@ -540,7 +686,7 @@ export function captureMonitorFrame(options: {
     width,
     height,
     metrics,
-    diagnostics: [...baseDiagnostics, ...scriptDiagnostics],
+    diagnostics: [...baseDiagnostics, ...scriptDiagnostics, ...emptyDiagnostics],
   };
 }
 
@@ -737,6 +883,14 @@ export function captureMonitorSheet(options: {
     }
   }
   diagnostics.push(...collectCompositionScriptDiagnostics(sequence, paths.rootDir, sheetCues));
+  // Empty-composition sheet WARN: one per cue, only when the sidecar says the
+  // cue draws nothing at all (opaque-mp4 overlay frames never write the
+  // transparent-capture sidecar, so they never match). Per-tile dashed boxes
+  // are drawn independently of this warning.
+  for (const cue of sheetCues) {
+    if (isEmptyCompositionSidecar(paths.rootDir, cue))
+      diagnostics.push(DIAGNOSTICS.EMPTY_COMPOSITION_SHEET(cue.id));
+  }
 
   return {
     ok: true,

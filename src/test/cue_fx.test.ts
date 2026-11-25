@@ -182,18 +182,24 @@ test("lane excise carries fx and slices fx envelopes on every piece", () => {
             animatable: ["sigma"],
             video_filter: "gblur=sigma={{sigma}}",
           },
+          pulse: {
+            description: "Per-frame brightness lift (envelope-safe)",
+            params: { level: { type: "number", default: 0, min: -1, max: 1 } },
+            animatable: ["level"],
+            video_filter: "eq=brightness={{level}}:eval=frame",
+          },
         },
       }),
       "utf8"
     );
     enableExtensionInWorkspace({ workspaceDir: ws, name: "fxdemo" });
     const cueId = loadSequence(ws).sequence.lanes.flatMap((l) => l.cues)[0].id;
-    addSpineFx({ workspaceDir: ws, item: cueId, kind: "ext:fxdemo/soft_blur", params: { sigma: 4 } });
+    addSpineFx({ workspaceDir: ws, item: cueId, kind: "ext:fxdemo/pulse", params: { level: 0 } });
     setItemEnvelope({
-      workspaceDir: ws, targetId: cueId, parameter: "fx.fx_01.sigma",
+      workspaceDir: ws, targetId: cueId, parameter: "fx.fx_01.level",
       points: [
-        { offset_ms: 0, value: 1, easing: "linear" },
-        { offset_ms: 4000, value: 5, easing: "linear" },
+        { offset_ms: 0, value: -0.5, easing: "linear" },
+        { offset_ms: 4000, value: 0.5, easing: "linear" },
       ],
     });
     const res = exciseLaneCueRanges({
@@ -204,7 +210,7 @@ test("lane excise carries fx and slices fx envelopes on every piece", () => {
     assert.equal(res.remainingCues.length, 2);
     for (const cue of res.remainingCues) {
       assert.deepEqual((cue.fx ?? []).map((f) => f.id), ["fx_01"]);
-      assert.ok(cue.envelopes.some((e) => e.parameter === "fx.fx_01.sigma"));
+      assert.ok(cue.envelopes.some((e) => e.parameter === "fx.fx_01.level"));
     }
   });
 });

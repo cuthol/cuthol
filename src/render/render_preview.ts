@@ -13,6 +13,7 @@ import {
   compileSequenceRenderPlan,
   RenderPreset
 } from "../compositor/compiler.js";
+import { requirePlanPrePasses } from "./pre_pass.js";
 import {
   beginOverlayCollect, isPngSequenceBlobDir,
   isValidVideoBlobOnDisk,
@@ -135,6 +136,7 @@ export function ensurePreviewCompositeMp4(
   }
 
   const plan = compileSequenceRenderPlan(seq, paths, preset, { workers: previewWorkers });
+  requirePlanPrePasses(plan, { cwd: paths.rootDir, step: "ffmpeg pre-pass" }, "preview composite");
 
   fs.mkdirSync(paths.blobsDir, { recursive: true });
   const tmpMp4 = path.join(

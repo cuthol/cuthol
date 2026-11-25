@@ -309,7 +309,7 @@ function scanRenderedOutputGaps(options: {
       j.item.absAssetPath,
       "-vn",
       "-af",
-      `atrim=start=${(j.srcStartMs / 1000).toFixed(6)}:end=${(j.srcEndMs / 1000).toFixed(6)},asetpts=PTS-STARTPTS,aresample=${sampleRate}`,
+      `atrim=start=${(j.srcStartMs / 1000).toFixed(6)}:end=${(j.srcEndMs / 1000).toFixed(6)},asetpts=PTS-${(j.srcStartMs / 1000).toFixed(6)}/TB,aresample=async=1:first_pts=0,aresample=${sampleRate}`,
       "-ac",
       "1",
       "-ar",
@@ -777,7 +777,8 @@ export function scanRenderedMp4AudioHealth(
           : buildHealthCheckAtempoChain(c.item.effectiveRate);
       const af = [
         `atrim=start=${relStartSec}:end=${relEndSec}`,
-        `asetpts=PTS-STARTPTS`,
+        `asetpts=PTS-${relStartSec}/TB`,
+        `aresample=async=1:first_pts=0`,
         ...rateFilters,
         `aresample=${sampleRate}`,
       ].join(",");

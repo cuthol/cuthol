@@ -598,6 +598,201 @@ export function buildHyperFramesFailureError(
 }
 
 /**
+ * Sorts the collected overlay jobs in place (stable for equal ranks). The
+ * Live pre-production child ranks nearest-to-playhead first so a stop loses
+ * the least-needed work; the render's own batch never calls this.
+ */
+export function sortCollectedOverlays(
+  rank: (job: { outBlob: string; compositionDir: string; absCompDir: string }, index: number) => number
+): void {
+  if (!overlayCollector || overlayCollector.length < 2) return;
+  const ranked = overlayCollector.map((j, i) => ({ j, i, r: rank(j, i) }));
+  ranked.sort((a, b) => (a.r !== b.r ? a.r - b.r : a.i - b.i));
+  // Sort in place: callers may hold the collected array.
+  for (let i = 0; i < ranked.length; i++) overlayCollector[i] = ranked[i].j;
+}
+
+/**
+ * Executes all collected cold overlay renders one at a time (each with `W` workers),
+ * finalizing every successful overlay into `.cuthol/blobs/` immediately after its
+ * own capture finishes, so killing the process loses at most the capture in flight.
+ * Failure semantics match {@link runCollectedOverlays}: the first failure is thrown
+ * after the remaining jobs have been attempted.
+ */
+export function runCollectedOverlaysSequential(options?: {
+  workers?: number | null;
+}): {
+  jobs: number;
+  concurrency: number;
+  workers: number;
+  elapsed_ms: number;
+} {
+  ensureHyperFramesRenderLockDefault();
+  const jobs = overlayCollector ?? [];
+  overlayCollector = null;
+  const w = resolveHyperFramesWorkers(options?.workers);
+
+  if (jobs.length === 0) {
+    if (!activeOverlayConcurrencyMeta) {
+      activeOverlayConcurrencyMeta = { concurrency: 1, workers: w };
+    }
+    return { jobs: 0, concurrency: 1, workers: w, elapsed_ms: 0 };
+  }
+
+  activeOverlayConcurrencyMeta = { concurrency: 1, workers: w };
+
+  const t0 = Date.now();
+  let firstFailure: CutholError | null = null;
+  for (let i = 0; i < jobs.length; i++) {
+    const j = jobs[i];
+    progressWatch({
+      mode: "watch",
+      paths: [j.watchTargetPath],
+      expectedFrames: [j.expectedFrames ?? 0],
+    });
+    const tJob = Date.now();
+    let status: number | null = null;
+    let stdoutStr = "";
+    let stderrStr = "";
+    let errObj: Error | undefined;
+    let stalled = false;
+    let stalledMs: number | undefined;
+    let stallThresholdMs: number | undefined;
+    let lastProgress: string | undefined;
+    let commandSummary: string | undefined;
+    let jobElapsedMs = 0;
+    let usedGpu = j.wantGpu;
+    let gpuFallbackReason: string | null = null;
+    try {
+      const proc = spawnWatchedSync(process.execPath, j.args, {
+        encoding: "utf8",
+        maxBuffer: 512 * 1024 * 1024,
+        env: hyperFramesProcessEnv(),
+        step: `hyperframes render (${j.compName}, ${i + 1}/${jobs.length})`,
+        watchedPaths: [j.watchTargetPath],
+        cleanupPathsOnStall: [j.watchTargetPath],
+      });
+      status = proc.status;
+      stdoutStr = String(proc.stdout || "");
+      stderrStr = String(proc.stderr || "");
+      errObj = proc.error;
+      stalled = Boolean(proc.stalled);
+      stalledMs = proc.stalledMs;
+      stallThresholdMs = proc.stallThresholdMs;
+      lastProgress = proc.lastProgress;
+      commandSummary = proc.commandSummary;
+      jobElapsedMs = proc.elapsedMs ?? Date.now() - tJob;
+
+      if (
+        j.wantGpu &&
+        j.fallbackNoGpuArgs &&
+        (status !== 0 || !isValidVideoBlobOnDisk(j.tmpBlob, j.expectedFrames))
+      ) {
+        usedGpu = false;
+        gpuFallbackReason = stalled
+          ? "stalled"
+          : "HyperFrames GPU encode failed; retried with libx264";
+        if (fs.existsSync(j.tmpBlob)) {
+          try {
+            fs.rmSync(j.tmpBlob, { recursive: true, force: true });
+          } catch {
+            // ignore
+          }
+        }
+        const retryProc = spawnWatchedSync(process.execPath, j.fallbackNoGpuArgs, {
+          encoding: "utf8",
+          maxBuffer: 512 * 1024 * 1024,
+          env: hyperFramesProcessEnv(),
+          step: `hyperframes render (${j.compName}, retry cpu)`,
+          watchedPaths: [j.watchTargetPath],
+          cleanupPathsOnStall: [j.watchTargetPath],
+        });
+        status = retryProc.status;
+        stdoutStr = String(retryProc.stdout || "");
+        stderrStr = String(retryProc.stderr || "");
+        errObj = retryProc.error;
+        stalled = Boolean(retryProc.stalled);
+        stalledMs = retryProc.stalledMs;
+        stallThresholdMs = retryProc.stallThresholdMs;
+        lastProgress = retryProc.lastProgress;
+        commandSummary = retryProc.commandSummary;
+        jobElapsedMs += retryProc.elapsedMs ?? 0;
+      }
+
+      if (
+        !stalled &&
+        (status !== 0 || !isValidVideoBlobOnDisk(j.tmpBlob, j.expectedFrames)) &&
+        /\bEPERM\b|\bEACCES\b|\bEBUSY\b/i.test(`${stderrStr}\n${stdoutStr}`)
+      ) {
+        if (fs.existsSync(j.tmpBlob)) {
+          try {
+            fs.rmSync(j.tmpBlob, { recursive: true, force: true });
+          } catch {
+            // ignore
+          }
+        }
+        const epermRetry = spawnWatchedSync(process.execPath, j.args, {
+          encoding: "utf8",
+          maxBuffer: 512 * 1024 * 1024,
+          env: hyperFramesProcessEnv(),
+          step: `hyperframes render (${j.compName}, retry eperm)`,
+          watchedPaths: [j.watchTargetPath],
+          cleanupPathsOnStall: [j.watchTargetPath],
+        });
+        status = epermRetry.status;
+        stdoutStr = String(epermRetry.stdout || "");
+        stderrStr = String(epermRetry.stderr || "");
+        errObj = epermRetry.error;
+        stalled = Boolean(epermRetry.stalled);
+        stalledMs = epermRetry.stalledMs;
+        stallThresholdMs = epermRetry.stallThresholdMs;
+        lastProgress = epermRetry.lastProgress;
+        commandSummary = epermRetry.commandSummary;
+        jobElapsedMs += epermRetry.elapsedMs ?? 0;
+      }
+
+      if (status === 0 && isValidVideoBlobOnDisk(j.tmpBlob, j.expectedFrames)) {
+        j.finalizeSuccess({
+          usedGpu,
+          gpuFallbackReason,
+          elapsedMs: jobElapsedMs,
+          stdoutStr,
+          stderrStr,
+        });
+      } else if (!firstFailure) {
+        firstFailure = buildHyperFramesFailureError(j.compositionDir, j.args, {
+          outputCheck: { expectedFrames: j.expectedFrames, gotFrames: countBlobFrames(j.tmpBlob) },
+          status,
+          stdout: stdoutStr,
+          stderr: stderrStr,
+          error: errObj,
+          stalled,
+          stalledMs,
+          stallThresholdMs,
+          lastProgress,
+          commandSummary,
+        });
+      }
+    } finally {
+      j.cleanupTemp();
+    }
+  }
+  const wallElapsedMs = Date.now() - t0;
+  activeOverlayPrepassWallMs += wallElapsedMs;
+
+  if (firstFailure) {
+    throw firstFailure;
+  }
+
+  return {
+    jobs: jobs.length,
+    concurrency: 1,
+    workers: w,
+    elapsed_ms: wallElapsedMs,
+  };
+}
+
+/**
  * Executes all collected cold overlay renders concurrently (up to `K` at a time, each with `W` workers),
  * finalizes every successful overlay into `.cuthol/blobs/`, and if any overlay failed, throws its exact
  * `CUTHOL-G503` / `CUTHOL-SYS10` error after all sibling jobs have finished.

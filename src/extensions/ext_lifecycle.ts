@@ -1,7 +1,9 @@
 // Extension create/promote/remove and per-project enable/disable (split out of manager.ts).
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
+import { spawnWatchedSync } from "../core/subprocess.js";
 import {
   MountedExtensionRef
 } from "../core/schema.js";
@@ -15,6 +17,7 @@ import {
 } from "../compositor/bridge_exporter.js";
 import { ExtensionScope, EXTENSION_NAME_RE, ExtensionManifest, EXTENSION_MANIFEST_FILENAME } from "./ext_manifest.js";
 import { resolveExtensionRoots, loadExtensionFromDir, resolveExtension } from "./ext_registry.js";
+import { listShaderFxFiles } from "../effects/shader_def.js";
 
 export type ExtensionTemplateKind =
   | "full"
@@ -381,19 +384,125 @@ export function removeExtension(options: {
   };
 }
 
+export interface EnableShaderCompileReport {
+  /** `none`: no shader fx; `compiled`: browser compile ok; `not-compiled`: no browser, static scan only. */
+  status: "none" | "compiled" | "not-compiled" | "skipped";
+  files?: string[];
+  warning?: string;
+}
+
+/**
+ * Browser-compiles the extension's shader fx in one short-lived child process
+ * (one browser for the whole command) and stores each result in the workspace
+ * compile cache. Never throws for infrastructure failures (no browser, hang,
+ * timeout): the caller reports `not-compiled` and the existing static scan +
+ * G711 path stays. Throws for a real compile failure, naming file and line.
+ */
+function compileShadersForEnableSync(args: {
+  workspaceDir: string;
+  extName: string;
+  extDir: string;
+  dryRun: boolean;
+}): EnableShaderCompileReport {
+  const files = listShaderFxFiles(args.extDir);
+  if (files.length === 0) return { status: "none" };
+  let childJs: string;
+  try {
+    childJs = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "effects", "shader_compile_child.js");
+    if (!fs.existsSync(childJs)) {
+      return {
+        status: "not-compiled",
+        files,
+        warning: `Shader '${files[0]}' was not compiled in a browser (compile helper missing); only the static scan ran.`,
+      };
+    }
+  } catch {
+    return {
+      status: "not-compiled",
+      files,
+      warning: `Shader '${files[0]}' was not compiled in a browser (compile helper missing); only the static scan ran.`,
+    };
+  }
+  let raw = "";
+  try {
+    const proc = spawnWatchedSync(
+      process.execPath,
+      [childJs, args.workspaceDir, args.extName, args.extDir, args.dryRun ? "1" : "0"],
+      {
+        encoding: "utf8",
+        step: "shader compile check",
+        maxBuffer: 4 * 1024 * 1024,
+        timeout: 180_000,
+        windowsHide: true,
+      }
+    );
+    raw = String(proc.stdout ?? "");
+    if (proc.error || proc.signal) throw proc.error ?? new Error(`signal ${proc.signal}`);
+  } catch (err) {
+    return {
+      status: "not-compiled",
+      files,
+      warning: `Shader '${files[0]}' was not compiled in a browser (${err instanceof Error ? err.message.slice(0, 160) : "browser did not start"}); only the static scan ran.`,
+    };
+  }
+  let res: { status: string; file?: string; line?: number; detail?: string; files?: string[] };
+  try {
+    res = JSON.parse(raw.trim().split("\n").pop() ?? "") as {
+      status: string;
+      file?: string;
+      line?: number;
+      detail?: string;
+      files?: string[];
+    };
+  } catch {
+    return {
+      status: "not-compiled",
+      files,
+      warning: `Shader '${files[0]}' was not compiled in a browser (unreadable compile result); only the static scan ran.`,
+    };
+  }
+  if (res.status === "failed") {
+    throw new CutholError(
+      DIAGNOSTICS.INVALID_EXTENSION_MANIFEST(
+        args.extName,
+        `'fx' shader ('${res.file ?? files[0]}') failed to compile (line ${res.line ?? 0}): ${res.detail ?? "unknown error"}`
+      )
+    );
+  }
+  if (res.status === "ok" || res.status === "none") {
+    return { status: res.status === "ok" ? "compiled" : "none", files: res.files ?? files };
+  }
+  return {
+    status: "not-compiled",
+    files,
+    warning: `Shader '${files[0]}' was not compiled in a browser (${(res.detail ?? "browser did not start").slice(0, 160)}); only the static scan ran.`,
+  };
+}
+
 export function enableExtensionInWorkspace(options: {
   workspaceDir: string;
   name: string;
   scope?: ExtensionScope;
   dryRun?: boolean;
+  /** Skip the browser compile check (the fx sandbox: its cache is always empty and its render reports compile errors). */
+  skipShaderCompile?: boolean;
 }): {
   extension: MountedExtensionRef;
   manifest_path: string;
   updated_previous: boolean;
   previous_hash: string | null;
+  shader_compile?: EnableShaderCompileReport;
   dry_run?: boolean;
 } {
   const ext = resolveExtension(options.name, options.workspaceDir, options.scope);
+  const shaderCompile: EnableShaderCompileReport = options.skipShaderCompile
+    ? { status: "skipped" }
+    : compileShadersForEnableSync({
+        workspaceDir: options.workspaceDir,
+        extName: ext.name,
+        extDir: ext.dir,
+        dryRun: options.dryRun ?? false,
+      });
   const { sequence } = loadSequence(options.workspaceDir);
   const existing = (sequence.extensions ?? []).find((e) => e.name === ext.name) ?? null;
 
@@ -411,6 +520,7 @@ export function enableExtensionInWorkspace(options: {
       manifest_path: ext.manifestPath,
       updated_previous: Boolean(existing),
       previous_hash: existing?.content_hash ?? null,
+      shader_compile: shaderCompile,
       dry_run: true,
     };
   }
@@ -458,6 +568,7 @@ export function enableExtensionInWorkspace(options: {
     manifest_path: ext.manifestPath,
     updated_previous: Boolean(existing),
     previous_hash: existing?.content_hash ?? null,
+    shader_compile: shaderCompile,
   };
 }
 

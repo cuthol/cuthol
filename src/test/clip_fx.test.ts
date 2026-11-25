@@ -97,6 +97,12 @@ const FXDEMO_MANIFEST: Record<string, unknown> = {
       animatable: ["sigma"],
       video_filter: "gblur=sigma={{sigma}}",
     },
+    pulse: {
+      description: "Per-frame brightness lift (envelope-safe)",
+      params: { level: { type: "number", default: 0, min: -1, max: 1 } },
+      animatable: ["level"],
+      video_filter: "eq=brightness={{level}}:eval=frame",
+    },
     tint: {
       description: "fixed tint (not animatable)",
       params: { amount: { type: "number", default: 2 } },
@@ -266,18 +272,37 @@ test("remove deletes the fx envelopes; unknown fx ids are refused", () => {
     enableExtensionInWorkspace({ workspaceDir: ws, name: "fxdemo" });
     const { clipId } = setupClip(ws);
     addSpineFx({ workspaceDir: ws, clipId, kind: "ext:fxdemo/soft_blur", params: { sigma: 4 } });
+    // [fxcheck:A] an envelope on gblur's once-read sigma is rejected before anything is written.
+    assert.throws(
+      () =>
+        setItemEnvelope({
+          workspaceDir: ws,
+          targetId: clipId,
+          parameter: "fx.fx_01.sigma",
+          points: [
+            { offset_ms: 0, value: 2, easing: "linear" },
+            { offset_ms: 1000, value: 6, easing: "linear" },
+          ],
+        }),
+      /CUTHOL-G322/
+    );
+    addSpineFx({ workspaceDir: ws, clipId, kind: "ext:fxdemo/pulse", params: { level: 0 } });
     setItemEnvelope({
       workspaceDir: ws,
       targetId: clipId,
-      parameter: "fx.fx_01.sigma",
+      parameter: "fx.fx_02.level",
       points: [
-        { offset_ms: 0, value: 2, easing: "linear" },
-        { offset_ms: 1000, value: 6, easing: "linear" },
+        { offset_ms: 0, value: -0.5, easing: "linear" },
+        { offset_ms: 1000, value: 0.5, easing: "linear" },
       ],
     });
     assert.ok(
-      loadSequence(ws).sequence.spine.clips[0].envelopes.some((e) => e.parameter === "fx.fx_01.sigma")
+      loadSequence(ws).sequence.spine.clips[0].envelopes.some((e) => e.parameter === "fx.fx_02.level")
     );
+    removeSpineFx({ workspaceDir: ws, clipId, fxId: "fx_02" });
+    const afterPulse = loadSequence(ws).sequence.spine.clips[0];
+    assert.deepEqual((afterPulse.fx ?? []).map((f) => f.id), ["fx_01"]);
+    assert.ok(!afterPulse.envelopes.some((e) => e.parameter.startsWith("fx.")), JSON.stringify(afterPulse.envelopes));
     removeSpineFx({ workspaceDir: ws, clipId, fxId: "fx_01" });
     const clip = loadSequence(ws).sequence.spine.clips[0];
     assert.equal(clip.fx, undefined);
@@ -295,23 +320,23 @@ test("split and excise copy the fx list (and slice its envelopes) into every pie
     writeExtension(ws, FXDEMO_MANIFEST);
     enableExtensionInWorkspace({ workspaceDir: ws, name: "fxdemo" });
     const { clipId } = setupClip(ws);
-    addSpineFx({ workspaceDir: ws, clipId, kind: "ext:fxdemo/soft_blur", params: { sigma: 4 } });
+    addSpineFx({ workspaceDir: ws, clipId, kind: "ext:fxdemo/pulse", params: { level: 0 } });
     setItemEnvelope({
       workspaceDir: ws,
       targetId: clipId,
-      parameter: "fx.fx_01.sigma",
+      parameter: "fx.fx_01.level",
       points: [
-        { offset_ms: 0, value: 2, easing: "linear" },
-        { offset_ms: 4000, value: 6, easing: "linear" },
+        { offset_ms: 0, value: -0.5, easing: "linear" },
+        { offset_ms: 4000, value: 0.5, easing: "linear" },
       ],
     });
     const { clips } = splitSpineClip({ workspaceDir: ws, clipId, splitPointsMs: [2000] });
     assert.equal(clips.length, 2);
     for (const c of clips) {
       assert.equal(c.fx?.length, 1);
-      assert.equal(c.fx?.[0].kind, "ext:fxdemo/soft_blur");
-      assert.deepEqual(c.fx?.[0].params, { sigma: 4 });
-      const env = c.envelopes.find((e) => e.parameter === "fx.fx_01.sigma");
+      assert.equal(c.fx?.[0].kind, "ext:fxdemo/pulse");
+      assert.deepEqual(c.fx?.[0].params, { level: 0 });
+      const env = c.envelopes.find((e) => e.parameter === "fx.fx_01.level");
       assert.ok(env, `piece ${c.id} lost its fx envelope`);
       assert.ok(env.points.every((p) => p.offset_ms >= 0 && p.offset_ms <= c.duration_ms));
     }
@@ -323,7 +348,7 @@ test("split and excise copy the fx list (and slice its envelopes) into every pie
     assert.equal(remainingClips.length, 2);
     for (const c of remainingClips) {
       assert.equal(c.fx?.length, 1);
-      assert.ok(c.envelopes.some((e) => e.parameter === "fx.fx_01.sigma"));
+      assert.ok(c.envelopes.some((e) => e.parameter === "fx.fx_01.level"));
     }
   });
 });
@@ -393,13 +418,28 @@ test("only manifest-declared animatable params accept envelopes (G119 otherwise)
     addSpineFx({ workspaceDir: ws, clipId, kind: "ext:fxdemo/soft_blur", params: { sigma: 4 } });
     addSpineFx({ workspaceDir: ws, clipId, kind: "ext:fxdemo/tint" });
     addSpineFx({ workspaceDir: ws, clipId, filter: "gblur=sigma=2" });
+    // [fxcheck:A] gblur reads sigma once: an envelope is rejected (G322), not compiled.
+    assert.throws(
+      () =>
+        setItemEnvelope({
+          workspaceDir: ws,
+          targetId: clipId,
+          parameter: "fx.fx_01.sigma",
+          points: [
+            { offset_ms: 0, value: 2, easing: "linear" },
+            { offset_ms: 2000, value: 6, easing: "linear" },
+          ],
+        }),
+      /CUTHOL-G322/
+    );
+    addSpineFx({ workspaceDir: ws, clipId, kind: "ext:fxdemo/pulse", params: { level: 0 } });
     setItemEnvelope({
       workspaceDir: ws,
       targetId: clipId,
-      parameter: "fx.fx_01.sigma",
+      parameter: "fx.fx_04.level",
       points: [
-        { offset_ms: 0, value: 2, easing: "linear" },
-        { offset_ms: 2000, value: 6, easing: "linear" },
+        { offset_ms: 0, value: -0.5, easing: "linear" },
+        { offset_ms: 2000, value: 0.5, easing: "linear" },
       ],
     });
     const { sequence, paths } = loadSequence(ws);
@@ -407,7 +447,7 @@ test("only manifest-declared animatable params accept envelopes (G119 otherwise)
       compileSequenceRenderPlan(sequence, paths, "draft_480p").filterComplex,
       0
     );
-    assert.ok(chain.includes("gblur=sigma='if(lt(t"), chain);
+    assert.ok(chain.includes("eq=brightness='if(lt(t"), chain);
     assert.throws(
       () =>
         setItemEnvelope({

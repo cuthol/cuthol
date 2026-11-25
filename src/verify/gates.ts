@@ -38,7 +38,10 @@ import { verifyCompositionAudio } from "./gates_hf_audio.js";
 import { verifyEdgeMode } from "./gates_edge.js";
 import { verifyExtensionTransitions } from "./gates_transition.js";
 import { verifySpineFx } from "./gates_fx.js";
+import { verifyPresetBindings } from "./gates_preset.js";
+import { verifyTransitionBackstop } from "./gates_transitions.js";
 import { verifyColorGates } from "./gates_color.js";
+import { verifyEmptyCompositions } from "./gates_empty_composition.js";
 import { verifyBoundaryContinuity } from "./gates_boundary.js";
 
 export { verifyG1Schema, verifyG2Assets, verifyG3Timing } from "./gates_structural.js";
@@ -333,6 +336,8 @@ export function verifySequence(
     verifyG1Schema(seq, libMap, spineMap, diagnostics);
     verifyEasing(seq, diagnostics);
     verifySpineFx(seq, paths, diagnostics);
+    if (paths) verifyPresetBindings(seq, paths, diagnostics);
+    verifyTransitionBackstop(seq, paths, diagnostics);
     verifyColorGates(seq, diagnostics, paths?.rootDir);
   }
 
@@ -356,6 +361,7 @@ export function verifySequence(
     // Recorded composition page script errors (no browser: reads the content-keyed
     // records that measurement, preview, and the monitor probe wrote).
     verifyCompositionScripts(seq, paths, diagnostics);
+    diagnostics.push(...verifyEmptyCompositions(seq, paths));
   }
 
   // --- Gate 5: Audio Signal & Render Frame Sanity (G5_SIGNAL) ---

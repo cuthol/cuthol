@@ -10,6 +10,9 @@
 // (`alpha_keep` parts, only when the item carries alpha); `process` entries run on the alpha
 // too. Call sites place the parts with `emitFxStageParts`; when every part is a plain chain
 // the filters inline into the same single chain.
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
 import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
 import type { ClipFxSpec, CutholSequence, EffectParamValue, ParameterEnvelope } from "../core/schema.js";
 import { MOTION_FX_KIND } from "../effects/effect_types.js";
@@ -36,10 +39,80 @@ export interface FxStageOwner {
 
 export type FxStageOwnerSpec = Pick<FxStageOwner, "id" | "fx" | "envelopes">;
 
-/** One emitted piece of the fx stage: plain filters, or filters with the alpha held aside. */
+/** One emitted piece of the fx stage: plain filters, filters with the alpha held aside, or a pre-pass cut marker. */
 export type FxStagePart =
   | { type: "chain"; filters: string[] }
-  | { type: "alpha_keep"; filters: string[]; pinPixFmt: string };
+  | { type: "alpha_keep"; filters: string[]; pinPixFmt: string }
+  | { type: "cut"; cutAfterEntry: number }
+  | { type: "shader_cut"; cut: FxShaderCutSpec };
+
+/**
+ * One step of the shader run inside a shader pre-pass, in written order: a
+ * shader entry (its file plus per-frame uniform values) or the ffmpeg filters
+ * of entries written between two shader entries.
+ */
+export type FxShaderRunStep =
+  | {
+      kind: "shader";
+      entryId: string;
+      /** Absolute path of the `.glsl` file. */
+      file: string;
+      /** sha256 (16 hex chars) of the file, part of the pre-pass cache key. */
+      hash: string;
+      /** Static uniform values (numbers and booleans from the entry params). */
+      uniforms: Record<string, number | boolean>;
+      /** Per-param envelopes, evaluated per frame at the item-local time. */
+      envelopes: Record<string, ParameterEnvelope>;
+      /**
+       * Item-local frame index the pre-pass output starts at (windowed
+       * pre-passes only; absent means 0). The worker adds it to each decoded
+       * frame index before evaluating uniforms, so windowed frames shade
+       * exactly like the same frames of a full-clip pre-pass.
+       */
+      frameOffset?: number;
+    }
+  | { kind: "ffmpeg"; filters: string[] };
+
+/**
+ * The automatic cut a shader entry (or run of shader entries) creates: the
+ * prefix runs in the pre-pass, the ordered steps run in the worker, the main
+ * graph continues after the last shader entry.
+ */
+export interface FxShaderCutSpec {
+  /** Pixel-entry index of the first shader entry (prefix = entries before it). */
+  firstPixelEntry: number;
+  /** Pixel-entry index of the last shader entry (suffix = entries after it). */
+  lastPixelEntry: number;
+  steps: FxShaderRunStep[];
+  /** Intermediate pixel format: `rgba` (8-bit input) or `rgba64le` (> 8-bit). */
+  pixFmt: "rgba" | "rgba64le";
+}
+
+/**
+ * Filters of every part that does pixel work, in order. A `cut` part is a
+ * compile-time marker only: it contributes no filters, so the flattened chain
+ * with a cut equals the flattened chain without it. Every call site that
+ * flattens the stage for checking (probe, frozen probe, gates) uses this, so
+ * both sides of a cut are always checked.
+ */
+export function flattenFxStageParts(parts: FxStagePart[]): string[] {
+  const out: string[] = [];
+  for (const p of parts) {
+    if (p.type === "cut" || p.type === "shader_cut") continue;
+    out.push(...p.filters);
+  }
+  return out;
+}
+
+/**
+ * Intermediate pixel format of a shader pre-pass: `rgba64le` when the chain
+ * carries more than 8 bits into the stage, `rgba` otherwise.
+ */
+export function shaderPassPixFmt(receivedPixFmt: string | null): "rgba" | "rgba64le" {
+  const fmt = (receivedPixFmt ?? "").toLowerCase();
+  if (/(64|48|10|12|16|p010|p016|p210|p410)/.test(fmt)) return "rgba64le";
+  return "rgba";
+}
 
 /**
  * Converter placed before every fx entry. It has no size and no target format, so it converts
@@ -171,20 +244,62 @@ export function formatFxParamValue(value: EffectParamValue): string | null {
 
 const FX_TEMPLATE_PLACEHOLDER_RE = /\{\{\s*([a-zA-Z0-9_-]+)\s*\}\}/g;
 
-/** Substitutes `{{param}}` with animated expressions (already quoted) or escaped static values. */
-function substituteFxTemplate(
+/**
+ * True when the offset sits inside a single-quoted region, matching what ffmpeg does:
+ * outside quotes `\` escapes the next character, inside quotes it is a plain character
+ * and the next `'` still closes the region.
+ */
+export function fxTemplateQuoteState(template: string, offset: number): boolean {
+  let inQuote = false;
+  for (let i = 0; i < offset && i < template.length; i++) {
+    if (inQuote) {
+      if (template[i] === "'") inQuote = false;
+    } else if (template[i] === "\\") {
+      i++;
+    } else if (template[i] === "'") {
+      inQuote = true;
+    }
+  }
+  return inQuote;
+}
+
+/** Throws when the template has an unterminated single-quoted region. Names the fx and column. */
+export function assertFxTemplateQuotesClosed(
+  template: string,
+  fail: (detail: string) => CutholError
+): void {
+  if (fxTemplateQuoteState(template, template.length)) {
+    throw fail(`template has an unterminated single-quoted region (a ' without its closing '); quote every region or remove the stray quote.`);
+  }
+}
+
+/**
+ * Shared placeholder substitution: one rule for render and checks.
+ * A placeholder outside quotes: animated -> `'expr'` (quoted), static -> escaped value.
+ * Inside a single-quoted region: animated -> bare `expr`; static -> escaped value;
+ * a static value containing `'` -> ERROR naming the param. `animated` holds bare expressions.
+ */
+export function substituteFxTemplateValues(
   template: string,
   values: Record<string, EffectParamValue>,
   animated: Map<string, string>,
   fail: (detail: string) => CutholError
 ): string {
-  const out = template.replace(FX_TEMPLATE_PLACEHOLDER_RE, (_m, name: string) => {
+  assertFxTemplateQuotesClosed(template, fail);
+  FX_TEMPLATE_PLACEHOLDER_RE.lastIndex = 0;
+  const out = template.replace(FX_TEMPLATE_PLACEHOLDER_RE, function (_m, name: string) {
+    const offset = arguments[arguments.length - 2] as number;
+    const inQuote = fxTemplateQuoteState(template, offset);
     const expr = animated.get(name);
-    if (expr !== undefined) return expr;
+    if (expr !== undefined) return inQuote ? expr : `'${expr}'`;
     if (!(name in values)) {
       throw fail(`no value for the '${name}' parameter (define a default or pass '--param ${name}=<value>').`);
     }
-    const formatted = formatFxParamValue(values[name]);
+    const raw = values[name];
+    if (typeof raw === "string" && inQuote && raw.includes("'")) {
+      throw fail(`'${name}' parameter value contains a single quote (') and cannot go inside a quoted template region (template: '${template.slice(0, 80)}').`);
+    }
+    const formatted = formatFxParamValue(raw);
     if (formatted === null) {
       throw fail(`'${name}' parameter value cannot be written into the filter (it contains a control character).`);
     }
@@ -194,6 +309,16 @@ function substituteFxTemplate(
     throw fail(`template contains an unresolvable placeholder ('${out.slice(0, 80)}').`);
   }
   return out;
+}
+
+/** Substitutes `{{param}}` with animated expressions (already quoted) or escaped static values. */
+function substituteFxTemplate(
+  template: string,
+  values: Record<string, EffectParamValue>,
+  animated: Map<string, string>,
+  fail: (detail: string) => CutholError
+): string {
+  return substituteFxTemplateValues(template, values, animated, fail);
 }
 
 const FX_ENVELOPE_RE = /^fx\.([^.]+)\.([^.]+)$/;
@@ -339,6 +464,14 @@ export function buildItemFxStage(
     receivedPixFmt: string | null;
     /** True when the item carries a live alpha plane into the stage. */
     itemHasAlpha: boolean;
+    /**
+     * Pre-pass cut position: number of pixel entries compiled before the cut
+     * (`0` = before the first entry). The cut is a marker part only; the
+     * flattened filter chain is unchanged. A cut inside a merged `alpha_keep`
+     * run snaps to the end of the run: a wrapper is never split, the
+     * shader-side rule is that the entry copies alpha itself.
+     */
+    cutAfterEntry?: number;
   }
 ): FxStagePart[] {
   const { owner } = params;
@@ -353,7 +486,20 @@ export function buildItemFxStage(
   const rootDir = ctx.paths?.rootDir as string | undefined;
   // Per-entry filter lists with their alpha class, in order. The class lookup also validates
   // the entry (unknown kind or bad params throw G118 here, as before).
-  const entries: { alpha: "keep" | "process"; filters: string[] }[] = [];
+  // Shader entries carry their file and per-frame uniforms instead of filters;
+  // a shader entry always breaks a merged `alpha_keep` run (it is `process`
+  // for assembly: the wrapper never crosses the automatic shader cut).
+  type CompiledEntry =
+    | { kind: "pixel"; alpha: "keep" | "process"; filters: string[] }
+    | {
+        kind: "shader";
+        entryId: string;
+        file: string;
+        hash: string;
+        uniforms: Record<string, number | boolean>;
+        envelopes: Record<string, ParameterEnvelope>;
+      };
+  const entries: CompiledEntry[] = [];
   for (const fx of active) {
     const fail = (detail: string, suggestion?: string) =>
       new CutholError(DIAGNOSTICS.SPINE_FX_INVALID(owner.id, fx.id, fx.kind, detail, suggestion));
@@ -400,12 +546,53 @@ export function buildItemFxStage(
       for (const segment of splitTopLevel((supplied.filter as string).trim(), ",")) {
         filters.push(SPINE_FX_ENTRY_CONVERTER, segment.trim());
       }
-      entries.push({ alpha: "keep", filters });
+      entries.push({ kind: "pixel", alpha: "keep", filters });
       continue;
     }
     const def = lookupExtensionFx(fx.kind, seq, rootDir, fail);
     const values = resolveFxParams(def.spec.params, fx.params as Record<string, EffectParamValue>, fail);
     const animatable = new Set(def.spec.animatable ?? []);
+    if (def.spec.backend === "shader") {
+      const envelopes: Record<string, ParameterEnvelope> = {};
+      for (const [param, env] of ownEnvelopes) {
+        const declared = (def.spec.params ?? {})[param];
+        if (!declared) {
+          throw envFail(`fx.${fx.id}.${param}`, `effect '${fx.kind}' has no parameter named '${param}'.`);
+        }
+        if (!animatable.has(param)) {
+          throw envFail(
+            `fx.${fx.id}.${param}`,
+            `'${param}' is not envelopable (the effect did not declare it in the 'animatable' list).`
+          );
+        }
+        if ((env.points ?? []).length === 0) continue; // point-less envelope: the static value is used
+        envelopes[param] = env;
+      }
+      const uniforms: Record<string, number | boolean> = {};
+      for (const [k, v] of Object.entries(values)) {
+        if (typeof v !== "number" && typeof v !== "boolean") {
+          throw fail(`'${k}' must be a number or boolean for a shader effect (given: ${JSON.stringify(v)}).`);
+        }
+        uniforms[k] = v;
+      }
+      const rel = def.spec.shader ?? "";
+      const abs = path.resolve(def.dir, rel);
+      let source: string;
+      try {
+        source = fs.readFileSync(abs, "utf8");
+      } catch {
+        throw fail(`shader file ('${rel}') could not be read (re-enable the extension to re-validate).`);
+      }
+      entries.push({
+        kind: "shader",
+        entryId: fx.id,
+        file: abs,
+        hash: createHash("sha256").update(source).digest("hex").slice(0, 16),
+        uniforms,
+        envelopes,
+      });
+      continue;
+    }
     const animated = new Map<string, string>();
     for (const [param, env] of ownEnvelopes) {
       const declared = (def.spec.params ?? {})[param];
@@ -420,9 +607,10 @@ export function buildItemFxStage(
       }
       const expr = compileEnvelopeToFfmpegExpr({ envelope: env, timeBaseOffsetMs: 0, mode: "raw" });
       if (expr === null) continue; // point-less envelope: no animation, the static value is used
-      animated.set(param, `'${expr}'`);
+      animated.set(param, expr);
     }
     entries.push({
+      kind: "pixel",
       alpha: def.spec.alpha ?? "keep",
       filters: [SPINE_FX_ENTRY_CONVERTER, substituteFxTemplate(def.spec.video_filter, values, animated, fail)],
     });
@@ -436,19 +624,112 @@ export function buildItemFxStage(
   }
   if (entries.length === 0) return [];
   const exit: FxStagePart = { type: "chain", filters: [fxExitConverter(params.receivedPixFmt)] };
-  if (!params.itemHasAlpha) {
-    return [{ type: "chain", filters: [...entries.flatMap((e) => e.filters), ...exit.filters] }];
-  }
-  const parts: FxStagePart[] = [];
   const pinPixFmt = alphaKeepPinPixFmt(params.receivedPixFmt);
-  for (const e of entries) {
-    const last = parts[parts.length - 1];
-    if (e.alpha === "keep" && last?.type === "alpha_keep") last.filters.push(...e.filters);
-    else if (e.alpha === "keep") parts.push({ type: "alpha_keep", filters: [...e.filters], pinPixFmt });
-    else parts.push({ type: "chain", filters: [...e.filters] });
+  // Assembles one side of a cut. A shader entry always ends the running
+  // `alpha_keep` merge (it is `process` for assembly): the wrapper never
+  // crosses the automatic shader cut, on either side of it.
+  const assemble = (side: CompiledEntry[]): FxStagePart[] => {
+    const pixels = (seg: CompiledEntry[]): Extract<CompiledEntry, { kind: "pixel" }>[] =>
+      seg.filter((e): e is Extract<CompiledEntry, { kind: "pixel" }> => e.kind === "pixel");
+    const assemblePixels = (list: Extract<CompiledEntry, { kind: "pixel" }>[]): FxStagePart[] => {
+      if (!params.itemHasAlpha) {
+        const filters = list.flatMap((e) => e.filters);
+        return filters.length > 0 ? [{ type: "chain", filters }] : [];
+      }
+      const parts: FxStagePart[] = [];
+      for (const e of list) {
+        const last = parts[parts.length - 1];
+        if (e.alpha === "keep" && last?.type === "alpha_keep") last.filters.push(...e.filters);
+        else if (e.alpha === "keep") parts.push({ type: "alpha_keep", filters: [...e.filters], pinPixFmt });
+        else parts.push({ type: "chain", filters: [...e.filters] });
+      }
+      return parts;
+    };
+    if (!side.some((e) => e.kind === "shader")) return assemblePixels(pixels(side));
+    const out: FxStagePart[] = [];
+    let seg: CompiledEntry[] = [];
+    for (const e of side) {
+      if (e.kind === "shader") {
+        out.push(...assemblePixels(pixels(seg)));
+        seg = [];
+        continue;
+      }
+      seg.push(e);
+    }
+    out.push(...assemblePixels(pixels(seg)));
+    return out;
+  };
+  const entryAlpha = (e: CompiledEntry): "keep" | "process" =>
+    e.kind === "shader" ? "process" : e.alpha;
+  // A shader entry (or run of them) is an automatic cut: the prefix runs in
+  // the pre-pass, the ordered steps run in the worker, the main graph
+  // continues after the last shader entry. Ffmpeg entries between two shader
+  // entries become an ffmpeg step inside the same pre-pass (written order is
+  // kept). The prefix ends with the entry converter + `format=rgba`
+  // (8-bit input) or `rgba64le` (> 8-bit), which the worker reads back.
+  const firstShader = entries.findIndex((e) => e.kind === "shader");
+  if (firstShader >= 0) {
+    let lastShader = firstShader;
+    for (let k = firstShader + 1; k < entries.length; k++) {
+      if (entries[k].kind === "shader") lastShader = k;
+    }
+    const pixFmt = shaderPassPixFmt(params.receivedPixFmt);
+    const steps: FxShaderRunStep[] = [];
+    for (let k = firstShader; k <= lastShader; k++) {
+      const e = entries[k];
+      if (e.kind === "shader") {
+        steps.push({ kind: "shader", entryId: e.entryId, file: e.file, hash: e.hash, uniforms: e.uniforms, envelopes: e.envelopes });
+      } else {
+        steps.push({ kind: "ffmpeg", filters: [...e.filters] });
+      }
+    }
+    const prefixFilters = entries.slice(0, firstShader).flatMap((e) => (e.kind === "pixel" ? e.filters : []));
+    const rgbaExit = `${SPINE_FX_ENTRY_CONVERTER},format=${pixFmt}`;
+    const prefix: FxStagePart[] =
+      prefixFilters.length > 0
+        ? [...assemble(entries.slice(0, firstShader)), { type: "chain", filters: [rgbaExit] }]
+        : [{ type: "chain", filters: [rgbaExit] }];
+    return [
+      ...prefix,
+      {
+        type: "shader_cut",
+        cut: { firstPixelEntry: firstShader, lastPixelEntry: lastShader, steps, pixFmt },
+      },
+      ...assemble(entries.slice(lastShader + 1)),
+      exit,
+    ];
   }
-  parts.push(exit);
-  return parts;
+  // A cut never splits a merged `alpha_keep` part: pixel effects such as `eq`
+  // process the alpha plane as well (measured: `eq=brightness` lifts it), so
+  // closing the wrapper before the cut and reopening it after is lossy
+  // (~44 dB). A cut inside a keep run snaps to the end of the run: the whole
+  // wrapper stays on the pre-pass side and the shader-side rule is that the
+  // entry copies alpha itself. Outside keep runs the cut is exactly lossless.
+  const cut = params.cutAfterEntry;
+  let at = cut ?? -1;
+  if (at >= 0 && params.itemHasAlpha) {
+    let runStart = -1;
+    for (let k = 0; k <= entries.length; k++) {
+      const keep = k < entries.length && entryAlpha(entries[k]) === "keep";
+      if (keep && runStart < 0) runStart = k;
+      if (!keep && runStart >= 0) {
+        if (runStart < at && at < k) at = k;
+        runStart = -1;
+      }
+    }
+  }
+  if (cut === undefined) {
+    // No cut: keep the exact historical part shape (one merged chain when
+    // there is no live alpha, exit converter included).
+    if (!params.itemHasAlpha) {
+      return entries.length > 0
+        ? [{ type: "chain", filters: [...entries.flatMap((e) => (e.kind === "pixel" ? e.filters : [])), ...exit.filters] }]
+        : [];
+    }
+    return [...assemble(entries), exit];
+  }
+  at = Math.max(0, Math.min(at, entries.length));
+  return [...assemble(entries.slice(0, at)), { type: "cut", cutAfterEntry: at }, ...assemble(entries.slice(at)), exit];
 }
 
 /**
@@ -470,6 +751,13 @@ export function emitFxStageParts(
     return { exitFilterIdx: vFilters.length - 1 };
   }
   for (const p of parts) {
+    if (p.type === "cut") continue;
+    if (p.type === "shader_cut") {
+      const first = p.cut.steps.find((s) => s.kind === "shader");
+      throw new CutholError(
+        DIAGNOSTICS.SHADER_LANE_REJECTED("lane item", first && first.kind === "shader" ? first.entryId : "shader")
+      );
+    }
     if (p.type === "chain") {
       vFilters.push(...p.filters);
       continue;
@@ -545,5 +833,5 @@ export function buildSpineClipFxFilters(
     receivedPixFmt: params.receivedPixFmt,
     itemHasAlpha: false,
   });
-  return parts.flatMap((p) => p.filters);
+  return flattenFxStageParts(parts);
 }

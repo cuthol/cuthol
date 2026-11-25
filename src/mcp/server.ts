@@ -70,6 +70,47 @@ const PROGRESSIVE_CORE_TOOLS = new Set(["workspace", "library", "brief", "spine"
 const SPECIALIST_TOOLS = ["composition", "speech", "mix", "cue", "color", "render", "extension"];
 
 /**
+ * Guide content shared by the MCP `guide` tool and the `cuthol guide` CLI
+ * command: the same topic resolution and the same text, without the MCP envelope.
+ */
+export function getGuideText(topic: string, workspaceDir?: string | null): { ok: boolean; text: string } {
+  const trimmed = (topic || "").trim();
+  if (/^ext:/i.test(trimmed)) {
+    const extName = trimmed.slice(4).trim();
+    try {
+      const ext = resolveExtension(extName, workspaceDir);
+      const guideRel = ext.guideRelPath ?? "README.md";
+      const guideFile = path.join(ext.dir, guideRel);
+      if (!fs.existsSync(guideFile)) {
+        return { ok: false, text: `FAILED guide: extension '${ext.name}' does not have a guide file ('${guideRel}') in ${ext.dir}.` };
+      }
+      return { ok: true, text: fs.readFileSync(guideFile, "utf8").replace(/^---[\s\S]*?---\s*/, "") };
+    } catch (err) {
+      return { ok: false, text: `FAILED guide: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+  const resolution = resolveGuideTopic(trimmed, resolvePackageSkillsDir());
+  if (!resolution.ok) {
+    return { ok: false, text: `FAILED guide: ${resolution.message}` };
+  }
+  if (resolution.kind === "catalog") {
+    if (!fs.existsSync(resolution.mainFile)) {
+      return { ok: false, text: `FAILED guide: main skill file '${resolution.mainFile}' not found.` };
+    }
+    const main = fs.readFileSync(resolution.mainFile, "utf8").replace(/^---[\s\S]*?---\s*/, "");
+    return { ok: true, text: `${main}\n\n${buildSkillsCatalogSection(resolution.skills)}` };
+  }
+  if (!fs.existsSync(resolution.file)) {
+    return { ok: false, text: `FAILED guide: topic '${trimmed}' is not available (file '${resolution.file}' not found).` };
+  }
+  const text = fs.readFileSync(resolution.file, "utf8").replace(/^---[\s\S]*?---\s*/, "");
+  if (resolution.appendAudioPointer) {
+    return { ok: true, text: `${text}\n\nRelated: for loudness, voice cleanup and music ducking also read guide(topic="cuthol-audio").` };
+  }
+  return { ok: true, text };
+}
+
+/**
  * Build the server instructions. The skill topic list is generated from a scan
  * of `skills/`, never fixed in code, so later skills show up automatically.
  */
@@ -654,53 +695,8 @@ export class CutholMcpServer {
   }
 
   private readGuide(topic: string, workspaceDir?: string | null): McpToolResult {
-    const trimmed = (topic || "").trim();
-    if (/^ext:/i.test(trimmed)) {
-      const extName = trimmed.slice(4).trim();
-      try {
-        const ext = resolveExtension(extName, workspaceDir);
-        const guideRel = ext.guideRelPath ?? "README.md";
-        const guideFile = path.join(ext.dir, guideRel);
-        if (!fs.existsSync(guideFile)) {
-          return this.textResult(
-            `FAILED guide: extension '${ext.name}' does not have a guide file ('${guideRel}') in ${ext.dir}.`,
-            true
-          );
-        }
-        const text = fs.readFileSync(guideFile, "utf8").replace(/^---[\s\S]*?---\s*/, "");
-        return this.textResult(text, false);
-      } catch (err) {
-        return this.textResult(
-          `FAILED guide: ${err instanceof Error ? err.message : String(err)}`,
-          true
-        );
-      }
-    }
-    const resolution = resolveGuideTopic(trimmed, resolvePackageSkillsDir());
-    if (!resolution.ok) {
-      return this.textResult(`FAILED guide: ${resolution.message}`, true);
-    }
-    if (resolution.kind === "catalog") {
-      if (!fs.existsSync(resolution.mainFile)) {
-        return this.textResult(`FAILED guide: main skill file '${resolution.mainFile}' not found.`, true);
-      }
-      const main = fs.readFileSync(resolution.mainFile, "utf8").replace(/^---[\s\S]*?---\s*/, "");
-      return this.textResult(`${main}\n\n${buildSkillsCatalogSection(resolution.skills)}`, false);
-    }
-    if (!fs.existsSync(resolution.file)) {
-      return this.textResult(
-        `FAILED guide: topic '${trimmed}' is not available (file '${resolution.file}' not found).`,
-        true
-      );
-    }
-    const text = fs.readFileSync(resolution.file, "utf8").replace(/^---[\s\S]*?---\s*/, "");
-    if (resolution.appendAudioPointer) {
-      return this.textResult(
-        `${text}\n\nRelated: for loudness, voice cleanup and music ducking also read guide(topic="cuthol-audio").`,
-        false
-      );
-    }
-    return this.textResult(text, false);
+    const shared = getGuideText(topic, workspaceDir);
+    return this.textResult(shared.text, !shared.ok);
   }
 
   private runCli(argv: string[], cwd: string, spec: ActionSpec, ctx: CallContext): Promise<CliRun> {

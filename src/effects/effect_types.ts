@@ -163,16 +163,44 @@ export interface EffectDefinition {
  * the beat grid is re-analysed) verify reports it and one command regenerates the entry;
  * nothing is rewritten on its own.
  */
+export type PresetAnchorKind = "start" | "end" | "ratio" | "beat";
+
+export interface PresetPointRecord {
+  channel: string;
+  anchor: PresetAnchorKind;
+  /** ms after the clip start (`start`), ms before the clip end (`end`), 0..100 (`ratio`), 1-based beat index (`beat`). */
+  offset_ms?: number;
+  ratio?: number;
+  beat_index?: number;
+  value: number;
+  easing?: string;
+  bezier?: [number, number, number, number];
+}
+
+/** Kept for source compatibility; presets now record per-point anchors on the provenance itself. */
 export type PresetBinding =
   | { to: "clip_start"; offset_ms: number }
   | { to: "clip_end"; offset_ms: number }
   | { to: "beats"; asset_handle: string; beat_grid_hash: string }
   | { to: "none" };
 
-/** Recorded on an fx entry written by a preset. Informational: render does not read it. */
+/**
+ * Recorded on an fx entry written by a preset. Informational: render never
+ * reads it. `verify` recomputes the expected envelope points from `points`
+ * with the item's current duration (and the beat grid when `beats` is set)
+ * without reading the preset definition again.
+ */
 export interface PresetProvenance {
+  /** `ext:<extension>/<name>` of the preset that wrote this entry. */
   preset: string;
+  /** Extension manifest version the preset was applied from. */
   version: string;
+  /** Param values passed at apply time. */
   args: Record<string, EffectParamValue>;
-  binding: PresetBinding;
+  /** Distinguishes entries when one apply writes several (single-entry in this version). */
+  apply_id: string;
+  /** Generated points with the anchor each was computed from. */
+  points: PresetPointRecord[];
+  /** Set when any point is beat-anchored: the grid the beats were read from. */
+  beats?: { asset_handle: string; grid_hash: string };
 }

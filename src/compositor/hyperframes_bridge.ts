@@ -22,7 +22,8 @@ export { parseHyperFramesPipelineSummary, parseHyperFramesScriptErrorIsolated, b
 export type { OverlayCacheReason, HyperFramesPipelineSummaryInfo, OverlayRenderItemSummary, RenderOverlaySummary, HyperFramesScriptErrorIsolated, HyperFramesScriptErrorReport } from "./hf_overlay_tracking.js";
 export { isPngSequenceBlobDir, inspectPngSequenceDir, isValidVideoBlobOnDisk } from "./hf_blobs.js";
 export type { OverlayBlobExt } from "./hf_blobs.js";
-export { renderHyperFramesCompositionToMp4, isDraftNativeOverlayCapture } from "./hf_render.js";
+export { renderHyperFramesCompositionToMp4, lookupCachedCompositionBlobForSingleFrame, isDraftNativeOverlayCapture } from "./hf_render.js";
+export type { CompositionBlobKeyOptions } from "./hf_render.js";
 export { resolveFramePngInPngSequenceDir, renderHyperFramesSingleFramePng, renderHyperFramesBatchFramesPng, recordCompositionAlphaBboxSidecar } from "./hf_frames.js";
 export type { MeasuredAlphaBboxPct } from "./hf_frames.js";
 

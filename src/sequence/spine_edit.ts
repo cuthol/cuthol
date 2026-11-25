@@ -17,7 +17,10 @@ import { loadSequence } from "../core/workspace.js";
 import { commitVerifiedMutation, VerificationReport } from "../verify/gates.js";
 import { getSequenceEffectRegistry, isExtensionEffectRef } from "../extensions/ext_effects.js";
 import { resolveTransitionParams } from "../extensions/ext_transitions.js";
+import { checkExtTransitionBackstop } from "../verify/gates_transitions.js";
 import { sliceEnvelopes, sliceReframeFocalPoints } from "./spine_envelope.js";
+import { dropSlicedPresetRecords } from "../effects/preset_apply.js";
+import { probeEntryOrThrow } from "./spine_fx.js";
 import { isKnownEnvelopeParameter, suggestEnvelopeParameter } from "./envelope_params.js";
 import { isProjectEmptyForAdoption, maybeAdoptStageFromFirstSource } from "./stage_adopt.js";
 import { reflowSpine, clipLocalMsToSourceMs, sliceSpeedRamp, computeClipDurationMs, sourceMsToClipLocalMs, TimeCoordinateSpace, sequenceMsToSourceMs, invertClipLocalMsToSourceOffset, integrateSourceOffsetToClipLocalMs } from "./spine_time.js";
@@ -178,6 +181,14 @@ export function splitSpineClip(options: {
         const sliceLocalStart = sourceMsToClipLocalMs(target, srcIn);
         const sliceLocalEnd = sliceLocalStart + subClip.duration_ms;
         subClip.envelopes = sliceEnvelopes(target.envelopes, sliceLocalStart, sliceLocalEnd);
+        dropSlicedPresetRecords({
+          workspaceDir: options.workspaceDir,
+          seq,
+          origClip: target,
+          subClip,
+          sliceStartMs: sliceLocalStart,
+          sliceEndMs: sliceLocalEnd,
+        });
         if (target.treatments.reframe.focal_points.length > 0) {
           subClip.treatments.reframe.focal_points = sliceReframeFocalPoints(
             target.treatments.reframe.focal_points,
@@ -435,6 +446,14 @@ export function exciseSpineRanges(options: {
           localStartMs,
           localStartMs + subClip.duration_ms
         );
+        dropSlicedPresetRecords({
+          workspaceDir: options.workspaceDir,
+          seq,
+          origClip: target,
+          subClip,
+          sliceStartMs: localStartMs,
+          sliceEndMs: localStartMs + subClip.duration_ms,
+        });
         if (target.treatments.reframe.focal_points.length > 0) {
           subClip.treatments.reframe.focal_points = sliceReframeFocalPoints(
             target.treatments.reframe.focal_points,
@@ -839,7 +858,7 @@ export function setSpineTransition(options: {
   const { result, revision, verification } = commitVerifiedMutation(
     options.workspaceDir,
     `spine.transition(${options.clipId})`,
-    (seq) => {
+    (seq, paths) => {
       const clip = seq.spine.clips.find((c) => c.id === options.clipId);
       if (!clip) {
         throw new CutholError(DIAGNOSTICS.UNKNOWN_HANDLE(options.clipId));
@@ -861,6 +880,13 @@ export function setSpineTransition(options: {
         );
       }
       clip.transition_out = stored;
+      if (stored && stored.kind.startsWith("ext:") && stored.duration_ms > 0) {
+        const idx = seq.spine.clips.findIndex((c) => c.id === clip.id);
+        const outcome = checkExtTransitionBackstop(seq, paths, idx);
+        if (outcome.status === "error" && outcome.diagnostic) {
+          throw new CutholError(outcome.diagnostic);
+        }
+      }
       return clip;
     }
   );
@@ -882,6 +908,23 @@ export function setItemEnvelope(options: {
         suggestEnvelopeParameter(options.parameter)
       )
     );
+  }
+  // [fxcheck:A G320–G329] frozen/instance probe on the would-be fx envelope; ERROR rejects before write.
+  {
+    const m = /^fx\.([^.]+)\.(.+)$/.exec(options.parameter);
+    if (m) {
+      const { sequence: preSeq } = loadSequence(options.workspaceDir);
+      const clip = preSeq.spine.clips.find((c) => c.id === options.targetId);
+      const cue = preSeq.lanes.flatMap((l) => l.cues).find((c) => c.id === options.targetId);
+      const owner = clip ?? cue;
+      const fx = owner?.fx?.find((f) => f.id === m[1]);
+      if (owner && fx) {
+        const envelopes = (owner.envelopes ?? [])
+          .filter((e) => e.parameter !== options.parameter)
+          .concat([{ parameter: options.parameter, points: options.points }]);
+        probeEntryOrThrow(preSeq, options.workspaceDir, options.targetId, fx, envelopes as never);
+      }
+    }
   }
   const { result, revision, verification } = commitVerifiedMutation(
     options.workspaceDir,

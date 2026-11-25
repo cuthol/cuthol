@@ -22,22 +22,25 @@ const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace
 /** `needsApprox` is nested in `mount`, so it is extracted from source, not imported. */
 function loadNeedsApprox(): (item: unknown) => boolean {
   const src = fs.readFileSync(path.join(REPO, "src", "live", "ui", "preview.js"), "utf8");
-  const sig = "function needsApprox(item) {";
-  const i = src.indexOf(sig);
-  assert.ok(i >= 0, "preview.js is missing needsApprox");
-  const open = src.indexOf("{", i);
-  let depth = 0;
-  for (let j = open; j < src.length; j++) {
-    if (src[j] === "{") depth++;
-    else if (src[j] === "}") {
-      depth--;
-      if (depth === 0) {
-        const factory = new Function(`${src.slice(i, j + 1)}\nreturn needsApprox;`) as () => (item: unknown) => boolean;
-        return factory();
+  function extract(name: string): string {
+    const sig = `function ${name}(item) {`;
+    const i = src.indexOf(sig);
+    assert.ok(i >= 0, `preview.js is missing ${name}`);
+    const open = src.indexOf("{", i);
+    let depth = 0;
+    for (let j = open; j < src.length; j++) {
+      if (src[j] === "{") depth++;
+      else if (src[j] === "}") {
+        depth--;
+        if (depth === 0) return src.slice(i, j + 1);
       }
     }
+    throw new Error(`unbalanced braces for ${name}`);
   }
-  throw new Error("unbalanced braces for needsApprox");
+  const factory = new Function(
+    `${extract("nonShaderApprox")}\n${extract("fxApprox")}\n${extract("needsApprox")}\nconst shaderCovered = new Set();\nreturn needsApprox;`
+  ) as () => (item: unknown) => boolean;
+  return factory();
 }
 const needsApprox = loadNeedsApprox();
 

@@ -1,4 +1,5 @@
 // Per-lane filter-graph compilation: HyperFrames composition cues, visual asset cues, and lane typography (split out of compiler.ts).
+import fs from "node:fs";
 import path from "node:path";
 import { resolveCueStartMs } from "../core/timeline.js";
 import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
@@ -19,6 +20,7 @@ import {
   isDraftNativeOverlayCapture,
   isOverlayCollectActive,
   isPngSequenceBlobDir,
+  lookupCachedCompositionBlobForSingleFrame,
   renderHyperFramesCompositionToMp4,
   renderHyperFramesSingleFramePng,
 } from "./hyperframes_bridge.js";
@@ -143,6 +145,95 @@ function stillSpecsAtCanvas(
   return specs;
 }
 
+interface CompositionOpacityDecision {
+  effectiveTransparent: boolean;
+  opaqueBackdropColor: string | undefined;
+  backdropImagePath: string | undefined;
+  bakedUnderneathIds: string[];
+}
+
+/**
+ * Render-branch opacity decision for a full-frame composition cue. Shared by the full
+ * render compile and the single-frame overlay-blob lookup so the two cannot drift.
+ * The only new write it may perform is the still-slice cache PNG it needs for the key.
+ */
+function decideCompositionOpacity(
+  ctx: VideoGraphCompileContext,
+  cue: LaneCueSpec,
+  compMode: NonNullable<LaneCueSpec["composition"]>["mode"],
+  cueStartMs: number,
+  cueEndMs: number,
+  isFullFrameUnscaled: boolean,
+  cueHasActiveFx: boolean,
+  overlappingUnder: DrawnVisualLayer[],
+  renderWidth: number,
+  renderHeight: number
+): CompositionOpacityDecision {
+  const { seq, paths, fps } = ctx;
+  const composition = cue.composition!;
+  const keepAlpha = ctx.preset === "master_alpha";
+  const hasMovingUnderneath = overlappingUnder.some((l) => l.kind !== "still_graphic");
+  const hasOnlyStaticStillUnderneath =
+    overlappingUnder.length > 0 &&
+    !hasMovingUnderneath &&
+    overlappingUnder.every((l) => l.startMs <= cueStartMs && l.endMs >= cueEndMs);
+  let effectiveTransparent = composition.transparent;
+  let opaqueBackdropColor: string | undefined;
+  let backdropImagePath: string | undefined;
+  let bakedUnderneathIds: string[] = [];
+  if (compMode !== "scene_host" && isFullFrameUnscaled && !hasMovingUnderneath && !keepAlpha && !cueHasActiveFx) {
+    if (overlappingUnder.length === 0) {
+      effectiveTransparent = false;
+      opaqueBackdropColor = seq.stage.backdrop.color;
+    } else if (hasOnlyStaticStillUnderneath) {
+      const stillSpecs = overlappingUnder
+        .map((l) => l.stillSpec)
+        .filter((s): s is StaticStillLayerSpec => Boolean(s));
+      let sliceW = renderWidth;
+      let sliceH = renderHeight;
+      let sliceSpecs = stillSpecs;
+      if (stillSpecs.length === overlappingUnder.length && isDraftNativeOverlayCapture()) {
+        // The blob key hashes this PNG. Master compiles it at the master frame, so native capture must too.
+        const master = masterFrameSize(seq);
+        if (master.width !== renderWidth || master.height !== renderHeight) {
+          const rebuilt = stillSpecsAtCanvas(ctx, overlappingUnder, master.width, master.height);
+          if (rebuilt) {
+            sliceW = master.width;
+            sliceH = master.height;
+            sliceSpecs = rebuilt;
+          }
+        }
+      }
+      const stillPng =
+        sliceSpecs.length === overlappingUnder.length
+          ? extractStaticBackdropPngSlice(seq, paths, sliceW, sliceH, fps, sliceSpecs)
+          : undefined;
+      if (stillPng) {
+        effectiveTransparent = false;
+        opaqueBackdropColor = seq.stage.backdrop.color;
+        backdropImagePath = stillPng;
+        bakedUnderneathIds = overlappingUnder.map((l) => l.id);
+      }
+    }
+  }
+  return { effectiveTransparent, opaqueBackdropColor, backdropImagePath, bakedUnderneathIds };
+}
+
+/**
+ * A render-blob hit for a single-frame instant: the blob the full render would show,
+ * with an input plan that presents exactly the requested cue-local frame.
+ */
+interface SingleFrameOverlayBlobHit {
+  blobPath: string;
+  kind: "pngseq" | "video";
+  /** Cue-local seconds of the blob frame shown (frame-grid snapped). */
+  gridSec: number;
+  /** Single PNG input for `pngseq` blobs. */
+  framePath: string | null;
+  /** Input seek seconds for video blobs (0 decodes from the blob start). */
+  seekSec: number;
+}
+
 function prepareCompositionCueInput(
   ctx: VideoGraphCompileContext,
   cue: LaneCueSpec,
@@ -154,6 +245,7 @@ function prepareCompositionCueInput(
   frameDurMs: number;
   isFullFrameUnscaled: boolean;
   effectiveTransparent: boolean;
+  overlayHit: SingleFrameOverlayBlobHit | null;
 } {
   const { seq, paths, renderWidth, renderHeight, fps, compileOptions } = ctx;
   const composition = cue.composition!;
@@ -188,50 +280,95 @@ function prepareCompositionCueInput(
   const overlappingUnder = ctx.drawnVisualLayers.filter(
     (l) => l.startMs < cueEndMs && l.endMs > cueStartMs
   );
-  const hasMovingUnderneath = overlappingUnder.some((l) => l.kind !== "still_graphic");
-  const hasOnlyStaticStillUnderneath =
-    overlappingUnder.length > 0 &&
-    !hasMovingUnderneath &&
-    overlappingUnder.every((l) => l.startMs <= cueStartMs && l.endMs >= cueEndMs);
 
-  let effectiveTransparent = composition.transparent;
-  let opaqueBackdropColor: string | undefined;
-  let backdropImagePath: string | undefined;
-  let bakedUnderneathIds: string[] = [];
+  // Render-branch opacity decision, shared with the single-frame overlay-blob lookup below.
+  const decision = decideCompositionOpacity(
+    ctx,
+    cue,
+    compMode,
+    cueStartMs,
+    cueEndMs,
+    isFullFrameUnscaled,
+    cueHasActiveFx,
+    overlappingUnder,
+    renderWidth,
+    renderHeight
+  );
+  const effectiveTransparent = decision.effectiveTransparent;
+  const opaqueBackdropColor = decision.opaqueBackdropColor;
+  const backdropImagePath = decision.backdropImagePath;
+  const bakedUnderneathIds = decision.bakedUnderneathIds;
 
-  if (
-    compileOptions?.singleFrameAtMs !== undefined &&
+  const singleFrameMs = compileOptions?.singleFrameAtMs;
+  const isSingleFrameInstant =
+    singleFrameMs !== undefined &&
     compMode !== "scene_host" &&
-    singleFrameInstantHitsCue(compileOptions.singleFrameAtMs, cueStartMs, cueEndMs, frameDurMs)
-  ) {
-    // Preserve exact floating-point `singleFrameAtMs` (without integer ms truncation)
-    // so 30fps `frameIdx = 3k + 1` never drifts by 1 frame.
-    const localSec = Math.max(0, (compileOptions.singleFrameAtMs - cueStartMs) / 1000);
-    const singleFrame = renderHyperFramesSingleFramePng({
-      compositionDir: compDir,
-      entryHtml: composition.entry_html,
-      blobsDir: paths.blobsDir,
-      width: renderWidth,
-      height: renderHeight,
-      fps,
-      durationMs: cue.duration_ms,
-      localSec,
-      props: composition.props,
-      transparent: composition.transparent,
-      mode: compMode,
-    });
-    ctx.hyperframesBlobs.push(singleFrame.pngPath);
-    hfIdx = ctx.addInput([
-      "-loop",
-      "1",
-      "-framerate",
-      String(fps),
-      "-t",
-      (cue.duration_ms / 1000 + 2 / fps).toFixed(3),
-      "-i",
-      singleFrame.pngPath,
-    ]);
-  } else {
+    singleFrameInstantHitsCue(singleFrameMs, cueStartMs, cueEndMs, frameDurMs);
+
+  // Cache-only lookup: the blob the full render shows at this instant, or null on a miss.
+  // Never starts HyperFrames, never writes the cache state or an overlay outcome.
+  let overlayHit: SingleFrameOverlayBlobHit | null = null;
+  if (isSingleFrameInstant && ctx.preset !== "master_alpha" && !isOverlayCollectActive()) {
+    const localSec = Math.max(0, (singleFrameMs - cueStartMs) / 1000);
+    try {
+      const found = lookupCachedCompositionBlobForSingleFrame({
+        compositionDir: compDir,
+        entryHtml: composition.entry_html,
+        blobsDir: paths.blobsDir,
+        width: renderWidth,
+        height: renderHeight,
+        fps,
+        durationMs: cue.duration_ms,
+        props: composition.props,
+        transparent: effectiveTransparent,
+        mode: compMode,
+        opaqueBackdropColor,
+        backdropImagePath,
+      });
+      if (found) {
+        const gridIdx = Math.max(0, Math.floor(localSec * fps + 1e-6));
+        const gridSec = gridIdx / fps;
+        if (isPngSequenceBlobDir(found.cachedBlobPath)) {
+          const framePath = path.join(
+            found.cachedBlobPath,
+            `frame_${String(gridIdx + 1).padStart(6, "0")}.png`
+          );
+          let frameOk = false;
+          try {
+            frameOk = fs.existsSync(framePath) && fs.statSync(framePath).size > 64;
+          } catch {
+            frameOk = false;
+          }
+          if (frameOk) {
+            overlayHit = {
+              blobPath: found.cachedBlobPath,
+              kind: "pngseq",
+              gridSec,
+              framePath,
+              seekSec: 0,
+            };
+          }
+        } else {
+          // An input seek shifts cue-local timestamps, so it is only safe when placement
+          // is static. Baked (opaque) blobs always are (`isFullFrameUnscaled` gates the
+          // bake); transparent video blobs decode from the start instead.
+          const seekSec =
+            !effectiveTransparent && gridSec > 1 ? Math.floor((gridSec - 1) * fps) / fps : 0;
+          overlayHit = {
+            blobPath: found.cachedBlobPath,
+            kind: "video",
+            gridSec,
+            framePath: null,
+            seekSec,
+          };
+        }
+      }
+    } catch {
+      overlayHit = null;
+    }
+  }
+
+  if (!isSingleFrameInstant || overlayHit) {
     const backdropVideoPath =
       compMode === "scene_host"
         ? extractSceneHostBackdropSlice(
@@ -252,72 +389,61 @@ function prepareCompositionCueInput(
           )
         : undefined;
 
-    const keepAlpha = ctx.preset === "master_alpha";
-    if (compMode !== "scene_host" && isFullFrameUnscaled && !hasMovingUnderneath && !keepAlpha && !cueHasActiveFx) {
-      if (overlappingUnder.length === 0) {
-        effectiveTransparent = false;
-        opaqueBackdropColor = seq.stage.backdrop.color;
-      } else if (hasOnlyStaticStillUnderneath) {
-        const stillSpecs = overlappingUnder
-          .map((l) => l.stillSpec)
-          .filter((s): s is StaticStillLayerSpec => Boolean(s));
-        let sliceW = renderWidth;
-        let sliceH = renderHeight;
-        let sliceSpecs = stillSpecs;
-        if (stillSpecs.length === overlappingUnder.length && isDraftNativeOverlayCapture()) {
-          // The blob key hashes this PNG. Master compiles it at the master frame, so native capture must too.
-          const master = masterFrameSize(seq);
-          if (master.width !== renderWidth || master.height !== renderHeight) {
-            const rebuilt = stillSpecsAtCanvas(ctx, overlappingUnder, master.width, master.height);
-            if (rebuilt) {
-              sliceW = master.width;
-              sliceH = master.height;
-              sliceSpecs = rebuilt;
-            }
-          }
-        }
-        const stillPng =
-          sliceSpecs.length === overlappingUnder.length
-            ? extractStaticBackdropPngSlice(seq, paths, sliceW, sliceH, fps, sliceSpecs)
-            : undefined;
-        if (stillPng) {
-          effectiveTransparent = false;
-          opaqueBackdropColor = seq.stage.backdrop.color;
-          backdropImagePath = stillPng;
-          bakedUnderneathIds = overlappingUnder.map((l) => l.id);
-        }
-      }
+    let hfBlob: string;
+    if (overlayHit) {
+      // A single-frame hit shows the render's blob; the render already recorded the outcome.
+      hfBlob = overlayHit.blobPath;
+    } else {
+      hfBlob = renderHyperFramesCompositionToMp4({
+        compositionDir: compDir,
+        entryHtml: composition.entry_html,
+        blobsDir: paths.blobsDir,
+        width: renderWidth,
+        height: renderHeight,
+        fps,
+        durationMs: cue.duration_ms,
+        props: composition.props,
+        transparent: effectiveTransparent,
+        mode: compMode,
+        backdropVideoPath,
+        opaqueBackdropColor,
+        backdropImagePath,
+        workers: compileOptions?.workers,
+        useGpu: compileOptions?.useGpu,
+      });
     }
-
-    const hfBlob = renderHyperFramesCompositionToMp4({
-      compositionDir: compDir,
-      entryHtml: composition.entry_html,
-      blobsDir: paths.blobsDir,
-      width: renderWidth,
-      height: renderHeight,
-      fps,
-      durationMs: cue.duration_ms,
-      props: composition.props,
-      transparent: effectiveTransparent,
-      mode: compMode,
-      backdropVideoPath,
-      opaqueBackdropColor,
-      backdropImagePath,
-      workers: compileOptions?.workers,
-      useGpu: compileOptions?.useGpu,
-    });
     ctx.hyperframesBlobs.push(hfBlob);
-    const isPngSeqBlob = isPngSequenceBlobDir(hfBlob);
-    hfIdx = isPngSeqBlob
-      ? ctx.addInput([
-          "-framerate",
-          String(fps),
-          "-start_number",
-          "1",
-          "-i",
-          path.join(hfBlob, "frame_%06d.png"),
-        ])
-      : ctx.addInput(["-i", hfBlob]);
+    const isPngSeqBlob = overlayHit
+      ? overlayHit.kind === "pngseq"
+      : isPngSequenceBlobDir(hfBlob);
+    if (overlayHit?.kind === "pngseq") {
+      // Looped single-PNG input, exactly like the miss path: the single-frame rewrite in
+      // `render_frames.ts` then applies its one `setpts` shift, so cue-local `t`
+      // downstream sees the requested instant (no double shift of our own).
+      hfIdx = ctx.addInput([
+        "-loop",
+        "1",
+        "-framerate",
+        String(fps),
+        "-t",
+        (cue.duration_ms / 1000 + 2 / fps).toFixed(3),
+        "-i",
+        overlayHit.framePath!,
+      ]);
+    } else if (overlayHit?.kind === "video" && overlayHit.seekSec > 0) {
+      hfIdx = ctx.addInput(["-ss", overlayHit.seekSec.toFixed(6), "-i", hfBlob]);
+    } else if (isPngSeqBlob) {
+      hfIdx = ctx.addInput([
+        "-framerate",
+        String(fps),
+        "-start_number",
+        "1",
+        "-i",
+        path.join(hfBlob, "frame_%06d.png"),
+      ]);
+    } else {
+      hfIdx = ctx.addInput(["-i", hfBlob]);
+    }
 
     const blobColorSpec = isPngSeqBlob
       ? ({ isRgb: true, inMatrix: "bt709", inRange: "pc", sourceRule: "rgb" } as const)
@@ -343,6 +469,35 @@ function prepareCompositionCueInput(
       blobPath: hfBlob,
       bakedUnderneathIds,
     });
+  } else {
+    // Single-frame miss: today's path, unchanged (fresh transparent PNG capture).
+    // Preserve exact floating-point `singleFrameAtMs` (without integer ms truncation)
+    // so 30fps `frameIdx = 3k + 1` never drifts by 1 frame.
+    const localSec = Math.max(0, (singleFrameMs! - cueStartMs) / 1000);
+    const singleFrame = renderHyperFramesSingleFramePng({
+      compositionDir: compDir,
+      entryHtml: composition.entry_html,
+      blobsDir: paths.blobsDir,
+      width: renderWidth,
+      height: renderHeight,
+      fps,
+      durationMs: cue.duration_ms,
+      localSec,
+      props: composition.props,
+      transparent: composition.transparent,
+      mode: compMode,
+    });
+    ctx.hyperframesBlobs.push(singleFrame.pngPath);
+    hfIdx = ctx.addInput([
+      "-loop",
+      "1",
+      "-framerate",
+      String(fps),
+      "-t",
+      (cue.duration_ms / 1000 + 2 / fps).toFixed(3),
+      "-i",
+      singleFrame.pngPath,
+    ]);
   }
 
   return {
@@ -351,6 +506,7 @@ function prepareCompositionCueInput(
     frameDurMs,
     isFullFrameUnscaled,
     effectiveTransparent,
+    overlayHit,
   };
 }
 
@@ -391,6 +547,7 @@ function compileCompositionLaneCue(
     frameDurMs,
     isFullFrameUnscaled,
     effectiveTransparent,
+    overlayHit,
   } = prepareCompositionCueInput(ctx, cue, cueStartMs, cueEndMs);
 
   const hfSxExpr = compilePlacementChannelExpr(cue, "scale_x", { timeBaseOffsetMs: 0, mode: "raw" });
@@ -466,9 +623,13 @@ function compileCompositionLaneCue(
     compileOptions?.singleFrameAtMs !== undefined &&
     compMode !== "scene_host" &&
     singleFrameInstantHitsCue(compileOptions.singleFrameAtMs, cueStartMs, cueEndMs, frameDurMs);
-  const hfLocalTimeExpr = isSingleFrameHfPng
-    ? Math.max(0, (compileOptions!.singleFrameAtMs! - cueStartMs) / 1000).toFixed(6)
-    : `((in-1)/${fps})`;
+  // On a render-blob hit the input presents exactly the grid-snapped blob frame, so the
+  // cue-local time is that frame's time (what the full render evaluates there), not a counter.
+  const hfLocalTimeExpr = overlayHit
+    ? overlayHit.gridSec.toFixed(6)
+    : isSingleFrameHfPng
+      ? Math.max(0, (compileOptions!.singleFrameAtMs! - cueStartMs) / 1000).toFixed(6)
+      : `((in-1)/${fps})`;
   const sxPart = hfSxExpr ? `abs(${hfSxExpr})` : String(Math.abs(placementStaticValue(cue, "scale_x")));
   const syPart = hfSyExpr ? `abs(${hfSyExpr})` : String(Math.abs(placementStaticValue(cue, "scale_y")));
   hfFilters.push(
@@ -484,10 +645,16 @@ function compileCompositionLaneCue(
       localTimeExpr: hfLocalTimeExpr,
     })
   );
+  // On a video-blob hit with an input seek, ffmpeg shifts timestamps by the seek amount,
+  // so the anchor compensates by the same amount (verified byte-equal against decode-from-start).
+  const hfAnchorSec =
+    overlayHit?.kind === "video" && overlayHit.seekSec > 0
+      ? (cueStartMs / 1000 + overlayHit.seekSec).toFixed(6)
+      : cueStartSec;
   hfFilters.push(
     `tpad=stop_mode=clone:stop_duration=${(2 / fps).toFixed(3)}`,
     `settb=AVTB`,
-    `setpts=PTS-STARTPTS+${cueStartSec}/TB`
+    `setpts=PTS-STARTPTS+${hfAnchorSec}/TB`
   );
   if (
     activeWin &&
@@ -529,7 +696,15 @@ function compileCompositionLaneCue(
         : String(Math.round(baseCenterY + (placementStaticValue(cue, "y_pct") / 100) * renderHeight)));
 
   const alphaPreset = ctx.preset === "master_alpha";
-  if (!effectiveTransparent && isFullFrameUnscaled && compileOptions?.singleFrameAtMs === undefined && !alphaPreset) {
+  // A render-blob hit of a baked opaque video blob takes the same opaque fast path as
+  // the full render (the old single-frame path never had opaque blobs, hence the
+  // single-frame exclusion, which a hit lifts).
+  const useOpaqueFastPath =
+    !effectiveTransparent &&
+    isFullFrameUnscaled &&
+    !alphaPreset &&
+    (compileOptions?.singleFrameAtMs === undefined || overlayHit?.kind === "video");
+  if (useOpaqueFastPath) {
     const ovYuvPad = `[vc_oyuv_${++ctx.vStepCounter}]`;
     const nextPad = `[vc_${ctx.vStepCounter}]`;
     ctx.filterChains.push(

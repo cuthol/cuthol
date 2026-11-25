@@ -6,6 +6,7 @@ import {
   AssetKind
 } from "../core/schema.js";
 import { ExtensionFxSpec, parseManifestFxSection } from "./ext_fx.js";
+import { ExtensionPresetSpec, parseManifestPresetsSection } from "./presets.js";
 import { ExtensionTransitionSpec, parseManifestTransitionsSection } from "./ext_transitions.js";
 
 export const EXTENSION_MANIFEST_FILENAME = "cuthol-extension.json";
@@ -102,6 +103,8 @@ export interface ExtensionManifest {
   providers?: ExtensionProvidersSection;
   /** Per-clip effects for `spine fx` (extensions/ext_fx.ts). */
   fx?: Record<string, ExtensionFxSpec>;
+  /** Keyframe templates anchored to the clip, applied with `spine fx preset` (extensions/presets.ts). */
+  presets?: Record<string, ExtensionPresetSpec>;
   /** Spine transition kinds (extensions/ext_transitions.ts). */
   transitions?: Record<string, ExtensionTransitionSpec>;
   guide?: string;
@@ -147,6 +150,8 @@ export interface ExtensionListItem {
     providers?: string[];
     /** Present only when the extension has an `fx` section. */
     fx?: string[];
+    /** Present only when the extension has a `presets` section. */
+    presets?: string[];
     /** Present only when the extension has a `transitions` section. */
     transitions?: string[];
     guide: string | null;
@@ -166,6 +171,7 @@ const ALLOWED_MANIFEST_KEYS = new Set([
   "planners",
   "recipes",
   "fx",
+  "presets",
   "transitions",
   "guide",
 ]);
@@ -497,7 +503,8 @@ export function parseManifestProvidersSection(
 export function validateExtensionManifest(
   raw: unknown,
   expectedFolderName?: string,
-  sourcePathForError?: string
+  sourcePathForError?: string,
+  extDir?: string
 ): ExtensionManifest {
   const label = expectedFolderName || sourcePathForError || "extension";
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
@@ -855,7 +862,8 @@ export function validateExtensionManifest(
 
   const providersSpec = parseManifestProvidersSection(obj.providers, name);
 
-  const fxSpec = parseManifestFxSection(obj.fx, name);
+  const fxSpec = parseManifestFxSection(obj.fx, name, extDir);
+  const presetsSpec = parseManifestPresetsSection(obj.presets, name);
   const transitionsSpec = parseManifestTransitionsSection(obj.transitions, name);
 
   let guideSpec: string | undefined;
@@ -884,6 +892,7 @@ export function validateExtensionManifest(
     ...(recipesSpec !== undefined ? { recipes: recipesSpec } : {}),
     ...(providersSpec !== undefined ? { providers: providersSpec } : {}),
     ...(fxSpec !== undefined ? { fx: fxSpec } : {}),
+    ...(presetsSpec !== undefined ? { presets: presetsSpec } : {}),
     ...(transitionsSpec !== undefined ? { transitions: transitionsSpec } : {}),
     ...(guideSpec !== undefined ? { guide: guideSpec } : {}),
   };

@@ -12,7 +12,31 @@ import type {
 import { loadSequence } from "../core/workspace.js";
 import type { VerificationReport } from "../verify/gates.js";
 import { commitVerifiedMutation } from "../verify/gates.js";
+import { probeEntryOrThrow } from "./spine_fx.js";
+import { buildItemFxStage, flattenFxStageParts } from "../compositor/compile_fx_stage.js";
+import { checkFrozenParam, fxEntryFilterName } from "../effects/fx_check.js";
+import { listEffectDefinitions } from "../effects/effect_registry.js";
 import { isKnownEnvelopeParameter, suggestEnvelopeParameter } from "./envelope_params.js";
+
+// [fxcheck:A G320–G329] pre-write frozen/instance probe for fx.* envelope edits.
+// Throws CUTHOL-G322/G324 on ERROR before the caller writes anything.
+function fxEnvelopePreCheck(
+  workspaceDir: string, targetId: string, parameter: string,
+  wouldBePoints: { offset_ms: number; value: number }[]
+): void {
+  const m = /^fx\.([^.]+)\.(.+)$/.exec(parameter);
+  if (!m) return;
+  const { sequence } = loadSequence(workspaceDir);
+  const clip = sequence.spine.clips.find((c) => c.id === targetId);
+  const cue = sequence.lanes.flatMap((l) => l.cues).find((c) => c.id === targetId);
+  const owner = clip ?? cue;
+  const fx = owner?.fx?.find((f) => f.id === m[1]);
+  if (!owner || !fx) return;
+  const envelopes = (owner.envelopes ?? [])
+    .filter((e) => e.parameter !== parameter)
+    .concat([{ parameter, points: wouldBePoints as never[] }] as never);
+  probeEntryOrThrow(sequence, workspaceDir, targetId, fx, envelopes as never);
+}
 import { evaluateEnvelopeAt } from "./spine_envelope.js";
 import { PLACEMENT_CHANNELS, placementBaseEnvelope, placementLayers, placementValueAt } from "./placement_resolve.js";
 import { MOTION_FX_KIND, PLACEMENT_LAYER_COMBINE, placementLayerIdentity } from "../effects/effect_types.js";
@@ -215,6 +239,16 @@ export function addEnvelopePoint(
   edit: EnvelopePointEdit
 ): { envelope: ParameterEnvelope; revision: number; verification: VerificationReport } {
   assertKnownParameter(edit.parameter, edit.targetId);
+  // [fxcheck:A G320–G329] frozen probe on the would-be point set.
+  {
+    const { sequence } = loadSequence(edit.workspaceDir);
+    const { owner } = findEnvelopeOwner(sequence, edit.targetId);
+    const existing = (owner.envelopes.find((e) => e.parameter === edit.parameter)?.points ?? [])
+      .map((p) => ({ offset_ms: p.offset_ms, value: p.value }));
+    const pt = buildPoint(edit);
+    const next = [...existing.filter((p) => p.offset_ms !== pt.offset_ms), { offset_ms: pt.offset_ms, value: pt.value }];
+    fxEnvelopePreCheck(edit.workspaceDir, edit.targetId, edit.parameter, next);
+  }
   const { result, revision, verification } = commitVerifiedMutation(
     edit.workspaceDir,
     `envelope.point.add(${edit.targetId},${edit.parameter})`,
@@ -222,6 +256,48 @@ export function addEnvelopePoint(
       const { owner } = findEnvelopeOwner(seq, edit.targetId);
       assertOffsetInRange(edit.targetId, edit.parameter, edit.offsetMs, owner.duration_ms);
       return upsertPoint(owner, edit.parameter, buildPoint(edit));
+    }
+  );
+  return { envelope: result, revision, verification };
+}
+
+/**
+ * Bulk point add from `--points-file <json>` (long lists exceed the command
+ * line). One journal revision for the whole file. Each entry resolves to one
+ * `EnvelopePointEdit`; same-offset entries collapse with last-wins.
+ */
+export function addEnvelopePointsBulk(options: {
+  workspaceDir: string;
+  targetId: string;
+  parameter: ParameterEnvelope["parameter"];
+  points: EnvelopePointEdit[];
+}): { envelope: ParameterEnvelope; revision: number; verification: VerificationReport } {
+  assertKnownParameter(options.parameter, options.targetId);
+  // [fxcheck:A G320–G329] frozen probe on the would-be point set.
+  {
+    const { sequence } = loadSequence(options.workspaceDir);
+    const { owner } = findEnvelopeOwner(sequence, options.targetId);
+    const merged = new Map<number, { offset_ms: number; value: number }>();
+    for (const p of owner.envelopes.find((e) => e.parameter === options.parameter)?.points ?? []) {
+      merged.set(p.offset_ms, { offset_ms: p.offset_ms, value: p.value });
+    }
+    for (const edit of options.points) {
+      const pt = buildPoint(edit);
+      merged.set(pt.offset_ms, { offset_ms: pt.offset_ms, value: pt.value });
+    }
+    fxEnvelopePreCheck(options.workspaceDir, options.targetId, options.parameter, [...merged.values()]);
+  }
+  const { result, revision, verification } = commitVerifiedMutation(
+    options.workspaceDir,
+    `envelope.point.add.bulk(${options.targetId},${options.parameter},${options.points.length})`,
+    (seq) => {
+      const { owner } = findEnvelopeOwner(seq, options.targetId);
+      let env = owner.envelopes.find((e) => e.parameter === options.parameter) ?? null;
+      for (const edit of options.points) {
+        assertOffsetInRange(options.targetId, options.parameter, edit.offsetMs, owner.duration_ms);
+        env = upsertPoint(owner, options.parameter, buildPoint(edit));
+      }
+      return env as ParameterEnvelope;
     }
   );
   return { envelope: result, revision, verification };
@@ -238,6 +314,20 @@ export function moveEnvelopePoint(options: {
   bezier?: ParameterEnvelopePoint["bezier"];
 }): { envelope: ParameterEnvelope; revision: number; verification: VerificationReport } {
   assertKnownParameter(options.parameter, options.targetId);
+  // [fxcheck:A G320–G329] frozen probe on the would-be point set.
+  {
+    const { sequence } = loadSequence(options.workspaceDir);
+    const { owner } = findEnvelopeOwner(sequence, options.targetId);
+    const from = Math.round(options.fromMs);
+    const rest = (owner.envelopes.find((e) => e.parameter === options.parameter)?.points ?? [])
+      .filter((p) => p.offset_ms !== from)
+      .map((p) => ({ offset_ms: p.offset_ms, value: p.value }));
+    const prev = owner.envelopes.find((e) => e.parameter === options.parameter)?.points.find((p) => p.offset_ms === from);
+    if (prev) {
+      rest.push({ offset_ms: Math.round(options.toMs), value: options.value ?? prev.value });
+      fxEnvelopePreCheck(options.workspaceDir, options.targetId, options.parameter, rest);
+    }
+  }
   const { result, revision, verification } = commitVerifiedMutation(
     options.workspaceDir,
     `envelope.point.move(${options.targetId},${options.parameter})`,
@@ -333,6 +423,60 @@ export interface PlacementValueLayerTerm {
   source: "envelope" | "static";
 }
 
+/**
+ * Frozen probe for `spine value` on `fx.<id>.<param>`. Runs the
+ * shared `checkFrozenParam` triple-render (cached) when the envelope changes
+ * value; non-fx params never probe. Returns `{ frozen }` plus the G324
+ * diagnostic when frozen, so the CLI (`...res` spread) emits them as JSON.
+ * The filter name comes from the entry's own template (or raw `--filter`
+ * text), never from the stage chain's entry converter.
+ */
+function fxFrozenProbe(
+  workspaceDir: string,
+  sequence: CutholSequence,
+  targetId: string,
+  owner: { id: string; fx?: { id: string; kind: string; params?: Record<string, unknown> }[]; envelopes: { parameter: string }[] },
+  entry: { id: string; kind: string; params?: Record<string, unknown> } | undefined,
+  param: string,
+  env: { points: { value: number }[] }
+): { frozen: boolean; diagnostic?: unknown } {
+  try {
+    if (!entry || entry.kind === MOTION_FX_KIND) return { frozen: false };
+    const vals = env.points.map((p) => p.value);
+    if (!vals.some((v) => v !== vals[0])) return { frozen: false };
+    const ctx = { seq: sequence, paths: { rootDir: workspaceDir } } as unknown as import("../compositor/compiler.js").VideoGraphCompileContext;
+    const base = owner as unknown as Parameters<typeof buildItemFxStage>[1]["owner"];
+    const chainFor = (params: Record<string, unknown>, envelopes: { parameter: string; points: { value: number }[] }[]) => {
+      const o = { ...base, fx: (base.fx as unknown[]).map((f) => f === entry ? { ...(f as object), params } : f), envelopes } as unknown as Parameters<typeof buildItemFxStage>[1]["owner"];
+      return flattenFxStageParts(buildItemFxStage(ctx, { owner: o, receivedPixFmt: "yuv420p", itemHasAlpha: false })).join(",");
+    };
+    const chainEnvelope = chainFor(entry.params ?? {}, [{ parameter: `fx.${entry.id}.${param}`, points: env.points }]);
+    if (!chainEnvelope) return { frozen: false };
+    const chainInit = chainFor({ ...(entry.params ?? {}), [param]: vals[0] }, []);
+    const chainFinal = chainFor({ ...(entry.params ?? {}), [param]: vals[vals.length - 1] }, []);
+    if (!chainInit || !chainFinal) return { frozen: false };
+    const template = entry.kind.startsWith("ext:")
+      ? listEffectDefinitions(sequence, { rootDir: workspaceDir }).find((d) => d.kind === entry.kind)?.ffmpeg?.video_filter
+      : (typeof entry.params?.filter === "string" ? entry.params.filter : undefined);
+    const findings = checkFrozenParam({
+      filterName: fxEntryFilterName(template, chainEnvelope),
+      chainWithInitial: chainInit,
+      chainWithFinal: chainFinal,
+      chainWithEnvelope: chainEnvelope,
+      frameIndex: 65,
+      envelopeChangesValue: true,
+      projectDir: workspaceDir,
+    });
+    if (findings.some((f) => f.severity === "ERROR")) {
+      const ferr = findings.find((f) => f.severity === "ERROR")!;
+      return { frozen: true, diagnostic: DIAGNOSTICS.FX_PARAM_FROZEN(ferr.filter ?? "?") };
+    }
+    return { frozen: false };
+  } catch {
+    return { frozen: false };
+  }
+}
+
 /** Read-only lookup for `spine value`: item-local value without rendering. */
 export function readEnvelopeValueAt(options: {
   workspaceDir: string;
@@ -344,6 +488,8 @@ export function readEnvelopeValueAt(options: {
   source: "envelope" | "static";
   breakdown?: { base: number; base_source: "envelope" | "static"; layers: PlacementValueLayerTerm[]; combine: "add" | "multiply" };
   layer?: { id: string; value: number; source: "envelope" | "static" };
+  frozen?: boolean;
+  diagnostic?: unknown;
 } {
   const { sequence } = loadSequence(options.workspaceDir);
   const { owner } = findEnvelopeOwner(sequence, options.targetId);
@@ -394,10 +540,11 @@ export function readEnvelopeValueAt(options: {
       return { value: n, source: "static", layer: { id: entry.id, value: n, source: "static" } };
     }
     if (env && env.points.length > 0) {
-      return { value: evaluateEnvelopeAt(env, options.localMs), source: "envelope" };
+      const value = evaluateEnvelopeAt(env, options.localMs);
+      return { value, source: "envelope", ...fxFrozenProbe(options.workspaceDir, sequence, options.targetId, owner, entry, fxMatch[2], env) };
     }
     const raw = entry?.params?.[fxMatch[2]];
-    if (typeof raw === "number") return { value: raw, source: "static" };
+    if (typeof raw === "number") return { value: raw, source: "static", frozen: false };
   }
   if (env && env.points.length > 0) {
     return { value: evaluateEnvelopeAt(env, options.localMs), source: "envelope" };

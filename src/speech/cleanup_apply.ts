@@ -13,6 +13,7 @@ import {
   sliceSpeedRamp,
   sourceMsToClipLocalMs,
 } from "../sequence/spine.js";
+import { dropSlicedPresetRecords } from "../effects/preset_apply.js";
 import { commitVerifiedMutation } from "../verify/gates.js";
 import type {
   ContextualFillerReviewCandidate,
@@ -200,6 +201,14 @@ export function applyCleanupCutsToSpine(params: {
             localStartMs,
             localStartMs + subClip.duration_ms
           );
+          dropSlicedPresetRecords({
+            workspaceDir: params.workspaceDir,
+            seq: params.sequence,
+            origClip: target,
+            subClip,
+            sliceStartMs: localStartMs,
+            sliceEndMs: localStartMs + subClip.duration_ms,
+          });
           if (target.treatments.reframe.focal_points.length > 0) {
             subClip.treatments.reframe.focal_points = sliceReframeFocalPoints(
               target.treatments.reframe.focal_points,

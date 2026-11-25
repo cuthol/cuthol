@@ -78,6 +78,48 @@ function checkTemplatePlaceholders(
   }
 }
 
+/**
+ * Chain (filter) fields are spliced into comma-separated ffmpeg filter options, while the
+ * eased-progress `{{p}}` expansion contains commas (min/max/pow argument lists). A `{{p}}`
+ * outside single quotes splits the option and fails the render (e.g. `No such filter: '0)'`),
+ * so it is rejected at manifest load; quoted use passes through unchanged. `{{t0}}`/`{{dur}}`
+ * expand to plain numbers and are safe anywhere; overlay-only vars stay rejected above.
+ */
+function checkFilterProgressQuoted(
+  template: string,
+  extName: string,
+  trName: string,
+  field: string
+): void {
+  let quoted = false;
+  let i = 0;
+  while (i < template.length) {
+    const ch = template[i];
+    if (ch === "\\" && i + 1 < template.length) {
+      i += 2;
+      continue;
+    }
+    if (ch === "'") {
+      quoted = !quoted;
+      i += 1;
+      continue;
+    }
+    if (ch === "{" && template[i + 1] === "{") {
+      const end = template.indexOf("}}", i + 2);
+      if (end === -1) break;
+      const name = template.slice(i + 2, end).trim();
+      if (name === "p" && !quoted) {
+        throw new CutholError(
+          DIAGNOSTICS.EXTENSION_TRANSITION_FIELD_UNQUOTED_PROGRESS(extName, trName, field)
+        );
+      }
+      i = end + 2;
+      continue;
+    }
+    i += 1;
+  }
+}
+
 function parseTemplateField(
   obj: Record<string, unknown>,
   key: string,
@@ -141,6 +183,8 @@ export function parseManifestTransitionsSection(
     const owner = `transitions.${trName}`;
     if (outgoing_filter) checkTemplatePlaceholders(outgoing_filter, CHAIN_VARS, params, extName, `${owner}.outgoing_filter`);
     if (incoming_filter) checkTemplatePlaceholders(incoming_filter, CHAIN_VARS, params, extName, `${owner}.incoming_filter`);
+    if (outgoing_filter) checkFilterProgressQuoted(outgoing_filter, extName, trName, `${owner}.outgoing_filter`);
+    if (incoming_filter) checkFilterProgressQuoted(incoming_filter, extName, trName, `${owner}.incoming_filter`);
     if (incoming_scale) checkTemplatePlaceholders(incoming_scale, CHAIN_VARS, params, extName, `${owner}.incoming_scale`);
     if (incoming_x) checkTemplatePlaceholders(incoming_x, OVERLAY_VARS, params, extName, `${owner}.incoming_x`);
     if (incoming_y) checkTemplatePlaceholders(incoming_y, OVERLAY_VARS, params, extName, `${owner}.incoming_y`);
@@ -236,19 +280,23 @@ export function formatTransitionParamValue(value: EffectParamValue): string {
 /**
  * Substitutes `{{name}}` placeholders: compiler variables first, then validated params.
  * Unknown names and filter-breaking characters in values fail with G123 (never silently).
+ * In `filterField` mode (outgoing_filter/incoming_filter, spliced into comma-separated
+ * ffmpeg filter options) param values holding `,` are rejected too: like the `{{p}}`
+ * expansion, a comma would split the option at render time.
  */
 export function substituteTransitionTemplate(
   template: string,
   vars: Record<string, string>,
   params: Record<string, EffectParamValue>,
   kind: string,
-  clipId: string
+  clipId: string,
+  filterField = false
 ): string {
   return template.replace(/\{\{\s*([a-zA-Z0-9_-]+)\s*\}\}/g, (_match, name: string) => {
     if (name in vars) return vars[name];
     if (name in params) {
       const rendered = formatTransitionParamValue(params[name]);
-      if (/[;&|`$\r\n]/.test(rendered)) {
+      if (/[;&|`$\r\n]/.test(rendered) || (filterField && rendered.includes(","))) {
         throw paramFailure(kind, clipId, `'${name}' parameter value contains characters that cannot be used in a filter.`);
       }
       return rendered;

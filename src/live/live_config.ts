@@ -50,6 +50,9 @@ export function writeJsonFileAtomically(filePath: string, data: unknown): void {
   fs.renameSync(tmpPath, filePath);
 }
 
+/** Idle overlay pre-production (`live.prewarm`) is on unless switched off. */
+export const LIVE_PREWARM_DEFAULT = true;
+
 /** env CUTHOL_LIVE > project (sequence `review.live_mode`) > user (`live_mode`) > "ask". */
 export function resolveLiveConfig(projectDir: string): LiveConfigResolved {
   const env = parseLiveMode(process.env.CUTHOL_LIVE);

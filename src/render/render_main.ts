@@ -37,6 +37,12 @@ import {
   resolveOverlayConcurrency,
 } from "../core/env.js";
 import { storedSetting } from "../core/settings.js";
+import {
+  enforceShaderIntermediateCap,
+  listShaderIntermediateFiles,
+  releaseShaderReadLocks,
+  resolveShaderCacheCapGb,
+} from "./pre_pass.js";
 
 /** Default render output folder: `render.output_dir` (project scope) or `<root>/output`. */
 export function resolveRenderOutputDir(rootDir: string): string {
@@ -79,6 +85,12 @@ export interface RenderStageTimingsMs {
   total_ms: number;
 }
 
+export interface ShaderCacheSummary {
+  total_before_bytes: number;
+  total_after_bytes: number;
+  deleted_count: number;
+}
+
 export interface RenderOutputSummary {
   ok: boolean;
   output_path: string;
@@ -92,6 +104,8 @@ export interface RenderOutputSummary {
   encoder_fallback: RenderEncoderFallback | null;
   workers: number;
   single_stage: boolean;
+  /** Present only when the project holds shader intermediates. */
+  shader_cache?: ShaderCacheSummary;
   overlays?: RenderOverlaySummary;
   timings_ms: RenderStageTimingsMs;
   verification: VerificationReport;
@@ -204,18 +218,12 @@ function prepareSequenceRender(options: {
       ? seqSegments
       : tempoOutputSegments(seqSegments, tempoRate, sequence.stage.fps, outputFrameAtSeqMs(seqDurationMs, tempoRate, sequence.stage.fps));
 
-  const uniqueCompCount = countActiveUniqueCompositions(sequence, paths.rootDir);
-  const overlayConcurrency = resolveOverlayConcurrency({
-    workersPerOverlay: workers,
-    coldOverlayCount: uniqueCompCount > 0 ? uniqueCompCount : 1,
-  });
-  const nativeCapture =
-    preset === "draft_480p" && resolveDraftOverlayRes(options.overlayRes) === "native";
-  setDraftNativeOverlayCapture(nativeCapture);
-  beginOverlayRenderTracking({
-    concurrency: overlayConcurrency,
+  const { uniqueCompCount, overlayConcurrency } = setupOverlayStage({
+    sequence,
+    rootDir: paths.rootDir,
+    preset,
     workers,
-    nativeCaptureForMasterReuse: nativeCapture,
+    overlayRes: options.overlayRes,
   });
   // Live hook only: mirrors stages into .cuthol/live/progress.json (plan/output untouched).
   beginLiveRender({
@@ -242,6 +250,8 @@ function prepareSequenceRender(options: {
 
   return {
     tTotal0,
+    usedShaderFiles: [],
+    shaderReadReleases: [],
     paths,
     sequence,
     verification,
@@ -257,6 +267,35 @@ function prepareSequenceRender(options: {
     segments,
     overlayPrepassMs,
   };
+}
+
+/**
+ * Shared overlay-stage setup: capture size, overlay tracking. Used by the
+ * render and by the Live pre-production child so both compute identical
+ * overlay blob keys. Never touches the Live progress hook or the journal.
+ */
+export function setupOverlayStage(options: {
+  sequence: CutholSequence;
+  rootDir: string;
+  preset: RenderPreset;
+  workers?: number;
+  overlayRes?: string;
+}): { uniqueCompCount: number; overlayConcurrency: number } {
+  const workers = resolveHyperFramesWorkers(options.workers);
+  const uniqueCompCount = countActiveUniqueCompositions(options.sequence, options.rootDir);
+  const overlayConcurrency = resolveOverlayConcurrency({
+    workersPerOverlay: workers,
+    coldOverlayCount: uniqueCompCount > 0 ? uniqueCompCount : 1,
+  });
+  const nativeCapture =
+    options.preset === "draft_480p" && resolveDraftOverlayRes(options.overlayRes) === "native";
+  setDraftNativeOverlayCapture(nativeCapture);
+  beginOverlayRenderTracking({
+    concurrency: overlayConcurrency,
+    workers,
+    nativeCaptureForMasterReuse: nativeCapture,
+  });
+  return { uniqueCompCount, overlayConcurrency };
 }
 
 function runPostRenderChecks(params: {
@@ -327,6 +366,29 @@ function runPostRenderChecks(params: {
   if (edgeStrip) {
     verification.diagnostics.push(edgeStrip);
     verification.warning_count += 1;
+  }
+  // Empty-composition WARN (one per cue): a transparent overlay capture that
+  // drew nothing writes assets/cuthol-bbox.json with empty:true.
+  const seenEmpty = new Set<string>();
+  for (const lane of sequence.lanes) {
+    if (lane.muted) continue;
+    for (const cue of lane.cues) {
+      if (cue.kind !== "composition" || !cue.composition || seenEmpty.has(cue.id)) continue;
+      seenEmpty.add(cue.id);
+      try {
+        const dir = cue.composition.composition_dir;
+        const abs = path.isAbsolute(dir) ? dir : path.resolve(paths.rootDir, dir);
+        const sidecar = path.join(abs, "assets/cuthol-bbox.json");
+        if (!fs.existsSync(sidecar)) continue;
+        const raw = JSON.parse(fs.readFileSync(sidecar, "utf8")) as { empty?: boolean };
+        if (raw?.empty === true) {
+          verification.diagnostics.push(DIAGNOSTICS.EMPTY_COMPOSITION_RENDER(cue.id));
+          verification.warning_count += 1;
+        }
+      } catch {
+        // unreadable sidecar: no warning
+      }
+    }
   }
   const tAudioHealth0 = Date.now();
   const audioHealth = scanRenderedMp4AudioHealth(resolvedOut, sequence, paths, {
@@ -436,6 +498,42 @@ function refreshCompositionAudioDiagnostics(
   verification.info_count = verification.diagnostics.filter((d) => d.severity === "INFO").length;
 }
 
+/**
+ * Releases this render's read locks, then enforces the shader intermediate
+ * cap. Runs on success and on failure; never throws, so the cap can
+ * never fail the render. Returns undefined when the project holds no shader
+ * intermediates (the result then omits `shader_cache`).
+ */
+function finishShaderCacheCap(prep: PreparedSequenceRender): ShaderCacheSummary | undefined {
+  try {
+    releaseShaderReadLocks(prep.shaderReadReleases);
+  } catch {
+    // best-effort
+  }
+  try {
+    if (listShaderIntermediateFiles(prep.paths.blobsDir).length === 0) return undefined;
+    const capGb = resolveShaderCacheCapGb(prep.paths.rootDir);
+    const r = enforceShaderIntermediateCap(prep.paths.blobsDir, prep.usedShaderFiles, capGb);
+    const summary: ShaderCacheSummary = {
+      total_before_bytes: r.totalBeforeBytes,
+      total_after_bytes: r.totalAfterBytes,
+      deleted_count: r.deletedCount,
+    };
+    if (r.deletedCount > 0) {
+      const mb = (b: number): string => (b / 1024 ** 2).toFixed(1);
+      prep.verification.diagnostics.push(
+        DIAGNOSTICS.SHADER_CACHE_ENFORCED(r.deletedCount, mb(r.totalBeforeBytes), mb(r.totalAfterBytes))
+      );
+      prep.verification.info_count = prep.verification.diagnostics.filter(
+        (d) => d.severity === "INFO"
+      ).length;
+    }
+    return summary;
+  } catch {
+    return undefined;
+  }
+}
+
 export function renderSequenceToMp4(options: {
   workspaceDir: string;
   outputPath?: string;
@@ -444,8 +542,9 @@ export function renderSequenceToMp4(options: {
   encoder?: string;
   overlayRes?: string;
 }): RenderOutputSummary {
+  let prep: PreparedSequenceRender | null = null;
   try {
-    const prep = prepareSequenceRender(options);
+    prep = prepareSequenceRender(options);
 
     const encodeResult =
       prep.segments.length <= 1
@@ -474,7 +573,7 @@ export function renderSequenceToMp4(options: {
     });
     finishLiveRender(collectLiveScanFindings(prep.verification.diagnostics.slice(diagsBeforeScans)));
 
-    return buildRenderOutputSummary({
+    const summary = buildRenderOutputSummary({
       prep,
       encodeResult,
       sizeBytes: stat.size,
@@ -484,7 +583,11 @@ export function renderSequenceToMp4(options: {
       audioHealth,
       audioHealthMs,
     });
+    const shaderCache = finishShaderCacheCap(prep);
+    if (shaderCache) summary.shader_cache = shaderCache;
+    return summary;
   } catch (e) {
+    if (prep) finishShaderCacheCap(prep);
     // Live mirror only: the stopping diagnostic rides the progress document so
     // the window can name the failure (the render itself still throws).
     if (e instanceof CutholError) {

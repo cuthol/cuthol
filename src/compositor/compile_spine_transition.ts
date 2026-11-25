@@ -2,7 +2,8 @@
 // extensions register (`ext:<extension>/<name>`, manifest `transitions` section,
 // extensions/ext_transitions.ts). compile_spine.ts calls these hooks at fixed points:
 //   - transitionHoldTailMs           → how long the outgoing clip stays drawn under the next one
-//   - incomingTransitionScaleFactor  → time-varying scale factor of the incoming clip (null = none)
+//   - incomingTransitionScaleFactor  → time-varying scale factor of the incoming clip (null = none;
+//     extension `incoming_scale` feeds the same dynamic-scale path via extIncomingTransitionScaleFactor)
 //   - buildOutgoingTransitionFilters → filters appended to the outgoing clip chain (after opacity)
 //   - buildIncomingTransitionFilters → filters appended to the incoming clip chain (after the outgoing ones)
 //   - applyIncomingTransitionPosition→ overlay x/y expressions of the incoming clip
@@ -11,14 +12,13 @@
 // Built-in kinds compile as they always have (they ignore `easing`, as before). Extension kinds resolve
 // their manifest template through the sequence effect registry; unknown/disabled kinds fail with G122
 // (never a silent dissolve) and bad params with G123. `cubic_bezier` easing rides the shared cubic-bezier solver.
-// `incomingTransitionScaleFactor` cannot see the registry (its call site passes no compile context and
-// compile_spine.ts is frozen), so extension incoming scale compiles through the clip chain
-// (`scale` + centered `pad` in buildIncomingTransitionFilters) instead of the dynamic-scale path.
+// Extension incoming scale feeds the built-in dynamic-scale path: compile_spine.ts passes its
+// compile context to extIncomingTransitionScaleFactor and folds the result into the same
+// sxPart/syPart honouring the transition window (factor inside, 1.0 outside).
 import type { CutholSequence, EffectParamValue, TransitionSpec } from "../core/schema.js";
 import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
 import { compileCubicBezierEasedU, cubicBezierIssue } from "../core/easing.js";
 import type { VideoGraphCompileContext } from "./compiler.js";
-import { compilePlacementChannelExpr } from "./compile_filters.js";
 import {
   PLACEMENT_CHANNELS,
   placementChannelHasEnvelopeInput,
@@ -138,6 +138,36 @@ export function incomingTransitionScaleFactor(incomingTransition: TransitionSpec
   return `if(lt(t,${inDurSec}),0.88+0.12*(t/${inDurSec}),1)`;
 }
 
+/**
+ * Extension `incoming_scale` factor (ffmpeg, local clip time `t`), or null when the incoming
+ * transition is not an `ext:` kind with `incoming_scale`. The template's `{{p}}` is the same
+ * eased progress used by the old chain filters; the result is guarded to the transition window
+ * (factor inside, 1.0 outside) exactly like the built-in factor. compile_spine.ts folds it into
+ * sxPart/syPart so the picture really scales per frame (perspective overlay path) with a
+ * constant chain frame size.
+ */
+export function extIncomingTransitionScaleFactor(
+  ctx: VideoGraphCompileContext,
+  clip: SpineClipSpec,
+  incomingTransition: TransitionSpec | null
+): string | null {
+  if (!incomingTransition || incomingTransition.duration_ms <= 0) return null;
+  if (!incomingTransition.kind.startsWith("ext:")) return null;
+  const { spec, params: tParams } = resolveExtTransition(ctx, incomingTransition.kind, incomingTransition, clip.id);
+  if (!spec.incoming_scale) return null;
+  const durSec = strSec(incomingTransition.duration_ms);
+  const dtNum = numSec(incomingTransition.duration_ms);
+  const p = easedProgressExpr(`(t/${dtNum})`, incomingTransition, clip.id);
+  const factor = substituteTransitionTemplate(
+    spec.incoming_scale,
+    { t0: strSec(0), dur: durSec, p },
+    tParams,
+    incomingTransition.kind,
+    clip.id
+  );
+  return `if(lt(t,${durSec}),(${factor}),1)`;
+}
+
 function nextClipCoversStage(seq: CutholSequence, i: number, outTrans: TransitionSpec | null): boolean {
   const nextClip = i < seq.spine.clips.length - 1 ? seq.spine.clips[i + 1] : null;
   return (
@@ -204,7 +234,7 @@ function buildExtOutgoingFilters(
     out.push(`fade=t=out:st=${strSec(winStartMs)}:d=${durSec}:alpha=1`);
   }
   if (spec.outgoing_filter) {
-    out.push(substituteTransitionTemplate(spec.outgoing_filter, vars, tParams, kind, clip.id));
+    out.push(substituteTransitionTemplate(spec.outgoing_filter, vars, tParams, kind, clip.id, true));
   }
   return out;
 }
@@ -227,33 +257,6 @@ export function buildOutgoingTransitionFilters(
   });
 }
 
-/**
- * Chain frame size at the transition stage (stage 6), mirroring the static/dynamic target and the
- * rotation bounding box computed in compile_spine.ts. Extension transitions never set the dynamic
- * zoom factor, so only placement scale envelopes make it dynamic here.
- */
-function extChainFrameSize(
-  ctx: VideoGraphCompileContext,
-  clip: SpineClipSpec
-): { w: number; h: number } {
-  const { renderWidth, renderHeight } = ctx;
-  const spSxExpr = compilePlacementChannelExpr(clip, "scale_x", { timeBaseOffsetMs: 0, mode: "raw" });
-  const spSyExpr = compilePlacementChannelExpr(clip, "scale_y", { timeBaseOffsetMs: 0, mode: "raw" });
-  const dynamic = Boolean(spSxExpr || spSyExpr);
-  const targetW = dynamic
-    ? renderWidth
-    : Math.max(8, Math.round((renderWidth * Math.abs(placementStaticValue(clip, "scale_x"))) / 2) * 2);
-  const targetH = dynamic
-    ? renderHeight
-    : Math.max(8, Math.round((renderHeight * Math.abs(placementStaticValue(clip, "scale_y"))) / 2) * 2);
-  const radAbs = (Math.abs(placementStaticValue(clip, "rotation_deg")) * Math.PI) / 180;
-  if (Math.abs(placementStaticValue(clip, "rotation_deg")) <= 0.01) return { w: targetW, h: targetH };
-  return {
-    w: Math.round(targetW * Math.abs(Math.cos(radAbs)) + targetH * Math.abs(Math.sin(radAbs))),
-    h: Math.round(targetW * Math.abs(Math.sin(radAbs)) + targetH * Math.abs(Math.cos(radAbs))),
-  };
-}
-
 function buildExtIncomingFilters(
   ctx: VideoGraphCompileContext,
   params: { clip: SpineClipSpec; incomingTransition: TransitionSpec }
@@ -266,17 +269,10 @@ function buildExtIncomingFilters(
   const p = easedProgressExpr(`(t/${dtNum})`, incomingTransition, clip.id);
   const vars = { t0: strSec(0), dur: durSec, p };
   const out: string[] = [];
-  if (spec.incoming_scale) {
-    const factor = substituteTransitionTemplate(spec.incoming_scale, vars, tParams, kind, clip.id);
-    const guarded = `if(lt(t,${durSec}),(${factor}),1)`;
-    const { w, h } = extChainFrameSize(ctx, clip);
-    out.push(
-      `scale=w='iw*(${guarded})':h='ih*(${guarded})':eval=frame`,
-      `pad=${w}:${h}:(ow-iw)/2:(oh-ih)/2:color=black@0`
-    );
-  }
+  // `incoming_scale` compiles through the dynamic-scale path (extIncomingTransitionScaleFactor,
+  // folded into sxPart/syPart in compile_spine.ts), so nothing is appended to the chain here.
   if (spec.incoming_filter) {
-    out.push(substituteTransitionTemplate(spec.incoming_filter, vars, tParams, kind, clip.id));
+    out.push(substituteTransitionTemplate(spec.incoming_filter, vars, tParams, kind, clip.id, true));
   }
   return out;
 }

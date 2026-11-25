@@ -1,12 +1,15 @@
 // CLI 'spine' command group handler (split out of cli.ts).
 import { CutholError, DIAGNOSTICS } from "./core/diagnostics.js";
 import {
+  CutholSequence,
   ParameterEnvelope,
   ParameterEnvelopePoint,
   SpatialPlacement,
   SpeedRampPoint,
   TransitionSpec,
 } from "./core/schema.js";
+import { getSequenceEffectRegistry, parseExtensionEffectRef } from "./extensions/ext_effects.js";
+import { resolveExtension } from "./extensions/manager.js";
 import { parseEasingFlag } from "./core/easing.js";
 import { parseTimeMs } from "./core/time.js";
 import {
@@ -25,12 +28,15 @@ import {
 } from "./sequence/spine.js";
 import { setSpineGrade } from "./sequence/spine_grade.js";
 import { addSpineFx, listSpineFx, removeSpineFx, setSpineFx } from "./sequence/spine_fx.js";
+import { applyPresetSpineFx, reapplyPresetEntries } from "./effects/preset_apply.js";
+import type { VerificationReport } from "./verify/gates.js";
 import { listEffectDefinitions } from "./effects/effect_registry.js";
 import { loadSequence } from "./core/workspace.js";
 import { MediaLedger } from "./library/ledger.js";
 import type { BeatAnalysisResult } from "./library/beats.js";
 import {
   addEnvelopePoint,
+  addEnvelopePointsBulk,
   beatToLocalMs,
   moveEnvelopePoint,
   readEnvelopeValueAt,
@@ -38,6 +44,11 @@ import {
   sequenceTimeToLocalMs,
 } from "./sequence/envelope_points.js";
 import { boolFlag, numFlag, parseExciseRanges, parsePropsJsonFlag, strFlag } from "./cli_args.js";
+import fs from "node:fs";
+import path from "node:path";
+import { checkEffectDefinition, checkFxChain } from "./effects/fx_check.js";
+import { fxFullVerdict, runFxCheckFull } from "./effects/fx_check_full.js";
+import { parseSweep, runFxTry } from "./effects/fx_try.js";
 
 function parseSpeedRampFlag(raw: string): SpeedRampPoint[] {
   const fail = (detail: string): never => {
@@ -127,6 +138,478 @@ function collectSpineFxParams(flags: Record<string, string | boolean>): Record<s
     if (single !== undefined) addFxPair(out, single);
   }
   return out;
+}
+
+/**
+ * `spine fx check` (brief A item 3 + continuation): definition check for one
+ * effect kind. Only kinds with an explicit non-ffmpeg backend pass as native;
+ * anything else must resolve to a runnable filter template or it is a G326
+ * ERROR. An ERROR finding fails the command (exit 1, `ok: false`), like
+ * `verify`; WARN-only stays exit 0. Needs no workspace for persistent
+ * extensions (`~/.cuthol/extensions/<name>/`) and core kinds.
+ */
+export function runSpineFxCheck(
+  workspaceDir: string,
+  args: { kind?: string; item?: string; filter?: string }
+): void {
+  const kind = args.kind;
+  if (!kind) throw new Error("Provide --kind <kind>.");
+  const item = args.item ?? null;
+
+  const finish = (payload: Record<string, unknown>): void => {
+    const findings = (payload.findings as Array<{ severity?: string }> | undefined) ?? [];
+    const failed = findings.some((f) => f?.severity === "ERROR");
+    emitEnvelopeJson(workspaceDir, "spine.fx.check", {
+      action: "spine.fx.check",
+      kind,
+      item,
+      ...payload,
+      ok: !failed,
+      result: failed ? "fail" : (payload.result ?? "pass"),
+    });
+    if (failed) process.exitCode = 1;
+  };
+
+  // Raw ffmpeg chain: no definition needed, no workspace needed.
+  if (kind === "ffmpeg") {
+    finish({
+      findings: checkFxChain(args.filter ?? "", { itemId: item ?? undefined, kind }),
+    });
+    return;
+  }
+
+  // Positive native list: only the built-in kinds with a non-ffmpeg backend.
+  // Anything unknown must NOT fall through here.
+  if (kind === "motion") {
+    finish({ result: "pass", note: "native backend: validated by placement-layer geometry checks." });
+    return;
+  }
+
+  // A workspace, when there is one (SYS01 outside a workspace is not an error here).
+  let sequence: CutholSequence | null = null;
+  let seqRoot: string | undefined;
+  try {
+    sequence = loadSequence(workspaceDir).sequence;
+    seqRoot = workspaceDir;
+  } catch (err) {
+    if (!(err instanceof CutholError) || (err.diagnostic as { code?: string } | undefined)?.code !== "CUTHOL-SYS01") throw err;
+  }
+
+  if (sequence) {
+    const def = listEffectDefinitions(sequence, { rootDir: seqRoot }).find((d) => d.kind === kind);
+    if (def) {
+      if (def.backend === "shader") {
+        finish({
+          findings: checkEffectDefinition(
+            { ...def, shaderFile: readRegistryShaderFile(sequence, seqRoot, kind) },
+            { projectDir: seqRoot, cacheKeyPrefix: "def" }
+          ),
+        });
+        return;
+      }
+      if (def.backend !== "ffmpeg") {
+        const via = def.backend === "spine"
+          ? "placement-layer geometry checks"
+          : "core colour diagnostics";
+        finish({ result: "pass", note: `native backend: validated by ${via}.` });
+        return;
+      }
+      if (def.ffmpeg?.video_filter) {
+        finish({
+          findings: checkEffectDefinition(def, { projectDir: seqRoot, cacheKeyPrefix: "def" }),
+        });
+        return;
+      }
+      throw new CutholError(DIAGNOSTICS.FX_CHECK_UNKNOWN_KIND(
+        kind,
+        `kind '${kind}' is a transition, not a clip effect; 'spine fx check' probes clip effects ('ffmpeg', 'motion' or 'ext:<extension>/<name>').`
+      ));
+    }
+  }
+
+  // No registered definition: resolve `ext:<extension>/<name>` explicitly so the
+  // error names the kind and says what exists.
+  const ref = parseExtensionEffectRef(kind);
+  if (!ref) {
+    throw new CutholError(DIAGNOSTICS.FX_CHECK_UNKNOWN_KIND(
+      kind,
+      `unknown kind '${kind}' (built-in kinds are 'ffmpeg' and 'motion'; extension kinds are in 'ext:<extension>/<name>' form).`
+    ));
+  }
+
+  const enabled = sequence?.extensions?.some((e) => e.name === ref.extension) ?? false;
+  let ext: ReturnType<typeof resolveExtension> | null = null;
+  let loadError: unknown = null;
+  try {
+    // Outside a workspace only persistent extensions resolve; inside, project-local wins.
+    ext = resolveExtension(ref.extension, sequence ? workspaceDir : null);
+  } catch (err) {
+    loadError = err;
+  }
+  if (!ext) {
+    const msg = loadError instanceof CutholError ? loadError.diagnostic.what : String(loadError ?? "not found");
+    if (!sequence) {
+      throw new CutholError(DIAGNOSTICS.FX_CHECK_UNKNOWN_KIND(
+        kind,
+        `kind '${kind}' could not be resolved without a workspace (extension '${ref.extension}' is not among the persistent extensions): ${msg} Run inside the project workspace to check project-local extensions.`
+      ));
+    }
+    if (enabled) {
+      throw new CutholError(DIAGNOSTICS.FX_CHECK_UNKNOWN_KIND(
+        kind,
+        `extension '${ref.extension}' is enabled in this project but could not be loaded: ${msg}`
+      ));
+    }
+    throw new CutholError(DIAGNOSTICS.FX_CHECK_UNKNOWN_KIND(
+      kind,
+      `extension '${ref.extension}' is not enabled in this project: ${msg} Run \`cuthol extension enable ${ref.extension}\`.`
+    ));
+  }
+  if (sequence && !enabled) {
+    throw new CutholError(DIAGNOSTICS.FX_CHECK_UNKNOWN_KIND(
+      kind,
+      `extension '${ref.extension}' is present but not enabled: run \`cuthol extension enable ${ref.extension}\`.`,
+      `Enable it with 'cuthol extension enable ${ref.extension}', then re-run 'cuthol spine fx check --kind ${kind}'.`
+    ));
+  }
+  const spec = ext.manifest.fx?.[ref.name];
+  if (!spec) {
+    const names = Object.keys(ext.manifest.fx ?? {});
+    throw new CutholError(DIAGNOSTICS.FX_CHECK_UNKNOWN_KIND(
+      kind,
+      names.length > 0
+        ? `unknown fx '${ref.name}' in extension '${ref.extension}' (kind '${kind}'); available: ${names.map((n) => `ext:${ref.extension}/${n}`).join(", ")}.`
+        : `unknown fx '${ref.name}' in extension '${ref.extension}' (kind '${kind}'); extension '${ref.extension}' defines no fx.`
+    ));
+  }
+  finish({
+    findings: checkEffectDefinition(
+      {
+        kind,
+        params: spec.params ?? {},
+        animatable: [...(spec.animatable ?? [])],
+        alpha: spec.alpha,
+        backend: spec.backend,
+        ...(spec.backend === "shader"
+          ? (readExtShaderFile(ext.dir, spec.shader) ? { shaderFile: readExtShaderFile(ext.dir, spec.shader) } : {})
+          : { ffmpeg: { video_filter: spec.video_filter ?? "" } }),
+      },
+      { projectDir: seqRoot, cacheKeyPrefix: "def" }
+    ),
+  });
+}
+
+/** Read a registry shader entry's `.glsl` for the static compile check (best effort: omit when unreadable). */
+function readRegistryShaderFile(sequence: CutholSequence, rootDir: string | undefined, kind: string): { file: string; source: string } | undefined {
+  try {
+    if (!rootDir) return undefined;
+    const reg = getSequenceEffectRegistry(sequence, rootDir);
+    const def = reg.fx.get(kind as never);
+    const rel = def?.spec.shader;
+    if (!def || typeof rel !== "string" || !rel) return undefined;
+    const abs = path.resolve(def.dir, rel);
+    return { file: rel, source: fs.readFileSync(abs, "utf8") };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Read an explicit extension's shader file for the static compile check (best effort). */
+function readExtShaderFile(extDir: string, rel: unknown): { file: string; source: string } | undefined {
+  try {
+    if (typeof rel !== "string" || !rel) return undefined;
+    return { file: rel, source: fs.readFileSync(path.resolve(extDir, rel), "utf8") };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `spine fx preset --item <sp_XX> --preset ext:<ext>/<name> [--param k=v ...]
+ * [--beats <aud_XX>]` applies a keyframe template anchored to the clip, or
+ * with `--reapply --fx <fx_XX>` / `--reapply --all` regenerates preset
+ * entries from their records with the current duration and beat grid.
+ */
+export function runSpineFxPreset(
+  workspaceDir: string,
+  flags: Record<string, string | boolean>
+): void {
+  const item = strFlag(flags, "item") ?? strFlag(flags, "clip");
+  if (!item) throw new Error("Provide --item <sp_XX>.");
+  if (boolFlag(flags, "reapply", false) === true) {
+    const fxId = strFlag(flags, "fx") ?? strFlag(flags, "id");
+    const all = boolFlag(flags, "all", false) === true;
+    const res = reapplyPresetEntries({ workspaceDir, item, fxId, all });
+    emitEnvelopeJson(workspaceDir, "spine.fx.preset.reapply", {
+      action: "spine.fx.preset.reapply",
+      ...res,
+    });
+    return;
+  }
+  const preset = strFlag(flags, "preset");
+  if (!preset) throw new Error("Provide --preset <ext:<extension>/<name]> (or --reapply).");
+  const beats = strFlag(flags, "beats");
+  const res = applyPresetSpineFx({
+    workspaceDir,
+    item,
+    preset,
+    params: collectSpineFxParams(flags),
+    ...(beats ? { beats } : {}),
+  });
+  emitEnvelopeJson(workspaceDir, "spine.fx.preset", {
+    action: "spine.fx.preset",
+    ...res,
+  });
+}
+
+/**
+ * Bulk envelope points from `--points-file <json>`: a JSON array of
+ * `{ at_ms | at, value, easing?, bezier? }`. `at` is a time string in
+ * clip-local ms unless `--sequence-time` is passed.
+ */
+export function addEnvelopePointsFromFile(options: {
+  workspaceDir: string;
+  targetId: string;
+  parameter: ParameterEnvelope["parameter"];
+  pointsFile: string;
+  sequenceTime: boolean;
+}): { envelope: ParameterEnvelope; revision: number; verification: VerificationReport } {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(fs.readFileSync(options.pointsFile, "utf8"));
+  } catch (err) {
+    throw new Error(`Cannot read points file '${options.pointsFile}': ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error(`Points file '${options.pointsFile}' must be a non-empty JSON array of points.`);
+  }
+  const { sequence } = loadSequence(options.workspaceDir);
+  const points = raw.map((entry, i) => {
+    const where = `${options.pointsFile}[${i}]`;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error(`${where} must be an object ({ at_ms | at, value, easing?, bezier? }).`);
+    }
+    const obj = entry as Record<string, unknown>;
+    let offsetMs: number;
+    if (typeof obj.at_ms === "number") {
+      offsetMs = Math.round(obj.at_ms);
+    } else if (typeof obj.at === "string") {
+      offsetMs = parseTimeMs(obj.at);
+    } else {
+      throw new Error(`${where} needs 'at_ms' (number) or 'at' (time string).`);
+    }
+    if (!Number.isFinite(offsetMs)) throw new Error(`${where} has a non-finite time.`);
+    if (options.sequenceTime) offsetMs = Math.round(sequenceTimeToLocalMs(sequence, options.targetId, offsetMs));
+    const value = obj.value === undefined ? undefined : Number(obj.value);
+    if (value !== undefined && !Number.isFinite(value)) throw new Error(`${where} value is not a number.`);
+    let easing = parseEasingFlag(typeof obj.easing === "string" ? obj.easing : "linear", {}).easing as ParameterEnvelopePoint["easing"];
+    let bezier: ParameterEnvelopePoint["bezier"] | undefined;
+    if (obj.bezier !== undefined) {
+      if (!Array.isArray(obj.bezier) || obj.bezier.length !== 4 || obj.bezier.some((v) => typeof v !== "number" || !Number.isFinite(v))) {
+        throw new Error(`${where} bezier must be four finite numbers.`);
+      }
+      bezier = [...(obj.bezier as number[])] as [number, number, number, number];
+      easing = "cubic_bezier";
+    }
+    return { workspaceDir: options.workspaceDir, targetId: options.targetId, parameter: options.parameter, offsetMs, value, easing, ...(bezier ? { bezier: [...bezier] as [number, number, number, number] } : {}) };
+  });
+  return addEnvelopePointsBulk({
+    workspaceDir: options.workspaceDir,
+    targetId: options.targetId,
+    parameter: options.parameter,
+    points,
+  });
+}
+
+/**
+ * `spine fx check --kind <k> --full`: quick check plus sandbox delivery check
+ * (card variants, alpha, neutral, stacked, Bezier envelopes, cost class).
+ */
+export function runSpineFxCheckFull(
+  workspaceDir: string,
+  args: { kind?: string; filter?: string }
+): void {
+  const kind = args.kind;
+  if (!kind) throw new Error("Provide --kind <kind>.");
+  const fail = (payload: Record<string, unknown>, code = 1): void => {
+    const findings = (payload.findings as Array<{ severity?: string }> | undefined) ?? [];
+    const rows = (payload.rows as Array<{ ok?: boolean }> | undefined) ?? [];
+    const verdict = fxFullVerdict(rows, findings);
+    emitEnvelopeJson(workspaceDir, "spine.fx.check", {
+      action: "spine.fx.check",
+      kind,
+      full: true,
+      ...payload,
+      ok: verdict.ok,
+      result: verdict.result,
+    });
+    if (!verdict.ok) process.exitCode = code;
+  };
+  if (kind === "motion") {
+    fail({ result: "pass", note: "native backend: validated by placement-layer geometry checks.", rows: [] });
+    return;
+  }
+  if (kind === "ffmpeg") {
+    if (!args.filter) throw new Error("Provide --filter \"<chain>\" for kind 'ffmpeg'.");
+    const res = runFxCheckFull({ kind, filter: args.filter });
+    fail({ rows: res.rows, findings: res.findings, cost_ms_per_frame_1080p: res.costMsPerFrame1080p, cost_class: res.costClass });
+    return;
+  }
+  const ref = parseExtensionEffectRef(kind);
+  if (!ref) {
+    throw new CutholError(DIAGNOSTICS.FX_CHECK_UNKNOWN_KIND(
+      kind,
+      `unknown kind '${kind}' (built-in kinds are 'ffmpeg' and 'motion'; extension kinds are in 'ext:<extension>/<name>' form).`
+    ));
+  }
+  let sequence: CutholSequence | null = null;
+  try {
+    sequence = loadSequence(workspaceDir).sequence;
+  } catch {
+    sequence = null;
+  }
+  let ext: ReturnType<typeof resolveExtension> | null = null;
+  try {
+    ext = resolveExtension(ref.extension, sequence ? workspaceDir : null);
+  } catch (err) {
+    throw new CutholError(DIAGNOSTICS.FX_CHECK_UNKNOWN_KIND(
+      kind,
+      `extension '${ref.extension}' could not be resolved: ${err instanceof CutholError ? err.diagnostic.what : String(err)}`
+    ));
+  }
+  if (!ext) {
+    throw new CutholError(DIAGNOSTICS.FX_CHECK_UNKNOWN_KIND(kind, `extension '${ref.extension}' was not found.`));
+  }
+  const spec = ext.manifest.fx?.[ref.name];
+  if (!spec) {
+    const names = Object.keys(ext.manifest.fx ?? {});
+    throw new CutholError(DIAGNOSTICS.FX_CHECK_UNKNOWN_KIND(
+      kind,
+      names.length > 0
+        ? `unknown fx '${ref.name}' in extension '${ref.extension}' (kind '${kind}'); available: ${names.map((n) => `ext:${ref.extension}/${n}`).join(", ")}.`
+        : `unknown fx '${ref.name}' in extension '${ref.extension}' (kind '${kind}'); extension '${ref.extension}' defines no fx.`
+    ));
+  }
+  const res = runFxCheckFull({ kind, spec, extDir: { name: ref.extension, dir: ext.dir } });
+  fail({ rows: res.rows, findings: res.findings, cost_ms_per_frame_1080p: res.costMsPerFrame1080p, cost_class: res.costClass });
+}
+
+/**
+ * `spine fx try --kind <k> [--param k=v ...] [--sweep p=a..b[:n]] [--at t1,t2,...]
+ * [--on card|<sp_XX>] [--out <png>]`: one PNG grid through the sandbox. Works without
+ * a project for `card`; `--on <sp_XX>` needs one and copies only that item's source
+ * into the sandbox (the user's project is never written).
+ */
+export function runSpineFxTry(
+  workspaceDir: string,
+  args: { kind?: string; filter?: string; params?: Record<string, unknown>; sweep?: string; at?: string; on?: string; out?: string }
+): void {
+  const kind = args.kind;
+  const filter = args.filter;
+  if (!kind && !filter) throw new Error("Provide --kind <kind> or --filter \"<chain>\".");
+  if (kind && kind !== "ffmpeg" && kind !== "motion" && !parseExtensionEffectRef(kind)) {
+    throw new CutholError(DIAGNOSTICS.FX_CHECK_UNKNOWN_KIND(
+      kind,
+      `unknown kind '${kind}' (built-in kinds are 'ffmpeg' and 'motion'; extension kinds are in 'ext:<extension>/<name>' form).`
+    ));
+  }
+  if (kind === "motion") {
+    emitEnvelopeJson(workspaceDir, "spine.fx.try", {
+      action: "spine.fx.try",
+      kind,
+      ok: true,
+      result: "pass",
+      note: "motion is a placement layer, not pixels: nothing to render.",
+    });
+    return;
+  }
+  const sweep = args.sweep !== undefined ? parseSweep(args.sweep) : undefined;
+  const at = args.at !== undefined
+    ? args.at.split(",").map((s) => {
+      const v = Number(s.trim());
+      if (!Number.isFinite(v) || v < 0) throw new Error(`--at must be comma-separated seconds >= 0 (given: '${args.at}').`);
+      return v;
+    })
+    : undefined;
+  const on = args.on ?? "card";
+  let onSourceFile: string | undefined;
+  if (on !== "card") {
+    let sequence: CutholSequence;
+    try {
+      sequence = loadSequence(workspaceDir).sequence;
+    } catch {
+      throw new CutholError(DIAGNOSTICS.FX_TRY_UNKNOWN_ITEM(on));
+    }
+    const clip = sequence.spine.clips.find((c) => c.id === on);
+    if (!clip) throw new CutholError(DIAGNOSTICS.FX_TRY_UNKNOWN_ITEM(on));
+    const asset = sequence.library.find((a) => a.handle === (clip as { asset_handle: string }).asset_handle);
+    if (!asset) throw new CutholError(DIAGNOSTICS.FX_TRY_UNKNOWN_ITEM(on));
+    const { paths } = loadSequence(workspaceDir);
+    const root = (paths.rootDir as string) ?? workspaceDir;
+    const candidates = [asset.uri, `${root}/${asset.uri}`];
+    onSourceFile = candidates.find((c) => {
+      try {
+        return c ? fs.statSync(c).isFile() : false;
+      } catch {
+        return false;
+      }
+    });
+    if (!onSourceFile) throw new CutholError(DIAGNOSTICS.FX_TRY_UNKNOWN_ITEM(on));
+  }
+  let extDir: { name: string; dir: string } | undefined;
+  if (kind?.startsWith("ext:")) {
+    const ref = parseExtensionEffectRef(kind);
+    let sequence: CutholSequence | null = null;
+    try {
+      sequence = loadSequence(workspaceDir).sequence;
+    } catch {
+      sequence = null;
+    }
+    let ext: ReturnType<typeof resolveExtension> | null = null;
+    try {
+      ext = ref ? resolveExtension(ref.extension, sequence ? workspaceDir : null) : null;
+    } catch (err) {
+      throw new CutholError(DIAGNOSTICS.FX_CHECK_UNKNOWN_KIND(
+        kind,
+        `extension '${ref?.extension}' could not be resolved: ${err instanceof CutholError ? err.diagnostic.what : String(err)}`
+      ));
+    }
+    if (!ext || !ref) {
+      throw new CutholError(DIAGNOSTICS.FX_CHECK_UNKNOWN_KIND(kind, `extension kind '${kind}' could not be resolved.`));
+    }
+    if (!ext.manifest.fx?.[ref.name]) {
+      throw new CutholError(DIAGNOSTICS.FX_CHECK_UNKNOWN_KIND(kind, `unknown fx '${ref.name}' in extension '${ref.extension}'.`));
+    }
+    extDir = { name: ref.extension, dir: ext.dir };
+  }
+  try {
+    const res = runFxTry({
+      kind,
+      filter,
+      params: args.params,
+      ...(sweep ? { sweep } : {}),
+      ...(at ? { at } : {}),
+      ...(args.on ? { on } : {}),
+      ...(args.out ? { out: args.out } : {}),
+      ...(onSourceFile ? { onSourceFile } : {}),
+      ...(extDir ? { extDir } : {}),
+    });
+    emitEnvelopeJson(workspaceDir, "spine.fx.try", {
+      action: "spine.fx.try",
+      kind: kind ?? "ffmpeg",
+      png: res.png,
+      layout: { rows: res.rows, cols: res.cols, sweep_param: res.sweepParam },
+      cost_ms_per_frame_1080p: res.costMsPerFrame1080p,
+      ok: true,
+      result: "pass",
+    });
+  } catch (err) {
+    if (err instanceof CutholError) throw err;
+    throw new CutholError(DIAGNOSTICS.FX_TRY_FAILED(
+      kind ?? "ffmpeg",
+      String((err as Error)?.message ?? err).slice(0, 300)
+    ));
+  }
 }
 
 export function runSpineCommand(ctx: CliCommandContext): CliCommandResult {
@@ -395,6 +878,21 @@ export function runSpineCommand(ctx: CliCommandContext): CliCommandResult {
       return t;
     };
     if (sub === "add") {
+      const pointsFile = strFlag(flags, "points-file");
+      if (pointsFile !== undefined) {
+        const res = addEnvelopePointsFromFile({
+          workspaceDir,
+          targetId,
+          parameter,
+          pointsFile,
+          sequenceTime: boolFlag(flags, "sequence-time", false) ?? false,
+        });
+        emitEnvelopeJson(workspaceDir, "spine.envelope.point.add", {
+          action: "spine.envelope.point.add",
+          ...res,
+        });
+        return;
+      }
       const localMs = resolveLocalMs(strFlag(flags, "at"), "--at <t>");
       const valueRaw = strFlag(flags, "value");
       const res = addEnvelopePoint({
@@ -608,8 +1106,39 @@ export function runSpineCommand(ctx: CliCommandContext): CliCommandResult {
       );
       return;
     }
+    if (sub === "check") {
+      if (boolFlag(flags, "full", false) === true) {
+        runSpineFxCheckFull(workspaceDir, {
+          kind: strFlag(flags, "kind"),
+          filter: strFlag(flags, "filter"),
+        });
+        return;
+      }
+      runSpineFxCheck(workspaceDir, {
+        kind: strFlag(flags, "kind"),
+        item: strFlag(flags, "item") ?? strFlag(flags, "clip"),
+        filter: strFlag(flags, "filter"),
+      });
+      return;
+    }
+    if (sub === "try") {
+      runSpineFxTry(workspaceDir, {
+        kind: strFlag(flags, "kind"),
+        filter: strFlag(flags, "filter"),
+        params: collectSpineFxParams(flags),
+        sweep: strFlag(flags, "sweep"),
+        at: strFlag(flags, "at"),
+        on: strFlag(flags, "on"),
+        out: strFlag(flags, "out"),
+      });
+      return;
+    }
+    if (sub === "preset") {
+      runSpineFxPreset(workspaceDir, flags);
+      return;
+    }
     if (sub !== "add" && sub !== "set" && sub !== "remove" && sub !== "list") {
-      throw new Error("Provide a subcommand: spine fx [catalog|add|set|remove|list] --item <sp_XX|cue_XX> ...");
+      throw new Error("Provide a subcommand: spine fx [catalog|add|set|remove|list|check|try|preset] --item <sp_XX|cue_XX> ...");
     }
     const item = strFlag(flags, "item") ?? strFlag(flags, "clip");
     if (!item) throw new Error("Provide --item <sp_XX|cue_XX>.");

@@ -188,7 +188,7 @@ test("1. Lane voiceover speed (1.3x): duration, atempo audio graph, projected C.
   // Audio plan uses atempo=1.3000
   const { sequence: seqAfter, paths: pathsAfter } = loadSequence(wsDir);
   const audioPlan = compileSequenceAudioPlan(seqAfter, pathsAfter);
-  assert.match(audioPlan.filterComplex, /atrim=start=0\.000:end=3\.900,asetpts=PTS-STARTPTS,atempo=1\.3000/);
+  assert.match(audioPlan.filterComplex, /atrim=start=0\.000:end=3\.900,asetpts=PTS-0\.000\/TB,aresample=async=1:first_pts=0,atempo=1\.3000/);
 
   // Words in C.global.word and C.word are scaled by 1 / 1.3 (0.65 -> 0.50, 1.95 -> 1.50, 3.25 -> 2.50)
   const after = readBridgeWords();

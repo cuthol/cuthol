@@ -7,6 +7,9 @@
 import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
 import type { ClipFxSpec, CutholSequence, EffectParamValue, LaneCue, SpineClip } from "../core/schema.js";
 import { loadSequence } from "../core/workspace.js";
+import { checkFrozenParam, checkFxChain as checkFxChainSync, fxEntryFilterName } from "../effects/fx_check.js";
+import { listEffectDefinitions } from "../effects/effect_registry.js";
+import { buildItemFxStage, flattenFxStageParts } from "../compositor/compile_fx_stage.js";
 import { commitVerifiedMutation, type VerificationReport } from "../verify/gates.js";
 import { BUILTIN_FX_KIND } from "../compositor/compile_spine_fx.js";
 import { MOTION_FX_KIND, PLACEMENT_CHANNELS } from "../effects/effect_types.js";
@@ -64,6 +67,86 @@ function findFx(owner: FxOwner, fxId: string): ClipFxSpec {
   return fx;
 }
 
+/**
+ * [fxcheck:A G320–G329] pre-write probe: builds the entry's real fx stage with
+ * the compiler (`buildItemFxStage`, same text `verify` and render use), runs it
+ * on a card (instance check), and triple-renders envelope-animated params
+ * (frozen check). Throws CUTHOL-G322/G324 on ERROR. Callers run this before
+ * `commitVerifiedMutation`, so an ERROR rejects the command with nothing written.
+ * Compiler throws (G118/G119) are left to the mutation itself.
+ */
+export function probeEntryOrThrow(
+  seq: CutholSequence, workspaceDir: string, targetId: string, entry: ClipFxSpec,
+  envelopes: { parameter: string; points: { value: number }[] }[]
+): void {
+  if (entry.kind === MOTION_FX_KIND) return;
+  // Lane cues reject shader fx at write time (G709): shader effects apply
+  // to spine clips in this version. Nothing is written on this path.
+  if (entry.kind.startsWith("ext:")) {
+    const isCue = seq.lanes.some((lane) => lane.cues.some((cue) => cue.id === targetId));
+    if (isCue) {
+      const def = listEffectDefinitions(seq, { rootDir: workspaceDir }).find((d) => d.kind === entry.kind);
+      if (def?.backend === "shader") {
+        throw new CutholError(DIAGNOSTICS.SHADER_LANE_REJECTED(targetId, entry.id));
+      }
+    }
+  }
+  const ctx = { seq, paths: { rootDir: workspaceDir } } as unknown as import("../compositor/compiler.js").VideoGraphCompileContext;
+  const owner = { id: targetId, fx: [entry], envelopes } as unknown as Parameters<typeof buildItemFxStage>[1]["owner"];
+  let chain: string;
+  try {
+    const parts = buildItemFxStage(ctx, { owner, receivedPixFmt: "yuv420p", itemHasAlpha: false });
+    chain = flattenFxStageParts(parts).join(",");
+  } catch {
+    return; // G118/G119 surface at commit time
+  }
+  if (!chain) return;
+  const def = entry.kind.startsWith("ext:")
+    ? listEffectDefinitions(seq, { rootDir: workspaceDir }).find((d) => d.kind === entry.kind)
+    : undefined;
+  const template = def?.ffmpeg?.video_filter ?? (typeof (entry.params as Record<string, unknown>)?.filter === "string" ? String((entry.params as Record<string, unknown>).filter) : undefined);
+  const filterName = fxEntryFilterName(template, chain);
+  const alphaVariants = (def?.alpha === "process" ? [false, true] : [false]) as boolean[];
+  for (const alpha of alphaVariants) {
+    const findings = checkFxChainSync(chain, {
+      projectDir: workspaceDir, itemId: targetId, fxId: entry.id, kind: entry.kind,
+      template, alpha,
+      cacheKey: `entry:${entry.kind}:${chain}:alpha=${alpha ? "rgba" : "yuv"}`,
+    });
+    const err = findings.find((f) => f.severity === "ERROR");
+    if (err) throw new CutholError(DIAGNOSTICS.FX_CHECK_FAILED(targetId, entry.id, entry.kind, err.filter ?? filterName, err.detail ?? err.message, template));
+  }
+  for (const env of envelopes) {
+    const m = /^fx\.([^.]+)\.(.+)$/.exec(env.parameter);
+    if (!m || m[1] !== entry.id) continue;
+    const pts = env.points ?? [];
+    if (pts.length === 0) continue;
+    const vals = pts.map((p) => p.value);
+    if (!vals.some((v) => v !== vals[0])) continue;
+    const staticOwner = (value: number) => ({
+      id: targetId,
+      fx: [{ ...entry, params: { ...(entry.params as Record<string, unknown>), [m[2]]: value } }],
+      envelopes: [],
+    }) as unknown as Parameters<typeof buildItemFxStage>[1]["owner"];
+    let chainInit: string | null = null;
+    let chainFinal: string | null = null;
+    try {
+      chainInit = flattenFxStageParts(buildItemFxStage(ctx, { owner: staticOwner(vals[0]), receivedPixFmt: "yuv420p", itemHasAlpha: false })).join(",");
+      chainFinal = flattenFxStageParts(buildItemFxStage(ctx, { owner: staticOwner(vals[vals.length - 1]), receivedPixFmt: "yuv420p", itemHasAlpha: false })).join(",");
+    } catch {
+      return; // compiler errors surface at commit time
+    }
+    if (!chainInit || !chainFinal) continue;
+    const frozen = checkFrozenParam({
+      filterName, chainWithInitial: chainInit, chainWithFinal: chainFinal,
+      chainWithEnvelope: chain, frameIndex: 65, envelopeChangesValue: true,
+      projectDir: workspaceDir,
+    });
+    const ferr = frozen.find((f) => f.severity === "ERROR");
+    if (ferr) throw new CutholError(DIAGNOSTICS.FX_PARAM_FROZEN(filterName));
+  }
+}
+
 function assertScalarParams(
   params: Record<string, unknown>,
   clipId: string,
@@ -95,6 +178,22 @@ export function addSpineFx(options: {
   enabled?: boolean;
 }): { fx: ClipFxSpec; item: string; clip?: string; revision: number; verification: VerificationReport } {
   const targetId = resolveTargetId(options);
+  // [fxcheck:A G320–G329] pre-write probe: ERROR rejects before anything is written.
+  {
+    const { sequence: preSeq } = loadSequence(options.workspaceDir);
+    const hasFilter = options.filter !== undefined && options.filter !== "";
+    const kind = hasFilter ? BUILTIN_FX_KIND : (options.kind ?? "").trim();
+    if (kind) {
+      const merged: Record<string, unknown> = { ...(options.params ?? {}) };
+      if (hasFilter) merged.filter = options.filter;
+      const clip = preSeq.spine.clips.find((c) => c.id === targetId);
+      const cue = preSeq.lanes.flatMap((l) => l.cues).find((c) => c.id === targetId);
+      const existing = (clip ?? cue)?.fx ?? [];
+      probeEntryOrThrow(preSeq, options.workspaceDir, targetId, {
+        id: allocateFxId(existing), kind, params: merged as never,
+      } as ClipFxSpec, []);
+    }
+  }
   const { result, revision, verification } = commitVerifiedMutation(
     options.workspaceDir,
     `spine.fx.add(${targetId})`,
@@ -150,6 +249,23 @@ export function setSpineFx(options: {
   enabled?: boolean;
 }): { fx: ClipFxSpec; item: string; clip?: string; revision: number; verification: VerificationReport } {
   const targetId = resolveTargetId(options);
+  // [fxcheck:A G320–G329] pre-write probe on the would-be entry state.
+  {
+    const { sequence: preSeq } = loadSequence(options.workspaceDir);
+    const clip = preSeq.spine.clips.find((c) => c.id === targetId);
+    const cue = preSeq.lanes.flatMap((l) => l.cues).find((c) => c.id === targetId);
+    const owner = clip ?? cue;
+    const fx = owner?.fx?.find((f) => f.id === options.fxId);
+    if (owner && fx) {
+      const merged: Record<string, unknown> = {
+        ...(fx.params as Record<string, unknown> ?? {}),
+        ...Object.fromEntries(Object.entries(options.params ?? {})),
+      };
+      if (options.filter !== undefined) merged.filter = options.filter;
+      probeEntryOrThrow(preSeq, options.workspaceDir, targetId,
+        { ...fx, params: merged as never } as ClipFxSpec, (owner.envelopes ?? []) as never[]);
+    }
+  }
   const { result, revision, verification } = commitVerifiedMutation(
     options.workspaceDir,
     `spine.fx.set(${targetId},${options.fxId})`,

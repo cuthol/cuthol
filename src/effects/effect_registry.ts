@@ -56,16 +56,19 @@ export function listEffectDefinitions(
   if (rootDir && (seq.extensions ?? []).length > 0) {
     const reg = getSequenceEffectRegistry(seq, rootDir);
     for (const [ref, def] of reg.fx) {
+      const shaderBackend = def.spec.backend === "shader";
       out.push({
         kind: ref,
         role: "clip",
-        backend: "ffmpeg",
+        backend: shaderBackend ? "shader" : "ffmpeg",
         alpha: def.spec.alpha ?? "keep",
         description: def.spec.description,
         params: describeParams(def.spec.params ?? {}),
         animatable: [...(def.spec.animatable ?? [])],
         live: "server",
-        ffmpeg: { video_filter: def.spec.video_filter },
+        ...(shaderBackend
+          ? { shader: { source: def.spec.shader ?? "" } }
+          : { ffmpeg: { video_filter: def.spec.video_filter ?? "" } }),
       });
     }
     for (const [ref, def] of reg.transitions) {

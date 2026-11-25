@@ -1,8 +1,9 @@
 // Plain-text `cuthol help` output (split out of cli.ts).
+import { CutholError, DIAGNOSTICS } from "./core/diagnostics.js";
+import { strFlag } from "./cli_args.js";
+import { getGuideText } from "./mcp/server.js";
 
-export function printHelp(): void {
-  console.log(
-    [
+const HELP_LINES: string[] = [
       "Cuthol — Agent-First Open-Source Non-Linear Video Editor (NLE)",
       "",
       "Usage:",
@@ -83,8 +84,40 @@ export function printHelp(): void {
       "  cuthol live config [--mode ask|on|off] [--global] [--dir <dir>]",
       "  cuthol live stop [--dir <dir>]",
       "  cuthol settings [list | get <key> | set <key> <value> | reset <key>] [--dir <dir>]",
+      "  cuthol guide [--topic <name>]",
       "",
       "Global output flags: [--compact | --format text|json]",
-    ].join("\n")
+];
+
+/**
+ * `cuthol <group> --help` (or `<group> <action> --help`) prints only that
+ * group/action's usage lines and exits 0: the existing global text filtered,
+ * no new hand-written text.
+ */
+export function printHelp(group?: string, action?: string): void {
+  if (!group || group === "help") {
+    console.log(HELP_LINES.join("\n"));
+    return;
+  }
+  const needle = `cuthol ${group}`;
+  const kept = HELP_LINES.filter(
+    (l) =>
+      l.includes(needle) &&
+      (!action || l.includes(` ${action}`) || l.includes(`cuthol ${group} [`))
   );
+  console.log([...HELP_LINES.slice(0, 3), ...kept, "", ...HELP_LINES.slice(-1)].join("\n"));
+}
+
+/**
+ * `cuthol guide [--topic <name>]`: the same content as the MCP `guide` tool
+ * (same resolution function), printed as text. Unknown topics are an error.
+ */
+export function runGuideCommand(
+  workspaceDir: string,
+  flags: Record<string, string | boolean>
+): void {
+  const topic = strFlag(flags, "topic") ?? "cuthol";
+  const shared = getGuideText(topic, workspaceDir);
+  if (!shared.ok) throw new CutholError(DIAGNOSTICS.GUIDE_TOPIC_UNKNOWN(topic));
+  console.log(shared.text);
 }

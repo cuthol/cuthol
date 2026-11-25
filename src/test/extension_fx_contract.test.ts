@@ -85,12 +85,19 @@ test("extensions without fx/transitions keep their listing unchanged (no empty k
 
 test("closed schema: unknown fx key, missing video_filter and bad names are rejected", () => {
   withWorkspace((ws) => {
-    writeExtension(ws, { ...BASE, name: "bad1", fx: { a: { video_filter: "null", shader: "x" } } });
-    assert.throws(() => resolveExtension("bad1", ws), /unknown field 'shader'/);
+    writeExtension(ws, { ...BASE, name: "bad1", fx: { a: { video_filter: "null", shadir: "x" } } });
+    assert.throws(() => resolveExtension("bad1", ws), /unknown field 'shadir'/);
     writeExtension(ws, { ...BASE, name: "bad2", fx: { a: { description: "no filter" } } });
     assert.throws(() => resolveExtension("bad2", ws), /video_filter/);
     writeExtension(ws, { ...BASE, name: "bad3", transitions: { Bad: {} } });
     assert.throws(() => resolveExtension("bad3", ws), /invalid name/);
+  });
+});
+
+test("ffmpeg entries reject a shader file; it needs backend shader", () => {
+  withWorkspace((ws) => {
+    writeExtension(ws, { ...BASE, name: "bad4", fx: { a: { video_filter: "null", shader: "x.glsl" } } });
+    assert.throws(() => resolveExtension("bad4", ws), /needs '"backend": "shader"'/);
   });
 });
 

@@ -121,7 +121,7 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 | `hf_scaffold.ts` | Scaffolding and the composition contract validator. |
 | `hf_cache_state.ts` | Overlay cache key and per-composition cache state. |
 | `hf_blobs.ts` | Overlay blobs on disk (PNG sequence / video), cached lookup, staging. |
-| `hf_render.ts` | Renders one composition to an overlay blob. |
+| `hf_render.ts` | Renders one composition to an overlay blob; single-frame compiles reuse the cached blob via a cache-only lookup. |
 | `hf_overlay_tracking.ts` | Render summary (`overlays`), concurrent pre-pass collector/runner. |
 | `hf_frames.ts` | Single/batch composition frames, alpha bounding box. |
 | `bridge_exporter.ts` | Facade + composition bridge sync (`syncCompositionBridgeFiles`, `syncAllCompositionBridges`). |
@@ -147,6 +147,7 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 | `render_segments.ts` | Time segments for long timelines; segmented audio. |
 | `render_scan.ts`, `render_audio_health.ts` | Blank/backdrop and edge-strip scans; audio health against the source. |
 | `render_preview.ts`, `render_frames.ts` | Cached preview composite; frames at given times for the monitor. |
+| `pre_pass.ts`, `shader_worker.ts` (+ `shader_page.ts`) | Fx pre-pass jobs (ffmpeg prefix replay; shader cuts run prefix→browser GLSL→encode in a child owning the browser). |
 | `encoder.ts` | Facade + hardware encoder probing/verification and selection. |
 | `encoder_args.ts` | Encoder types, BT.709 output args, codec arguments. |
 | `monitor/preview.ts`, `monitor/timeline_view.ts` | `monitor frame/sheet` images; timeline image. |
@@ -157,12 +158,16 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 |---|---|
 | `effect_registry.ts` | Effect definitions an agent can use (built-in transitions, raw ffmpeg fx, enabled extensions' fx and transitions) for `spine fx catalog`. |
 | `effect_types.ts` | Effect system contract (types only): definition shape shared by built-in and extension effects, backends (`ffmpeg`, `shader`, `spine`), placement layer combination, preset provenance. |
+| `effects/fx_check.ts` | Pre-render fx probe: runs one item's compiled stage (or one definition) on a lavfi card with a sentinel filter, plus the frozen-envelope triple-render (`spine fx check`, write-time and `verify` wiring); definition cache keys include the template text, and G322 carries `:`-vs-`,` / nested-quote rule hints. |
+| `effects/fx_sandbox.ts`, `effects/fx_try.ts`, `effects/fx_check_full.ts` | Throw-away one-clip sandbox project through the product path; `spine fx try` PNG grid and `spine fx check --full` delivery check (variants, neutral, stacked, Bezier envelopes, cost class). |
+| `effects/preset_apply.ts`, `extensions/presets.ts`, `extensions/fx_new.ts`, `verify/gates_preset.ts` | Motion presets: anchored keyframe templates (`spine fx preset`, one revision, provenance record), drift gate with `--reapply`, `extension fx-new` skeletons. |
 
 ### verify/, brief/, library/, extensions/
 | File | Responsibility |
 |---|---|
 | `verify/gates.ts` | Facade: `verifySequence`, `measureCuePixelBox`, verified commits. |
 | `verify/gates_structural.ts`, `verify/gates_stage_signal.ts` | Gates 1–3 (`G1_SCHEMA`, `G2_ASSETS`, `G3_TIMING`) and Gates 4–5 (`G4_STAGE`, `G5_SIGNAL`). |
+| `verify/gates_transitions.ts` | Encoder-free backstop: one short windowed render per `ext:` transition (G331/G332). |
 | `brief/inspector.ts` | `brief` lenses. |
 | `library/*` | probe/ingest, ledger, loudness, waveform, beats, scenes, subject tracking, paginated query. |
 | `extensions/manager.ts` | Facade. |
@@ -198,4 +203,5 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 | `live_window.ts` | Opens the window (app-mode Chromium, else default browser). |
 | `live_waveform.ts` (+ worker) | `GET /api/waveform/<handle>`: per-asset cached waveform peaks for the timeline, analyzed in a worker thread. |
 | `live_config.ts` | Open mode `ask|on|off` (env > project > user). |
+| `live_prewarm.ts` | Idle overlay pre-production: one background child runs the render's overlay stage around the playhead. |
 | `ui/` | The window: `app.js` shell + store, one `<region>.js/.css` per panel, `live_client.js` connection. |

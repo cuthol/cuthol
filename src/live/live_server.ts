@@ -22,7 +22,10 @@ import { routeLiveFrameRequest } from "./live_frame.js";
 import { routeLiveWaveformRequest } from "./live_waveform.js";
 import { handleLiveNotesPost, routeLiveCoordsRequest } from "./live_notes_api.js";
 import { routeLiveColorRequest } from "./live_color_api.js";
+import { routeLiveShaderRequest } from "./live_shader_api.js";
 import { getSettingsView, routeLiveSettingsRequest } from "./live_settings_api.js";
+import { LivePrewarmer, prewarmIdleMs, sweepOrphanedPrewarmTemp } from "./live_prewarm.js";
+import { computeSequenceDurationMs } from "../core/timeline.js";
 import { LIVE_SCHEMA, type LiveActivityEntry, type LiveLock, type LiveNotePacket, type LiveServerInfo } from "./live_types.js";
 
 export { buildActivity, buildScenes, buildSnapshot } from "./live_state.js";
@@ -297,6 +300,33 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
     res.writeHead(200, headers).end(svg);
   };
 
+  // --- idle overlay pre-production (B2) --------------------------------
+  // One background child at most; it stops on any edit, CLI render progress
+  // or window activity and restarts from the new state after the next idle gap.
+  const prewarmer = new LivePrewarmer(root, log);
+  // Recover tmp/stage a previous prewarm child left behind when its kill
+  // landed mid-capture (pids in file names; living owners are untouched).
+  try {
+    sweepOrphanedPrewarmTemp(root, log);
+  } catch {
+    // never breaks startup
+  }
+  let playheadMs = 0;
+  let windowActiveAt = Date.now();
+  let lastPrewarmChangeAt = Date.now();
+  let lastPrewarmProgressAt = Date.now();
+  const noteWindowActivity = (): void => {
+    windowActiveAt = Date.now();
+    prewarmer.stop();
+  };
+  const prewarmDurationMs = (): number => {
+    try {
+      return lastSeq ? computeSequenceDurationMs(lastSeq as never) : 0;
+    } catch {
+      return 0;
+    }
+  };
+
   // --- revision tracking -------------------------------------------------
   // lastCursor/lastSeq describe the state the window already has.
   // knownEntrySigs remembers every journal entry's identity (operation +
@@ -336,6 +366,9 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
       refreshKnown();
       return;
     }
+    // An edit (agent or human): stop pre-production; it restarts from the new state.
+    prewarmer.stop();
+    lastPrewarmChangeAt = Date.now();
     const from = lastCursor;
     const oldSeq = lastSeq;
     lastCursor = cursor;
@@ -387,6 +420,9 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
       if (progressJson !== lastProgressJson) {
         lastProgressJson = progressJson;
         broadcast("progress", JSON.parse(progressJson) as unknown);
+        // A CLI render started (or its progress moved): stop pre-production.
+        prewarmer.stop();
+        lastPrewarmProgressAt = Date.now();
       }
     } catch {
       // ignore
@@ -636,6 +672,7 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
         return;
       }
       if (url.pathname === "/api/lock" && req.method === "POST") {
+        noteWindowActivity();
         let body: { holder?: unknown };
         try {
           body = JSON.parse(await readBody(req, 64 * 1024)) as { holder?: unknown };
@@ -751,12 +788,14 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
         }
       }
       if (url.pathname === "/api/edit" && req.method === "POST") {
+        noteWindowActivity();
         await routeLiveEditRequest(root, req, res);
         return;
       }
       if (url.pathname.startsWith("/api/color/") && (req.method === "GET" || req.method === "POST")) {
         if (await routeLiveColorRequest(root, req, res, url)) return;
       }
+      if (routeLiveShaderRequest(root, req, res, url)) return;
       if (url.pathname.startsWith("/api/thumb/") && req.method === "GET") {
         await serveThumb(res, decodeURIComponent(url.pathname.slice("/api/thumb/".length)), url.searchParams.get("k"));
         return;
@@ -766,7 +805,28 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
         return;
       }
       if (url.pathname === "/api/frame" && req.method === "GET") {
-        routeLiveFrameRequest(root, req, res, Number(url.searchParams.get("at")));
+        const at = Number(url.searchParams.get("at"));
+        if (Number.isFinite(at) && at >= 0) playheadMs = at;
+        noteWindowActivity();
+        routeLiveFrameRequest(root, req, res, at);
+        return;
+      }
+      if (url.pathname === "/api/playhead" && req.method === "POST") {
+        let body: { ms?: unknown };
+        try {
+          body = JSON.parse(await readBody(req, 64 * 1024)) as { ms?: unknown };
+        } catch {
+          res.writeHead(400).end("bad json");
+          return;
+        }
+        const ms = typeof body.ms === "number" ? body.ms : Number(body.ms);
+        if (!Number.isFinite(ms) || ms < 0) {
+          res.writeHead(400).end("ms must be >= 0");
+          return;
+        }
+        playheadMs = ms;
+        noteWindowActivity();
+        res.writeHead(200, { "Content-Type": MIME[".json"] }).end(JSON.stringify({ ok: true, ms: playheadMs }));
         return;
       }
       if (url.pathname.startsWith("/api/waveform/") && req.method === "GET") {
@@ -774,6 +834,7 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
         return;
       }
       if (url.pathname.startsWith("/comp/") && req.method === "GET") {
+        noteWindowActivity();
         const rest = url.pathname.slice("/comp/".length);
         const slash = rest.indexOf("/");
         const cueId = decodeURIComponent(slash < 0 ? rest : rest.slice(0, slash));
@@ -840,6 +901,11 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
   const shutdown = (): void => {
     if (shuttingDown) return;
     shuttingDown = true;
+    try {
+      prewarmer.stop();
+    } catch {
+      // already gone
+    }
     unregisterLiveServer(process.pid, root);
     log("live server stopping");
     try {
@@ -935,6 +1001,24 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
   // Fallback path: 1 s poll of the same cheap check (one small manifest read).
   const pollTimer = setInterval(checkAll, FALLBACK_POLL_MS);
   pollTimer.unref?.();
+
+  // Pre-production path: every second, start one child when idle long enough.
+  const prewarmTimer = setInterval(() => {
+    try {
+      prewarmer.maybeStart(Date.now(), {
+        revision: lastCursor,
+        progressJson: lastProgressJson,
+        playheadMs,
+        durationMs: prewarmDurationMs(),
+        windowActiveAt,
+        lastChangeAt: lastPrewarmChangeAt,
+        lastProgressAt: lastPrewarmProgressAt,
+      });
+    } catch (e) {
+      log(`prewarm check failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, 1000);
+  prewarmTimer.unref?.();
 
   // Idle path: no window connected for a while -> stop (the window reopens via `live open`).
   const idleTimer = setInterval(() => {

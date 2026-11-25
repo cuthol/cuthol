@@ -92,7 +92,7 @@ export function loadExtensionFromDir(
     );
   }
 
-  const manifest = validateExtensionManifest(parsedRaw, folderName, manifestPath);
+  const manifest = validateExtensionManifest(parsedRaw, folderName, manifestPath, absDir);
   const helperRelPath =
     typeof manifest.helper === "string"
       ? manifest.helper
@@ -326,6 +326,7 @@ export function listExtensions(workspaceDir?: string | null): {
           planners: Object.keys(ext.manifest.planners ?? {}),
           recipes: Object.keys(ext.manifest.recipes ?? {}),
           ...(ext.manifest.fx ? { fx: Object.keys(ext.manifest.fx) } : {}),
+          ...(ext.manifest.presets ? { presets: Object.keys(ext.manifest.presets) } : {}),
           ...(ext.manifest.transitions ? { transitions: Object.keys(ext.manifest.transitions) } : {}),
           ...(ext.manifest.providers && Object.keys(ext.manifest.providers).length > 0
             ? { providers: Object.keys(ext.manifest.providers) }

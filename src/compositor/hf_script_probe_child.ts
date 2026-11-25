@@ -27,10 +27,10 @@ async function main(): Promise<void> {
     return;
   }
   if (!Array.isArray(jobs) || jobs.length === 0) return;
-  let browser = null;
+  let browser: Awaited<ReturnType<typeof launchScriptProbeBrowser>> | null = null;
   try {
     browser = await launchScriptProbeBrowser();
-    for (const job of jobs) {
+    const runOne = async (job: ScriptProbeJob): Promise<void> => {
       try {
         const probe = await probeCompositionScriptErrors({
           compDir: job.absCompDir,
@@ -39,7 +39,7 @@ async function main(): Promise<void> {
           height: job.height,
           fps: job.fps,
           durationSec: job.durationSec,
-          browser,
+          browser: browser ?? undefined,
         });
         writeCurrentScriptErrorRecord(projectDir, {
           absCompDir: job.absCompDir,
@@ -53,6 +53,10 @@ async function main(): Promise<void> {
       } catch {
         // per-cue failure stays unknown
       }
+    };
+    for (let i = 0; i < jobs.length; i += 4) {
+      const batch = jobs.slice(i, i + 4);
+      await Promise.all(batch.map((job) => runOne(job)));
     }
   } catch {
     // browser launch failure: all stay unknown

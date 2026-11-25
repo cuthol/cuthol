@@ -14,6 +14,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { initWorkspace, loadSequence } from "../core/workspace.js";
@@ -31,6 +32,8 @@ import { captureMonitorFrame } from "../monitor/preview.js";
 import { renderSequenceToMp4 } from "../render/renderer.js";
 import { fakeLocalSpeechInstall, fixturePath, missingKeys } from "./fixtures.js";
 const SPEECH_CACHE_DIR = fixturePath("speech-cache");
+
+import { copySpeechCacheToTemp } from "./speech_cache_copy.js";
 
 const TEST_ROOT = path.resolve(process.cwd(), "test-workspace");
 
@@ -261,10 +264,12 @@ test("Real neural Turkish speech recording with real pause & filler excision + m
   // persistent content-addressed cache; later runs replay the same audio without network calls,
   // so the pause and filler checks see identical input every time.
   const prevCacheDir = process.env.CUTHOL_CACHE_DIR;
-  process.env.CUTHOL_CACHE_DIR = SPEECH_CACHE_DIR;
+  const isolatedCacheDir = copySpeechCacheToTemp(SPEECH_CACHE_DIR);
+  process.env.CUTHOL_CACHE_DIR = isolatedCacheDir;
   t.after(() => {
     if (prevCacheDir === undefined) delete process.env.CUTHOL_CACHE_DIR;
     else process.env.CUTHOL_CACHE_DIR = prevCacheDir;
+    fs.rmSync(isolatedCacheDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   });
   const wsDir = path.join(TEST_ROOT, "real_speech_media");
   fs.rmSync(wsDir, { recursive: true, force: true });

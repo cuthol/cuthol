@@ -700,7 +700,17 @@ export function mount(root, ctx) {
   ruler.addEventListener("pointermove", (ev) => {
     if (scrubbing) ctx.store.set({ playheadMs: Math.round(msAtEvent(ev)), agentFollow: false });
   });
-  ruler.addEventListener("pointerup", () => { scrubbing = false; });
+  ruler.addEventListener("pointerup", () => {
+    scrubbing = false;
+    // A settled scrub moves the playhead: tell the server for idle pre-production.
+    try {
+      const ms = Math.round(ctx.store.state.playheadMs ?? 0);
+      const p = ctx.api.post("/api/playhead", { ms });
+      if (p && typeof p.catch === "function") p.catch(() => {});
+    } catch {
+      // playhead hint is best-effort
+    }
+  });
 
   // The agent line/tag locks the timeline onto the agent: later agent edits
   // scroll it into view. Clicking anywhere else on the timeline releases it.

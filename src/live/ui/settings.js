@@ -29,6 +29,8 @@ const SECTION_OF = {
   "cache.dir": "storage",
   "live.mode": "live",
   "live.browser": "live",
+  "live.prewarm": "live",
+  "live.prewarm_cap_gb": "live",
   "live.shortcuts": "shortcuts",
 };
 

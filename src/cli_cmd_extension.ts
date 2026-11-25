@@ -16,6 +16,7 @@ import {
   showExtension,
 } from "./extensions/manager.js";
 import { boolFlag, parsePropsJsonFlag, strFlag } from "./cli_args.js";
+import { addFxSkeleton } from "./extensions/fx_new.js";
 import {
   CLI_NOT_HANDLED,
   CliCommandContext,
@@ -214,6 +215,35 @@ export function runExtensionCommand(ctx: CliCommandContext): CliCommandResult {
       dryRun,
     });
     emitEnvelopeJson(workspaceDir, "extension.run", { ...res });
+    return;
+  }
+  if (extAction === "fx-new" || extAction === "fx_new") {
+    // `--ext` names the extension, `--name`/`--fx` the new fx (`--name` alone
+    // keeps the other actions' meaning: the extension name).
+    const extPositional = rest[0];
+    const fxPositional = rest[1];
+    const extGiven = strFlag(flags, "ext") ?? extPositional;
+    const fxFlag = strFlag(flags, "fx") ?? fxPositional;
+    const nameFlag = strFlag(flags, "name");
+    const extName = extGiven ?? nameFlag;
+    const fxName = fxFlag ?? (extGiven !== undefined ? nameFlag : undefined);
+    const role = strFlag(flags, "role");
+    if (!extName) {
+      throw new CutholError(
+        DIAGNOSTICS.INVALID_EXTENSION_MANIFEST("extension", "Extension name ('--ext') is required.")
+      );
+    }
+    if (!fxName) {
+      throw new CutholError(
+        DIAGNOSTICS.INVALID_EXTENSION_MANIFEST(extName, "Fx name ('--name') is required.")
+      );
+    }
+    if (!role) {
+      throw new CutholError(DIAGNOSTICS.FX_NEW_UNKNOWN_ROLE("(missing --role)"));
+    }
+    const res = addFxSkeleton({ workspaceDir, extName, fxName, role });
+    const wrote = DIAGNOSTICS.FX_NEW_WROTE_SKELETON(extName, fxName);
+    emitEnvelopeJson(workspaceDir, "extension.fx-new", { ...res, role, note: wrote.what });
     return;
   }
   return CLI_NOT_HANDLED;

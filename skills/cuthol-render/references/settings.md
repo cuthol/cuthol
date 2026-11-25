@@ -19,6 +19,7 @@ unset, the stored settings layer applies. Precedence per key:
 | `render.overlay_concurrency` | `1`–`16` or `auto`                | `CUTHOL_OVERLAY_CONCURRENCY` | yes |
 | `render.output_dir`        | relative or absolute path (`output`) | — (project scope)         | yes |
 | `render.stall_timeout_sec` | seconds (`0` disables)              | `CUTHOL_STALL_TIMEOUT_SEC` | yes |
+| `render.shader_cache_cap_gb` | GB of shader intermediates (`2`, up to `100`) | `CUTHOL_SHADER_CACHE_CAP_GB` | yes |
 | `cache.dir`                | absolute path                       | `CUTHOL_CACHE_DIR`         | yes |
 | `live.mode`                | `ask\|on\|off`                      | `CUTHOL_LIVE`              | n/a (Live setting) |
 | `live.shortcuts`           | action → key map                    | — (window only)            | no |

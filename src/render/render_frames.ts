@@ -13,10 +13,16 @@ import {
 } from "../core/timeline.js";
 import {
   CompiledRenderPlan, compileSequenceRenderPlan,
+  type PrePassJob,
   RenderPreset
 } from "../compositor/compiler.js";
 import {
-  createSubprocessFailureDiagnostic, CutholError, estimateCommandLineLength,
+  acquireSingleFrameReadLock,
+  pruneSingleFrameShaderIntermediates,
+  requirePlanPrePasses,
+} from "./pre_pass.js";
+import {
+  createSubprocessFailureDiagnostic, CutholError, DIAGNOSTICS, estimateCommandLineLength,
   type VerificationGateId
 } from "../core/diagnostics.js";
 import { CutholSequence } from "../core/schema.js";
@@ -46,6 +52,14 @@ interface SingleFrameFfmpegPlan {
   bboxTargets: Array<{ bboxPath: string; pngPath: string }>;
   /** Full filter graph when it is passed from a file; null when inline. */
   filterScript: string | null;
+  /**
+   * Shader pre-pass context for the retry path: when the single-frame
+   * extract fails because its intermediate vanished, the pre-pass runs once
+   * more and the extract is attempted again instead of seeking the preview
+   * composite. Null for plans without shader intermediates (those keep the
+   * existing preview-seek fallback).
+   */
+  shaderRetry: { plan: CompiledRenderPlan; cwd: string } | null;
 }
 
 export function runParallelFfmpegJobsSync(
@@ -238,6 +252,7 @@ function buildSingleFrameFfmpegPlanFromCompiledPlan(
     clampedMs,
     bboxTargets,
     filterScript,
+    shaderRetry: null,
   };
 }
 
@@ -297,6 +312,12 @@ export function renderMultipleCompositeFramesRgb24(
   const maxSafeMs = Math.max(0, Math.floor(lastFrameIdx * (1000 / fps)));
   const frameDurMs = 1000 / fps;
 
+  // Single-frame shader intermediates of this batch (for the end-of-batch
+  // prune): read locks are held on each from its pre-pass until every
+  // extract finishes, so neither this batch's own prune nor a concurrent
+  // process deletes a file this batch still reads.
+  const batchShaderJobs: PrePassJob[] = [];
+  const releaseReadLocks: Array<() => void> = [];
   const plans: SingleFrameFfmpegPlan[] = timestampsMs.map((atMs) => {
     // Snap from the raw request, not the rounded clamp: rounding first can
     // push a timestamp inside frame N onto frame N+1 across a cue boundary.
@@ -310,6 +331,28 @@ export function renderMultipleCompositeFramesRgb24(
       includeAudio: false,
       singleFrameEarlyTrim: options?.singleFrameEarlyTrim,
     });
+    // Read locks go on before the pre-pass, not after it: the window
+    // between a producer finishing (rename, producer lock released) and this
+    // process taking its read lock is exactly where a concurrent prune used
+    // to delete the fresh file. The lock file is per-pid and independent of
+    // the intermediate's existence, so a concurrent prune always sees a
+    // live reader from here until every extract finishes.
+    const cellShaderJobs = (compiledPlan.prePasses ?? []).filter(
+      (job) => job.kind === "shader" && /^sh_fxshad1_.+\.nut$/.test(path.basename(job.outPath))
+    );
+    for (const job of cellShaderJobs) {
+      releaseReadLocks.push(acquireSingleFrameReadLock(job.outPath));
+      batchShaderJobs.push(job);
+    }
+    // Deferred prune: every cell shades its own intermediate before any
+    // extract runs, so no cell ever reads a sibling's pruned file (the
+    // fallback full-preview render it used to trigger picked neighbouring
+    // frames on VFR sources).
+    requirePlanPrePasses(
+      compiledPlan,
+      { cwd: paths.rootDir, step: "ffmpeg pre-pass", deferSingleFramePrune: true },
+      "monitor frame"
+    );
 
     const bboxTargets: Array<{ bboxPath: string; pngPath: string }> = [];
     if (
@@ -329,7 +372,7 @@ export function renderMultipleCompositeFramesRgb24(
     // The label time must be the drawn frame-grid instant, not the rounded
     // request: `annotateRgb24BufferToCanvas` derives `active_handles` from it,
     // so a rounded label could name the cue on the other side of a boundary.
-    return buildSingleFrameFfmpegPlanFromCompiledPlan(
+    const singlePlan = buildSingleFrameFfmpegPlanFromCompiledPlan(
       compiledPlan,
       paths,
       fps,
@@ -337,6 +380,9 @@ export function renderMultipleCompositeFramesRgb24(
       exactFrameMs,
       bboxTargets
     );
+    singlePlan.shaderRetry =
+      cellShaderJobs.length > 0 ? { plan: compiledPlan, cwd: paths.rootDir } : null;
+    return singlePlan;
   });
 
   const bboxJsonByPng = new Map<string, string | null>();
@@ -414,18 +460,19 @@ export function renderMultipleCompositeFramesRgb24(
     ...plans.map((p) => p.pixelCount * 4 + 2 * 1024 * 1024),
     ...uncachedBboxPngs.map(() => 320 * 180 * 4 + 65536),
   ];
-  let allResults: ParallelFfmpegJobResult[];
-  try {
-    allResults = runParallelFfmpegJobsSync(allJobs, allMaxBuffers);
-  } finally {
-    for (const scriptPath of filterScriptPaths) {
+  // Test hook (env only, no API change): drop every batch intermediate after
+  // the pre-pass and before the extracts, forcing the shader retry path.
+  // The old build ignores this variable and falls back to the preview seek.
+  if (process.env.CUTHOL_TEST_DROP_SHADER_INTERMEDIATE) {
+    for (const j of batchShaderJobs) {
       try {
-        if (fs.existsSync(scriptPath)) fs.unlinkSync(scriptPath);
+        fs.unlinkSync(j.outPath);
       } catch {
-        // ignore cleanup error
+        // already gone
       }
     }
   }
+  const allResults: ParallelFfmpegJobResult[] = runParallelFfmpegJobsSync(allJobs, allMaxBuffers);
   const jobResults = allResults.slice(0, plans.length);
   const bboxResults = allResults.slice(plans.length);
 
@@ -443,13 +490,62 @@ export function renderMultipleCompositeFramesRgb24(
   }
 
   let fallbackMp4Path: string | null = null;
-  return plans.map((p, idx) => {
+  let mapped: Array<{
+    rgbBuf: Buffer;
+    width: number;
+    height: number;
+    durationMs: number;
+    clampedMs: number;
+    bboxUpdates: CellBboxSidecarUpdate[];
+  }>;
+  try {
+    mapped = plans.map((p, idx) => {
     const bboxUpdates: CellBboxSidecarUpdate[] = p.bboxTargets.map((bt) => ({
       bboxPath: bt.bboxPath,
       bboxJson: bboxJsonByPng.get(bt.pngPath) ?? null,
     }));
 
-    const res = jobResults[idx];
+    let res = jobResults[idx];
+    if (
+      p.shaderRetry &&
+      (!res || res.status !== 0 || res.error || !res.stdout || res.stdout.length < p.pixelCount * 3)
+    ) {
+      // The shader intermediate vanished between the pre-pass and the
+      // extract (a concurrent prune won the race): re-run the pre-pass for
+      // the missing intermediate once and extract again. A neighbouring
+      // frame from the h264 preview composite is never substituted here —
+      // on VFR sources that seek lands on the wrong frame.
+      requirePlanPrePasses(p.shaderRetry.plan, { cwd: p.shaderRetry.cwd, step: "ffmpeg pre-pass" }, "monitor frame");
+      const retryProc = spawnWatchedSync("ffmpeg", p.ffArgs, {
+        cwd: p.cwd,
+        maxBuffer: p.pixelCount * 4 + 2 * 1024 * 1024,
+        step: "ffmpeg single frame extract",
+      });
+      res = {
+        status: retryProc.status,
+        stdout: (retryProc.stdout as Buffer) ?? Buffer.alloc(0),
+        stderr: retryProc.stderr ? String(retryProc.stderr) : "",
+        error: retryProc.error,
+        stalled: retryProc.stalled,
+        stalledMs: retryProc.stalledMs,
+        stallThresholdMs: retryProc.stallThresholdMs,
+        lastProgress: retryProc.lastProgress,
+        commandSummary: retryProc.commandSummary,
+      };
+      if (
+        res.status !== 0 ||
+        res.error ||
+        !res.stdout ||
+        res.stdout.length < p.pixelCount * 3
+      ) {
+        throw new CutholError(
+          DIAGNOSTICS.SHADER_SINGLE_FRAME_LOST(
+            p.clampedMs,
+            (typeof res.stderr === "string" && res.stderr.slice(-240)) || `exit ${res.status}`
+          )
+        );
+      }
+    }
     if (res && res.status === 0 && !res.error && res.stdout && res.stdout.length >= p.pixelCount * 3) {
       return {
         rgbBuf: res.stdout.subarray(0, p.pixelCount * 3),
@@ -528,7 +624,31 @@ export function renderMultipleCompositeFramesRgb24(
       clampedMs: p.clampedMs,
       bboxUpdates,
     };
-  });
+    });
+  } finally {
+    for (const scriptPath of filterScriptPaths) {
+      try {
+        if (fs.existsSync(scriptPath)) fs.unlinkSync(scriptPath);
+      } catch {
+        // ignore cleanup error
+      }
+    }
+    for (const release of releaseReadLocks) {
+      try {
+        release();
+      } catch {
+        // ignore lock release error
+      }
+    }
+    // Prune once the whole batch is read: sibling files this batch needed
+    // survive the run, and concurrent batches hold their own read locks.
+    try {
+      pruneSingleFrameShaderIntermediates(batchShaderJobs);
+    } catch {
+      // prune is best-effort
+    }
+  }
+  return mapped;
 }
 
 /**

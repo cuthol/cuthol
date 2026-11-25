@@ -33,6 +33,7 @@ import {
 } from "./bridge_exporter.js";
 import { applyScalarVarsToStagedHtml } from "./hf_frames.js";
 import { compileSequenceRenderPlan } from "./compiler.js";
+import { requirePlanPrePasses } from "../render/pre_pass.js";
 import {
   detectSceneHostFeaturesInComposition,
   recordCompositionAlphaBboxSidecar,
@@ -336,6 +337,7 @@ export function previewAndCheckComposition(options: {
       activeWindowMs: [cueStartMs, cueEndMs],
       includeAudio: false,
     });
+    requirePlanPrePasses(underneathPlan, { cwd: paths.rootDir, step: "ffmpeg pre-pass" }, "composition preview");
     const sliceFilter = `${underneathPlan.filterComplex};${underneathPlan.videoOutPad}fps=${fps},scale=${stageW}:${stageH}:in_color_matrix=bt709:out_color_matrix=bt709:out_range=tv,format=yuv420p,setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv[v_bg_preview]`;
 
     const candidateBg = path.join(workRoot, "preview_backdrop.mp4");
