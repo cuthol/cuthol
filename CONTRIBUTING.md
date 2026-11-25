@@ -6,7 +6,7 @@ Thanks for helping. Cuthol is an editor for AI agents, so a good change makes an
 
 - Open an issue first for anything larger than a small fix, so we can agree on the shape before you write it.
 - Read [`src/ARCHITECTURE.md`](src/ARCHITECTURE.md) (where things live) and [`AGENTS.md`](AGENTS.md) (rules coding agents follow here; they apply to people too).
-- Requirements: Node.js ≥ 22.5, `ffmpeg`/`ffprobe` 8.x, a Chrome/Chromium for motion graphics. `npx cuthol doctor` checks them.
+- Requirements: Node.js ≥ 22.12, `ffmpeg`/`ffprobe` 8.x, a Chrome/Chromium for motion graphics. `npx cuthol doctor` checks them; `npx cuthol setup --ffmpeg --apply` installs a pinned ffmpeg 8.1 on Windows and Linux (without `--apply` it only prints the plan).
 
 ## Build and test
 

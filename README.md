@@ -14,17 +14,18 @@
 
 <p align="center">
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-0D1117?style=flat-square"></a>
-  <img alt="Version 0.3.9" src="https://img.shields.io/badge/version-0.3.9-FF5A1F?style=flat-square">
+  <img alt="Version 0.4.0" src="https://img.shields.io/badge/version-0.4.0-FF5A1F?style=flat-square">
   <img alt="MCP: 15 tools" src="https://img.shields.io/badge/MCP-15%20tools-FF5A1F?style=flat-square">
-  <img alt="Node.js 22.5+" src="https://img.shields.io/badge/node-%E2%89%A522.5-0D1117?style=flat-square">
+  <img alt="Node.js 22.12+" src="https://img.shields.io/badge/node-%E2%89%A522.12-0D1117?style=flat-square">
   <img alt="FFmpeg 8" src="https://img.shields.io/badge/ffmpeg-8.x-0D1117?style=flat-square">
 </p>
 
-<p align="center">
-  <img src="assets/demo/cuthol-demo.gif" alt="Cut, caption, mix, render — Cuthol" width="640">
-</p>
+https://github.com/user-attachments/assets/33df6847-b6dd-41b6-918d-3e2581282eba
+
+<p align="center"><sub>From <code>npm install</code> to a finished edit: setup, one request to the agent, Cuthol Live, a note on the picture.</sub></p>
 
 <p align="center">
+  <a href="https://cuthol.com">Website</a> ·
   <a href="#install">Install</a> ·
   <a href="#what-you-can-ask">What you can ask</a> ·
   <a href="#cuthol-live">Cuthol Live</a> ·
@@ -44,21 +45,24 @@
 - **The edit is text an agent can read.** One project file with a spine, lanes, words, beats and diagnostics; every change is a typed command that is checked and can be undone.
 - **Nothing to sign up for.** Everything runs on your machine; speech services are optional and replaceable.
 
-> **New in 0.3.9** — **colour grading for agents**: Cuthol measures colour as a short text map, the agent writes editable blocks, and every change comes back with a predicted result before anything renders · a **Color** panel with scopes in Cuthol Live · **UHD** and **transparent (ProRes 4444)** masters · **timeline export** to Premiere, Resolve, Final Cut Pro and OpenTimelineIO · **keyless speech** on your machine. [Changelog](CHANGELOG.md)
+> **New in 0.4.0** — **effects on clips and cues** with keyframes, masks, motion blur, motion layers and GLSL shaders, each checked before it can fail a render · **`cuthol explain`** for every diagnostic · **much faster commands** (text-only commands in ~0.2 s, edits on a 30-composition project 20 → 3.3 s) · a **choice of local speech engine** (Parakeet or Whisper) · cleaner filler cuts · free stage sizes and sequence tempo. [Changelog](CHANGELOG.md)
 
 ## Install
 
 ```bash
 npm install -g cuthol
-cuthol setup            # shows which agent tools it found and what it would register
-cuthol setup --apply    # registers the Cuthol MCP server with them
-cuthol doctor           # checks ffmpeg 8, a Chromium browser, HyperFrames and speech
+cuthol setup                               # shows which agent tools it found and what it would register
+cuthol setup --agent claude-code --apply   # registers the MCP server and installs the skills for that tool
+cuthol doctor                              # checks ffmpeg 8, a Chromium browser, HyperFrames and speech
 ```
 
-Optional, for transcription and voiceover without any API key (downloads about 550 MB once):
+Agent ids: `claude-code`, `codex`, `cursor`, `gemini-cli`, `copilot`, `opencode`, `agents` (repeat `--agent` or separate them with commas). `cuthol setup --apply` without `--agent` registers the MCP server only. No ffmpeg 8 on your machine? `cuthol setup --ffmpeg --apply` installs a pinned, checksum-verified ffmpeg 8.1 for Cuthol (Windows and Linux; on macOS `brew install ffmpeg`).
+
+Optional, for transcription and voiceover without any API key (downloads the chosen engine once):
 
 ```bash
-cuthol setup --local-speech --apply
+cuthol setup --local-speech --engine parakeet --apply   # fast, 25 European languages
+cuthol setup --local-speech --engine whisper --apply    # every language, including Turkish
 ```
 
 `cuthol setup` registers the MCP server with Claude Code (through the `claude` CLI), Codex, Cursor and Gemini CLI. It backs up every config file before writing, keeps everything else in it, and never replaces a different `cuthol` entry unless you pass `--force`. Start a new agent session afterwards; most clients read MCP servers only at session start.
@@ -86,13 +90,13 @@ No global install? `npx -y cuthol setup --apply` registers `npx -y cuthol mcp` i
 - **Any other MCP client:** register a stdio server with the same command. If your client cannot find `cuthol` on `PATH`, use the absolute path of `node` and of `dist/cli.js` inside the global install (`npm root -g` shows the folder).
 </details>
 
-### Agent skills (installed for you)
+### Agent skills
 
 Cuthol teaches your agent through skills: an entry skill, `cuthol`, that the agent reads at the start of a session, and category skills it loads only when the task needs them — `cuthol-editing`, `cuthol-speech`, `cuthol-audio`, `cuthol-color`, `cuthol-motion`, `cuthol-geometry`, `cuthol-review`, `cuthol-render` and `cuthol-extensions`.
 
-The first time you run any `cuthol` command, the skills are installed into every agent tool found on your machine (Claude Code, Codex, Cursor, Gemini CLI, GitHub Copilot, OpenCode and the shared `~/.agents` folder) and kept up to date afterwards; skills you edited yourself are left alone. Start a new agent session to load them. Manage them with `cuthol skills list | install | check | remove`, or set `CUTHOL_SKILLS_AUTO=0` to turn the automatic install off. Over MCP the same content is served by the `guide` tool.
+Skills are installed only where you ask: `cuthol setup --agent <id> --apply` or `cuthol skills install --agent <id>`. Skills you edited yourself are never overwritten, and commands print a hint when the skills are missing or out of date. Start a new agent session to load them. Manage them with `cuthol skills list | install | check | remove`. Over MCP the same content is served by the `guide` tool.
 
-**Requirements** (`cuthol doctor` checks them): Node.js ≥ 22.5, `ffmpeg` and `ffprobe` 8.x on `PATH` (`verify` and render warn with `CUTHOL-G212` on an older major), and a Chrome/Chromium that HyperFrames can launch for motion graphics. Cuthol pins **HyperFrames 0.9.15** and GSAP 3.14.2 (exact versions in `package.json`, installed with Cuthol; `cuthol doctor` checks them). Speech is optional and has three routes: keyless on your machine (`cuthol setup --local-speech --apply`: faster-whisper and Piper), cloud with `DEEPGRAM_API_KEY` (transcription) and `ELEVENLABS_API_KEY` (voiceover) in the environment or a project `.env`, or any other service through an [extension provider](examples/extensions).
+**Requirements** (`cuthol doctor` checks them): Node.js ≥ 22.12, `ffmpeg` and `ffprobe` 8.x on `PATH` (`verify` and render warn with `CUTHOL-G212` on an older major), and a Chrome/Chromium that HyperFrames can launch for motion graphics. Cuthol pins **HyperFrames 0.9.15** and GSAP 3.14.2 (exact versions in `package.json`, installed with Cuthol; `cuthol doctor` checks them). Speech is optional and has three routes: keyless on your machine (`cuthol setup --local-speech --engine parakeet|whisper --apply`; Piper for voiceover), cloud with `DEEPGRAM_API_KEY` (transcription) and `ELEVENLABS_API_KEY` (voiceover) in the environment or a project `.env`, or any other service through an [extension provider](examples/extensions).
 
 ## What you can ask
 
@@ -126,29 +130,16 @@ Nothing to install. By default the agent asks once at the start of a session whe
 
 ## Why Cuthol
 
-### Every video makes the next one cheaper.
+Most agent video tools generate video or draw it from code. Cuthol edits what you actually recorded, and gives the agent what a human editor has: a timeline, ears, eyes and a final check.
 
-Generating a whole video as code works for a short clip. On a real production every late change means regenerating, and every new video starts from zero. Cuthol keeps the edit on a timeline and lets the agent turn what it built once — a 3D set, a caption style, a transition, a prep workflow — into an [extension](skills/cuthol-extensions/SKILL.md) it reuses next time. We measured one 6:35 video on our channel from the agent's own session logs:
+### What sets it apart
 
-<p align="center">
-  <img src="assets/why/extensions-make-videos-cheaper.png" alt="Extensions make every next video cheaper: from about $29 to $6.38 per minute of video, $2.36 in agent spend alone — 4.6× to 12× cheaper per minute" width="720">
-</p>
-
-- **Extensions compound.** On the same 3D desk set, cost per minute of finished video fell from ~$29 for the first scene built from scratch to $6.38 with the extension, even counting every 3D model at full price, and to $2.36 for the agent's own spend: **4.6× to 12× cheaper per minute**.
-
-<p align="center">
-  <img src="assets/why/edit-dont-regenerate.png" alt="Edit the timeline, don't regenerate the video: a late change to a finished 6:35 edit was one line, a two-minute rebuild and $4.67" width="720">
-</p>
-
-- **Edit, don't regenerate.** Cutting one sentence from the finished edit was a one-line change, a ~2-minute rebuild and $4.67 of agent time. 525 sound cues and 49 camera moves re-timed themselves; voice sync held at 0.00 s drift at 56 of 56 checkpoints.
-
-<p align="center">
-  <img src="assets/why/agent-checks-its-work.png" alt="The agent checks its own work: 134 frames inspected, 12 issues fixed before a preview render, 2 errors stopped before a render started" width="720">
-</p>
-
-- **The agent checks its own work.** It looked at 134 frames, fixed 12 issues before a preview was ever rendered, and had 2 errors stopped by the verification gates before a render started. The master: verify 0 errors, 0.00 s sync drift, −14.0 LUFS.
-
-<sub>Costs are API-equivalent at Claude Opus 5.5 list prices, measured from Claude Code session logs. A 3D model's value is the first scene's whole cost divided by its 8 models — an upper bound that counts against us.</sub>
+- **Real recordings, cut for real.** Long talks, screen recordings and camera files stay real video on a magnetic timeline. Pauses, fillers and false starts are cut on quiet points, never inside a kept word, and `speech verify-cleanup` re-listens to the edit to report what went missing.
+- **The agent checks the edit before it renders.** Five verification gates (schema, assets, timing, stage, signal), frame previews that come from the render pipeline itself, per-frame layout measurement of every graphic, and an audio health check after the render. Problems come back as short coded diagnostics with the next command (`cuthol explain <code>`).
+- **Local and keyless if you want.** Transcription and voiceover can run on your machine (Parakeet or Whisper, Piper); cloud speech is optional and replaceable. Nothing to sign up for, nothing leaves your machine unless you choose a cloud provider.
+- **Works with HyperFrames, not instead of it.** HyperFrames compositions mount on lanes and receive the edit's words, beats and cuts; Cuthol does the footage, speech, mix, colour and final composite around them.
+- **A person stays in the loop.** In Cuthol Live you watch the edit, leave notes on the picture and pause the agent; the finished timeline exports to Premiere, Resolve, Final Cut Pro and OpenTimelineIO.
+- **Open and in your agent's tools.** MIT licensed; a CLI, an MCP server with 15 tools, and skills for Claude Code, Codex, Cursor, Gemini CLI and others.
 
 ### Built for how an agent works
 
@@ -159,6 +150,27 @@ Editing software is built around a person with a mouse and a timeline they can s
 - **Images only where they help.** Frame previews and contact sheets come from the same pipeline as the final render: what the agent sees is what ships.
 - **Nothing is lost.** An atomic journal with undo previews; verification gates before every render; results reported as short diffs.
 - **Light on context.** The entry skill is about 10 KB; each category skill (6–9 KB) is loaded only when its task comes up. The MCP server exposes 15 tools whose schemas cost about 15k tokens once per session (measured).
+
+### Cuthol and HyperFrames on the same task
+
+One real editing job, given word for word to the same coding agent twice: once with Cuthol 0.4.0, once with HyperFrames 0.9.72 plus ffmpeg. The job: turn a 25:41 conference talk (CC BY 4.0) into a YouTube video. Remove pauses over 0.6 s, fillers and false starts without cutting inside words. Add burned-in captions that follow the speech, a title card of at most 2 s, one lower third and a looping music bed ducked under speech. Hit −14 LUFS / ≤ −1 dBTP, end on a credits line and write the kept source ranges.
+
+| | Cuthol 0.4.0 | HyperFrames 0.9.72 + ffmpeg |
+|---|---|---|
+| Finished without help | yes | yes |
+| Wall time | **43.3 min** | 51.4 min |
+| Of which rendering | 6.0 min | 12.8 min |
+| **Wall time without rendering** | **37.3 min** | 38.6 min |
+| **API bill for the agent** | **$5.67** | $8.24 |
+| Uncached input / cached input / output + thinking tokens | 0.39 M / 14.5 M / 0.15 M | 0.49 M / 24.1 M / 0.21 M |
+| Output length | 23:41 | 22:22 |
+| Loudness (target −14 ± 1 LUFS, ≤ −1 dBTP) | −14.3 / −1.6 | −14.5 / −1.4 |
+| Black frames over 0.5 s | 0 | 0 |
+| Delivery format (1080p25, H.264, AAC 48 kHz stereo) | ✓ | ✓ |
+| Title card, lower third, credits, captions | ✓ | ✓ |
+| Agent read the tool's source code | 0 times | — |
+
+<sub>How it was measured: the same agent (Gemini 4 Neon, highest thinking level) with the same task text, isolated home folder and local-only speech recognition (no paid speech APIs). The bill uses Gemini API list prices (input $3, cached input $0.15, output $15 per million tokens) applied to the tokens each run used. Rendering counts the steps that produce video files: graphics and title renders plus final assembly and encode. One run per tool (n = 1), on a 12-thread Windows laptop.</sub>
 
 ## Features
 
@@ -253,7 +265,7 @@ Each command prints a full JSON result; add `--compact` for the short text an ag
 | `CUTHOL_ENCODER` | `auto` (default), `nvenc`, `amf`, `qsv`, `vaapi`, `videotoolbox` or `x264`. |
 | `CUTHOL_HW_ENCODER_SESSIONS` | Parallel hardware encode sessions (default 2). |
 | `CUTHOL_WORKERS`, `CUTHOL_OVERLAY_CONCURRENCY` | Overlay capture parallelism (defaults from CPU cores and memory). |
-| `CUTHOL_STALL_TIMEOUT_SEC` | Stop an external process that makes no progress (default 300, `0` off). |
+| `CUTHOL_STALL_TIMEOUT_SEC` | Stop an external process that makes no progress (default 300 s before the first progress, 90 s once an ffmpeg step has made progress; `0` off). |
 | `CUTHOL_MCP_PROGRESSIVE`, `CUTHOL_MCP_STRUCTURED` | Progressive tool discovery; full JSON as structured content. |
 | `CUTHOL_LIVE` | Cuthol Live window: `ask` (default), `on` or `off`. |
 
@@ -268,13 +280,17 @@ On Windows laptops with two GPUs, the headless Chrome that captures motion graph
 Issues and pull requests are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md), the [code of conduct](CODE_OF_CONDUCT.md) and, for security reports, [SECURITY.md](SECURITY.md). The source map is in [`src/ARCHITECTURE.md`](src/ARCHITECTURE.md) and the working rules for coding agents in [`AGENTS.md`](AGENTS.md). Please keep changes covered by a reproducible check: a rendered frame, a diff of the render plan, or a test.
 
 ```bash
-git clone https://github.com/HypeAITR/Cuthol.git cuthol
+git clone https://github.com/cuthol/cuthol.git cuthol
 cd cuthol && npm install && npm run build
 npm test
 node dist/cli.js setup --apply    # point your agent tools at this checkout
 ```
 
 `npm test` runs the suite in two stages: files that are safe to overlap in parallel, then the ones that time renders, probe hardware encoders or call paid services one at a time. Most tests make their own media with ffmpeg. A few also check larger recorded projects or real footage when they are present (`CUTHOL_TEST_FIXTURES`, `CUTHOL_TRIAL_MEDIA`), and the live speech tests run only when `DEEPGRAM_API_KEY` / `ELEVENLABS_API_KEY` are set. Anything missing is skipped with the reason, never failed.
+
+## Contact
+
+Website and docs: [cuthol.com](https://cuthol.com) · Email: [hello@cuthol.com](mailto:hello@cuthol.com) · Bugs and ideas: [GitHub issues](https://github.com/cuthol/cuthol/issues)
 
 ## License
 

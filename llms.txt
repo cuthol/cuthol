@@ -2,24 +2,25 @@
 
 > Cuthol is a local, open-source non-linear video editor built for AI agents. An agent edits through a CLI (`cuthol`) or an MCP server (`cuthol mcp`, 15 tools): a magnetic spine and typed lanes, speech transcription and cleanup (cloud or keyless local), captions, voiceover, measured colour grading, loudness and ducking, clip effects and speed ramps, HyperFrames motion graphics composited with alpha, per-frame layout geometry, verification gates, frame previews that match the render, and a journaled undo for every change. Cuthol Live is a local window where the user watches the edit as it happens, leaves notes on frames that reach the agent with its next result, and can pause the agent to edit the timeline themselves.
 
-Start an agent with `guide(topic="cuthol")` over MCP, or load the `cuthol` skill (installed automatically into detected agent tools on first run). Diagnostics read `[CUTHOL-Gxxx] what | Suggestion: next step`.
+Start an agent with `guide(topic="cuthol")` over MCP, or load the `cuthol` skill (install it with `cuthol skills install --agent <tool>` or `cuthol setup --apply`). Diagnostics read `[CUTHOL-Gxxx] what | Suggestion: next step`.
 
 ## Docs
 
-- [README](https://github.com/HypeAITR/Cuthol/blob/main/README.md): install, MCP client setup, features, configuration
-- [cuthol](https://github.com/HypeAITR/Cuthol/blob/main/skills/cuthol/SKILL.md): entry skill — the model, workflow, rules, and which category skill to load when
-- [cuthol-editing](https://github.com/HypeAITR/Cuthol/blob/main/skills/cuthol-editing/SKILL.md): spine, lanes, cues, trims, speed and ramps, effects, transitions, colour, envelopes, undo, outside edits
-- [cuthol-speech](https://github.com/HypeAITR/Cuthol/blob/main/skills/cuthol-speech/SKILL.md): transcription, cleanup, verify-cleanup, captions, voiceover, speech providers
-- [cuthol-audio](https://github.com/HypeAITR/Cuthol/blob/main/skills/cuthol-audio/SKILL.md): loudness, voice polish, ducking, beat grid and beat alignment, audio health
-- [cuthol-motion](https://github.com/HypeAITR/Cuthol/blob/main/skills/cuthol-motion/SKILL.md): HyperFrames compositions, the `window.__cuthol` runtime, preview, script errors
-- [cuthol-geometry](https://github.com/HypeAITR/Cuthol/blob/main/skills/cuthol-geometry/SKILL.md): per-frame layout measurement and the geometry query
-- [cuthol-review](https://github.com/HypeAITR/Cuthol/blob/main/skills/cuthol-review/SKILL.md): verification gates, diagnostic codes, monitor frames and sheets, brief lenses
-- [cuthol-render](https://github.com/HypeAITR/Cuthol/blob/main/skills/cuthol-render/SKILL.md): presets, overlay cache, encoders, long timelines, post-render checks
-- [cuthol-extensions](https://github.com/HypeAITR/Cuthol/blob/main/skills/cuthol-extensions/SKILL.md): helpers, processors, effects, transitions, recipes, planners, speech and media providers
-- [MCP reference](https://github.com/HypeAITR/Cuthol/blob/main/skills/cuthol/references/mcp.md): tool and argument reference
-- [Cuthol Live](https://github.com/HypeAITR/Cuthol/blob/main/skills/cuthol/references/live.md): the live window — when to open it, user notes, pause and resume
+- [README](https://github.com/cuthol/cuthol/blob/main/README.md): install, MCP client setup, features, configuration
+- [cuthol](https://github.com/cuthol/cuthol/blob/main/skills/cuthol/SKILL.md): entry skill — the model, workflow, rules, and which category skill to load when
+- [cuthol-editing](https://github.com/cuthol/cuthol/blob/main/skills/cuthol-editing/SKILL.md): spine, lanes, cues, trims, speed and ramps, effects, transitions, colour, envelopes, undo, outside edits
+- [cuthol-speech](https://github.com/cuthol/cuthol/blob/main/skills/cuthol-speech/SKILL.md): transcription, cleanup, verify-cleanup, captions, voiceover, speech providers
+- [cuthol-audio](https://github.com/cuthol/cuthol/blob/main/skills/cuthol-audio/SKILL.md): loudness, voice polish, ducking, beat grid and beat alignment, audio health
+- [cuthol-color](https://github.com/cuthol/cuthol/blob/main/skills/cuthol-color/SKILL.md): measured colour grading — color map/diff as text, color solve toward a target, Looks, compare against the untouched picture
+- [cuthol-motion](https://github.com/cuthol/cuthol/blob/main/skills/cuthol-motion/SKILL.md): HyperFrames compositions, the `window.__cuthol` runtime, preview, script errors
+- [cuthol-geometry](https://github.com/cuthol/cuthol/blob/main/skills/cuthol-geometry/SKILL.md): per-frame layout measurement and the geometry query
+- [cuthol-review](https://github.com/cuthol/cuthol/blob/main/skills/cuthol-review/SKILL.md): verification gates, diagnostic codes, monitor frames and sheets, brief lenses
+- [cuthol-render](https://github.com/cuthol/cuthol/blob/main/skills/cuthol-render/SKILL.md): presets, overlay cache, encoders, long timelines, post-render checks
+- [cuthol-extensions](https://github.com/cuthol/cuthol/blob/main/skills/cuthol-extensions/SKILL.md): helpers, processors, effects, transitions, recipes, planners, speech and media providers
+- [MCP reference](https://github.com/cuthol/cuthol/blob/main/skills/cuthol/references/mcp.md): tool and argument reference
+- [Cuthol Live](https://github.com/cuthol/cuthol/blob/main/skills/cuthol/references/live.md): the live window — when to open it, user notes, pause and resume
 
 ## Optional
 
-- [Architecture](https://github.com/HypeAITR/Cuthol/blob/main/src/ARCHITECTURE.md): source map
-- [Example extensions](https://github.com/HypeAITR/Cuthol/tree/main/examples/extensions): one per extension kind — transitions, film-look clip effects, freeze/fade processors, speed-ramp recipes, montage planners, a caption composition kit — plus command-based speech recognition and voiceover bridges and a local media folder provider
+- [Architecture](https://github.com/cuthol/cuthol/blob/main/src/ARCHITECTURE.md): source map
+- [Example extensions](https://github.com/cuthol/cuthol/tree/main/examples/extensions): one per extension kind — transitions, film-look clip effects, freeze/fade processors, speed-ramp recipes, montage planners, a caption composition kit — plus command-based speech recognition and voiceover bridges and a local media folder provider

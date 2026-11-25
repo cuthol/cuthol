@@ -6,7 +6,7 @@ Security fixes go into the latest released version (see [CHANGELOG.md](CHANGELOG
 
 ## Reporting a vulnerability
 
-Please **do not open a public issue** for a security problem. Use GitHub's private reporting instead: **Security → Report a vulnerability** on this repository. Include what you found, how to reproduce it, and what an attacker could do with it.
+Please **do not open a public issue** for a security problem. Use GitHub's private reporting instead: **Security → Report a vulnerability** on this repository. If you cannot use it, email [hello@cuthol.com](mailto:hello@cuthol.com). Include what you found, how to reproduce it, and what an attacker could do with it.
 
 You will get an answer within 7 days. When a fix is ready we publish a release and credit you in the release notes unless you prefer otherwise.
 

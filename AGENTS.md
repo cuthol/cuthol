@@ -22,11 +22,15 @@ The full file map, layering rules and where to start for each kind of change are
 | `src/speech/` | Transcription, cleanup (pauses/fillers), captions, voiceover synthesis |
 | `src/mix/` | Normalization, voice polish, ducking, beat alignment |
 | `src/compositor/` | ffmpeg filter-graph compiler, HyperFrames bridge and runtime (`window.__cuthol`), caption rendering, composition preview |
+| `src/effects/` | Effect contract types and catalog: clip and cue fx, motion layers, GLSL shader effects |
+| `src/color/` | Colour measurement and grading blocks (`color map`, `color solve`, Looks) |
+| `src/export/` | Timeline export to other editors (fcpxml, xmeml, edl, otio) |
+| `src/live/` | Cuthol Live: local server and window (`src/live/ui/`); contract in `live_types.ts` |
 | `src/extensions/` | Extension system: manifests, registry, processors, planners, recipes, composition helpers |
 | `src/monitor/`, `src/render/`, `src/verify/`, `src/brief/` | Frames/sheets/timeline, render + post-render scan, the 5 gates, text lenses |
-| `skills/cuthol/` | The agent skill shipped with Cuthol |
+| `skills/` | The agent skills shipped with Cuthol: the entry skill `cuthol` and category skills (`cuthol-editing`, `-speech`, `-audio`, `-color`, `-motion`, `-geometry`, `-review`, `-render`, `-extensions`) |
 
-Build with `npm install && npm run build`; run with `node dist/cli.js` (or `node dist/cli.js mcp`). Test with `npm test` (`src/test/`; optional fixtures and paid-service keys are skipped when absent, see `src/test/fixtures.ts`).
+Build with `npm install && npm run build`; run with `node dist/cli.js` (MCP server: `node dist/mcp_bin.js` or `node dist/cli.js mcp`). Test with `npm test` (`src/test/`; optional fixtures and paid-service keys are skipped when absent, see `src/test/fixtures.ts`).
 
 ## Rules
 
@@ -46,7 +50,7 @@ Build with `npm install && npm run build`; run with `node dist/cli.js` (or `node
    Results must be short, structured and say what changed and how to undo it.
 3. **Diagnostics are part of the interface.** Every error or warning has:
    - a code in `src/core/diagnostics.ts`;
-   - the form `[CUTHOL-Gxxx] what | Öneri: fix`;
+   - the form `[CUTHOL-Gxxx] what | Suggestion: next step`;
    - a fix the agent can act on.
 
    Prefer a precise warning over a silent wrong result.
