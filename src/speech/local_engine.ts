@@ -28,7 +28,7 @@ export const LOCAL_SPEECH_DEFAULT_VOICE = "tr_TR-dfki-medium";
  * provider with it so old whole-file transcripts are re-transcribed.
  * Must match `LOCAL_ASR_ENGINE_REVISION` in `scripts/local_speech.py`.
  */
-export const LOCAL_ASR_ENGINE_REVISION = "v5";
+export const LOCAL_ASR_ENGINE_REVISION = "v6";
 
 /** Parallel chunk workers for keyless local ASR (each loads its own model copy). */
 export function localAsrJobs(): number {
@@ -275,10 +275,23 @@ export function runLocalAsrBridge(options: {
   jobs?: number;
   cpuThreads?: number;
   engine?: LocalAsrEngineId;
-}): { language: string; modelName: string; words: LocalBridgeWord[]; droppedSegments: LocalBridgeDroppedSegment[]; engine: LocalAsrEngineId } {
+  /**
+   * Audio length in ms. Keyless callers through `transcribeWithLocalProvider`
+   * hold it but that module is out of scope here, so the Parakeet runner
+   * probes it with ffprobe when this is missing.
+   */
+  durationMs?: number;
+}): { language: string; modelName: string; words: LocalBridgeWord[]; droppedSegments: LocalBridgeDroppedSegment[]; engine: LocalAsrEngineId; gapRetry: ParakeetGapRetry; gapRetryNote: string | null } {
   const engine = resolveLocalEngine({ language: options.language, forced: options.engine });
+  if (engine === "whisper") {
+    lastParakeetGapRetry = null;
+  }
   if (engine === "parakeet") {
-    return runParakeetBridge({ audioFilePath: options.audioFilePath, language: options.language });
+    return runParakeetBridge({
+      audioFilePath: options.audioFilePath,
+      language: options.language,
+      durationMs: options.durationMs,
+    });
   }
   const installation = requireLocalSpeech();
   const modelName = (options.modelName ?? installation.modelName).trim() || installation.modelName;
@@ -339,7 +352,7 @@ export function runLocalAsrBridge(options: {
           Number.isFinite(Number((d as LocalBridgeDroppedSegment).end_ms))
       )
     : [];
-  return { language, modelName, words, droppedSegments, engine: "whisper" as LocalAsrEngineId };
+  return { language, modelName, words, droppedSegments, engine: "whisper" as LocalAsrEngineId, gapRetry: { gaps: 0, words: 0 }, gapRetryNote: null };
 }
 
 export function runLocalTtsBridge(options: {
@@ -460,6 +473,108 @@ export function hyperframesBin(): string {
   if (override) return override;
   const here = path.dirname(fileURLToPath(import.meta.url));
   return path.resolve(here, "..", "..", "node_modules", "hyperframes", "bin", "hyperframes.mjs");
+}
+
+/**
+ * Floor of the Parakeet transcription time limit. The pinned HyperFrames
+ * 0.9.15 CLI documents `--timeout` as "applies to the whisper engine only;
+ * Parakeet has a separate fixed timeout" — probing confirms it: a 6 min
+ * clip transcribes fine with `--timeout 5000`. So the real guard for
+ * Parakeet is the `spawnSync` timeout below; the CLI flag is still passed
+ * (scaled the same way) in case a later HyperFrames honors it.
+ */
+export const PARAKEET_TIMEOUT_FLOOR_MS = 280_000;
+
+/** Extra `spawnSync` time over the CLI limit so the CLI reports first. */
+export const PARAKEET_SPAWN_SLACK_MS = 10_000;
+
+/**
+ * Test-only override of the Parakeet CLI time limit in ms: when
+ * `CUTHOL_PARAKEET_TIMEOUT_MS` holds a finite number it is used as the CLI
+ * limit directly (the spawn limit adds `PARAKEET_SPAWN_SLACK_MS`). Production
+ * code never sets it; it exists so tests can force a fast timeout against a
+ * fake HyperFrames bin without waiting minutes.
+ */
+function parakeetTimeoutOverrideMs(): number | null {
+  const raw = (process.env.CUTHOL_PARAKEET_TIMEOUT_MS ?? "").trim();
+  if (!raw) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.floor(n);
+}
+
+/**
+ * Time limits for one Parakeet run, scaled from the audio length: at least
+ * `max(280 s, 1.5 x audio)`, capped at `4 x audio` so a hung process still
+ * ends. Unknown durations keep the old fixed 280 s / 290 s pair.
+ */
+export function parakeetTimeouts(audioDurationMs?: number): {
+  cliTimeoutMs: number;
+  spawnTimeoutMs: number;
+} {
+  const override = parakeetTimeoutOverrideMs();
+  if (override !== null) {
+    return { cliTimeoutMs: override, spawnTimeoutMs: override + PARAKEET_SPAWN_SLACK_MS };
+  }
+  const audio = typeof audioDurationMs === "number" ? audioDurationMs : NaN;
+  if (!Number.isFinite(audio) || audio <= 0) {
+    return {
+      cliTimeoutMs: PARAKEET_TIMEOUT_FLOOR_MS,
+      spawnTimeoutMs: PARAKEET_TIMEOUT_FLOOR_MS + PARAKEET_SPAWN_SLACK_MS,
+    };
+  }
+  const scaled = Math.max(PARAKEET_TIMEOUT_FLOOR_MS, Math.ceil(audio * 1.5));
+  const cliTimeoutMs = Math.min(scaled, Math.max(PARAKEET_TIMEOUT_FLOOR_MS, Math.ceil(audio * 4)));
+  return { cliTimeoutMs, spawnTimeoutMs: cliTimeoutMs + PARAKEET_SPAWN_SLACK_MS };
+}
+
+/** Audio length in ms via ffprobe, or null when it cannot be read. */
+export function probeAudioDurationMs(audioFilePath: string): number | null {
+  try {
+    if (!audioFilePath || !fs.existsSync(audioFilePath)) return null;
+    const proc = spawnSync(
+      "ffprobe",
+      [
+        "-v",
+        "error",
+        "-select_streams",
+        "a:0",
+        "-show_entries",
+        "stream=duration",
+        "-of",
+        "csv=p=0",
+        audioFilePath,
+      ],
+      { encoding: "utf8", windowsHide: true, timeout: 30_000 }
+    );
+    if (proc.status !== 0) return null;
+    const seconds = Number.parseFloat(String(proc.stdout ?? "").trim());
+    if (!Number.isFinite(seconds) || seconds <= 0) return null;
+    return Math.round(seconds * 1000);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when a failed Parakeet run ended by timeout: `spawnSync` reports
+ * `ETIMEDOUT` (and `SIGTERM`) when its own `timeout` fires, and a future
+ * HyperFrames that honors `--timeout` for Parakeet would report its failure
+ * as `{"ok":false,...}` or a timeout line — the pinned 0.9.15 prints no
+ * such payload for Parakeet (its `--timeout` only guards Whisper), so the
+ * spawn side is the reliable signal.
+ */
+function isParakeetTimeoutFailure(proc: {
+  error?: unknown;
+  signal?: string | null;
+  stdout?: unknown;
+}): boolean {
+  const err = proc.error as { code?: unknown } | null | undefined;
+  if (err && typeof err === "object" && (err as { code?: unknown }).code === "ETIMEDOUT") return true;
+  if (proc.signal === "SIGTERM") return true;
+  const out = typeof proc.stdout === "string" ? proc.stdout : "";
+  if (/timed?\s*out|timeout|exceeded\s+\d+\s*s/i.test(out)) return true;
+  return false;
 }
 
 let parakeetProbeCache: { installed: boolean; reason: string } | null = null;
@@ -672,20 +787,47 @@ function parseParakeetTranscriptFile(transcriptPath: string): LocalBridgeWord[] 
   return words;
 }
 
-function runParakeetBridge(options: {
+/** Words recovered by the single Parakeet dropped-gap retry (ke4). */
+export interface ParakeetGapRetry {
+  gaps: number;
+  words: number;
+}
+
+/**
+ * Latest Parakeet dropped-gap retry outcome, set by every `runParakeetBridge`
+ * call (null for non-Parakeet runs). `transcribe.ts` and `verify_cleanup.ts`
+ * take it to report `parakeet_gap_retry`; unit tests read it off the
+ * `runLocalAsrBridge` return value instead.
+ */
+let lastParakeetGapRetry: { retry: ParakeetGapRetry; note: string | null } | null = null;
+
+/** Take (and clear) the latest Parakeet gap-retry outcome. */
+export function takeParakeetGapRetry(): { retry: ParakeetGapRetry; note: string | null } | null {
+  const taken = lastParakeetGapRetry;
+  lastParakeetGapRetry = null;
+  return taken;
+}
+
+/** Dropped-gap retry tuning: gap length, speech share, slice margins, separator. */
+export const PARAKEET_GAP_MIN_MS = 1500;
+export const PARAKEET_GAP_SPEECH_SHARE = 0.4;
+export const PARAKEET_GAP_MARGIN_MS = 500;
+export const PARAKEET_GAP_SEPARATOR_MS = 1000;
+
+function runParakeetOnce(options: {
+  bin: string;
   audioFilePath: string;
-  language?: string;
-}): { language: string; modelName: string; words: LocalBridgeWord[]; droppedSegments: LocalBridgeDroppedSegment[]; engine: LocalAsrEngineId } {
-  // The HyperFrames CLI has no keyterm/hotword channel: caller keyterms are
-  // documented as Whisper/Deepgram-only and ignored here, never failed.
-  const bin = hyperframesBin();
-  const args = ["transcribe", options.audioFilePath, "--engine", "parakeet", "--json", "--timeout", "280000"];
-  const lang = (options.language ?? "auto").trim().toLowerCase();
-  if (lang && lang !== "auto") args.push("--language", lang);
-  const proc = spawnSync(process.execPath, [bin, ...args], {
+  lang: string;
+  cliTimeoutMs: number;
+  spawnTimeoutMs: number;
+  audioMin: number | null;
+}): LocalBridgeWord[] {
+  const args = ["transcribe", options.audioFilePath, "--engine", "parakeet", "--json", "--timeout", String(options.cliTimeoutMs)];
+  if (options.lang && options.lang !== "auto") args.push("--language", options.lang);
+  const proc = spawnSync(process.execPath, [options.bin, ...args], {
     windowsHide: true,
     encoding: "utf8",
-    timeout: 290_000,
+    timeout: options.spawnTimeoutMs,
     maxBuffer: 64 * 1024 * 1024,
     env: { ...process.env, CUTHOL_SKILLS_AUTO: "0", HYPERFRAMES_SKILLS_AUTO: "0" },
   });
@@ -693,6 +835,17 @@ function runParakeetBridge(options: {
     // HyperFrames reports failures as `{"ok":false,"error":{...}}` on
     // stdout; prefer that message over the bare stderr tail.
     const cliMessage = parseHyperFramesError(proc.stdout ?? "");
+    if (isParakeetTimeoutFailure(proc) || (cliMessage !== null && /timed?\s*out|timeout|exceeded\s+\d+\s*s/i.test(cliMessage))) {
+      const afterS = Math.round(options.cliTimeoutMs / 1000);
+      const onAudio = options.audioMin !== null ? ` on ${options.audioMin.toFixed(1)} min of audio` : "";
+      throw new CutholError(
+        DIAGNOSTICS.LOCAL_SPEECH_BRIDGE_FAILED(
+          "parakeet transcribe",
+          `Parakeet transcription timed out after ${afterS} s${onAudio}.`,
+          "The machine may be busy — retry when it is idle, or use '--engine whisper', which transcribes in chunks and has no single long timeout. The install itself looks fine. (engine parakeet via HyperFrames)"
+        )
+      );
+    }
     const { detail, suggestion } = selectBridgeFailureDetail(
       cliMessage ??
         (proc.stderr || (proc.error instanceof Error ? proc.error.message : String(proc.error ?? "")) || "failed")
@@ -720,20 +873,287 @@ function runParakeetBridge(options: {
       )
     );
   }
-  const words = parseParakeetTranscriptFile(parsed.transcriptPath);
-  if (words.length === 0) {
+  return parseParakeetTranscriptFile(parsed.transcriptPath);
+}
+
+/**
+ * Mono 16 kHz PCM of an audio file via ffmpeg on stdout, or null when the
+ * decode fails. Small reader, no new dependency.
+ */
+function decodePcm16kMono(audioFilePath: string): { samples: Int16Array; sampleRate: number } | null {
+  try {
+    const proc = spawnSync(
+      "ffmpeg",
+      ["-y", "-v", "error", "-i", audioFilePath, "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-f", "s16le", "-"],
+      { encoding: "buffer", windowsHide: true, timeout: 120_000, maxBuffer: 256 * 1024 * 1024 }
+    );
+    if (proc.status !== 0 || !proc.stdout || (proc.stdout as Buffer).length < 2) return null;
+    const buf = Buffer.from(proc.stdout as Buffer);
+    const samples = new Int16Array(buf.buffer, buf.byteOffset, Math.floor(buf.length / 2));
+    return { samples: samples.slice(), sampleRate: 16000 };
+  } catch {
+    return null;
+  }
+}
+
+/** dBFS of one frame (RMS), floored at -96 like the waveform analysis. */
+function frameDbfs(samples: Int16Array, start: number, end: number): number {
+  const n = Math.max(1, end - start);
+  let sumSq = 0;
+  for (let i = start; i < end; i++) {
+    const v = samples[i] / 32768.0;
+    sumSq += v * v;
+  }
+  const rms = Math.sqrt(sumSq / n);
+  return rms > 1e-6 ? 20 * Math.log10(rms) : -96.0;
+}
+
+/**
+ * Speech threshold for dropped-gap detection: the 20th-percentile 20 ms
+ * frame level plus 15 dB, mirroring how the cleanup derives its silence
+ * floor from frame levels.
+ */
+function parakeetGapSpeechThresholdDb(samples: Int16Array, sampleRate: number): number {
+  const frameLen = Math.max(1, Math.round(sampleRate * 0.02));
+  const count = Math.max(1, Math.ceil(samples.length / frameLen));
+  const levels: number[] = new Array(count);
+  for (let f = 0; f < count; f++) {
+    levels[f] = frameDbfs(samples, f * frameLen, Math.min(samples.length, (f + 1) * frameLen));
+  }
+  const sorted = levels.slice().sort((a, b) => a - b);
+  const p20 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.2))];
+  return p20 + 15;
+}
+
+/** Share of 20 ms frames in [startMs, endMs) above the speech threshold. */
+function gapSpeechShare(samples: Int16Array, sampleRate: number, startMs: number, endMs: number, thresholdDb: number): number {
+  const frameLen = Math.max(1, Math.round(sampleRate * 0.02));
+  const startSample = Math.max(0, Math.floor((startMs * sampleRate) / 1000));
+  const endSample = Math.min(samples.length, Math.ceil((endMs * sampleRate) / 1000));
+  if (endSample <= startSample) return 0;
+  let total = 0;
+  let above = 0;
+  for (let s = startSample; s < endSample; s += frameLen) {
+    total++;
+    if (frameDbfs(samples, s, Math.min(endSample, s + frameLen)) > thresholdDb) above++;
+  }
+  return total === 0 ? 0 : above / total;
+}
+
+interface ParakeetDroppedGap {
+  startMs: number;
+  endMs: number;
+}
+
+/**
+ * Spans of at least PARAKEET_GAP_MIN_MS between consecutive words (and
+ * before the first / after the last word) whose audio is speech-like: at
+ * least PARAKEET_GAP_SPEECH_SHARE of 20 ms frames above threshold.
+ */
+export function findParakeetDroppedGaps(
+  words: LocalBridgeWord[],
+  samples: Int16Array,
+  sampleRate: number,
+  audioDurationMs: number
+): ParakeetDroppedGap[] {
+  const sorted = words.slice().sort((a, b) => a.source_start_ms - b.source_start_ms || a.source_end_ms - b.source_end_ms);
+  const spans: Array<{ startMs: number; endMs: number }> = [];
+  let cursor = 0;
+  for (const w of sorted) {
+    if (w.source_start_ms - cursor >= PARAKEET_GAP_MIN_MS) {
+      spans.push({ startMs: cursor, endMs: w.source_start_ms });
+    }
+    cursor = Math.max(cursor, w.source_end_ms);
+  }
+  if (audioDurationMs - cursor >= PARAKEET_GAP_MIN_MS) {
+    spans.push({ startMs: cursor, endMs: audioDurationMs });
+  }
+  if (spans.length === 0) return [];
+  const thresholdDb = parakeetGapSpeechThresholdDb(samples, sampleRate);
+  return spans.filter(
+    (s) => gapSpeechShare(samples, sampleRate, s.startMs, s.endMs, thresholdDb) >= PARAKEET_GAP_SPEECH_SHARE
+  );
+}
+
+/** Write mono 16-bit PCM as a WAV file. */
+function writeWavFile(filePath: string, samples: Int16Array, sampleRate: number): void {
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + samples.length * 2, 4);
+  header.write("WAVE", 8);
+  header.write("fmt ", 12);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * 2, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(samples.length * 2, 40);
+  const body = Buffer.from(samples.buffer, samples.byteOffset, samples.length * 2);
+  fs.writeFileSync(filePath, Buffer.concat([header, body]));
+}
+
+export interface ParakeetGapSlice {
+  combinedStartMs: number;
+  combinedEndMs: number;
+  origStartMs: number;
+  gapStartMs: number;
+  gapEndMs: number;
+}
+
+/**
+ * One wav of the gap slices (each with PARAKEET_GAP_MARGIN_MS margin on both
+ * sides) separated by PARAKEET_GAP_SEPARATOR_MS of digital silence, plus the
+ * slice map to translate retry word times back to source times.
+ */
+function buildGapRetryWav(
+  samples: Int16Array,
+  sampleRate: number,
+  audioDurationMs: number,
+  gaps: ParakeetDroppedGap[],
+  outPath: string
+): ParakeetGapSlice[] {
+  const perMs = sampleRate / 1000;
+  const sepSamples = Math.round(PARAKEET_GAP_SEPARATOR_MS * perMs);
+  const parts: Int16Array[] = [];
+  const slices: ParakeetGapSlice[] = [];
+  let combinedMs = 0;
+  gaps.forEach((gap, index) => {
+    if (index > 0) {
+      parts.push(new Int16Array(sepSamples));
+      combinedMs += PARAKEET_GAP_SEPARATOR_MS;
+    }
+    const sliceStartMs = Math.max(0, gap.startMs - PARAKEET_GAP_MARGIN_MS);
+    const sliceEndMs = Math.min(audioDurationMs, gap.endMs + PARAKEET_GAP_MARGIN_MS);
+    const from = Math.max(0, Math.floor(sliceStartMs * perMs));
+    const to = Math.min(samples.length, Math.ceil(sliceEndMs * perMs));
+    const chunk = samples.slice(from, to);
+    parts.push(chunk);
+    slices.push({
+      combinedStartMs: combinedMs,
+      combinedEndMs: combinedMs + (chunk.length / perMs),
+      origStartMs: (from / perMs),
+      gapStartMs: gap.startMs,
+      gapEndMs: gap.endMs,
+    });
+    combinedMs += chunk.length / perMs;
+  });
+  const total = parts.reduce((n, p) => n + p.length, 0);
+  const combined = new Int16Array(total);
+  let at = 0;
+  for (const p of parts) {
+    combined.set(p, at);
+    at += p.length;
+  }
+  writeWavFile(outPath, combined, sampleRate);
+  return slices;
+}
+
+/** Map retry words back to source times, keeping margin-duplicate drops. */
+export function mapGapRetryWords(
+  retryWords: LocalBridgeWord[],
+  slices: ParakeetGapSlice[]
+): LocalBridgeWord[] {
+  const kept: LocalBridgeWord[] = [];
+  for (const w of retryWords) {
+    const slice = slices.find((s) => w.source_start_ms >= s.combinedStartMs && w.source_start_ms < s.combinedEndMs);
+    if (!slice) continue;
+    const shift = slice.origStartMs - slice.combinedStartMs;
+    const startMs = Math.round(w.source_start_ms + shift);
+    const endMs = Math.round(w.source_end_ms + shift);
+    if (startMs < slice.gapStartMs || startMs >= slice.gapEndMs) continue;
+    kept.push({ ...w, source_start_ms: startMs, source_end_ms: Math.max(startMs + 1, endMs) });
+  }
+  return kept;
+}
+
+function runParakeetBridge(options: {
+  audioFilePath: string;
+  language?: string;
+  durationMs?: number;
+}): { language: string; modelName: string; words: LocalBridgeWord[]; droppedSegments: LocalBridgeDroppedSegment[]; engine: LocalAsrEngineId; gapRetry: ParakeetGapRetry; gapRetryNote: string | null } {
+  // The HyperFrames CLI has no keyterm/hotword channel: caller keyterms are
+  // documented as Whisper/Deepgram-only and ignored here, never failed.
+  const bin = hyperframesBin();
+  // Scale the limit with the audio so a ~25 min talk no longer dies at the
+  // old fixed 280 s: prefer the caller duration, else probe via ffprobe.
+  const probedMs =
+    typeof options.durationMs === "number" && options.durationMs > 0
+      ? options.durationMs
+      : probeAudioDurationMs(options.audioFilePath);
+  const audioMs = probedMs && probedMs > 0 ? probedMs : undefined;
+  const { cliTimeoutMs, spawnTimeoutMs } = parakeetTimeouts(audioMs);
+  const audioMin = audioMs !== undefined ? audioMs / 60000 : null;
+  const lang = (options.language ?? "auto").trim().toLowerCase();
+  const firstWords = runParakeetOnce({ bin, audioFilePath: options.audioFilePath, lang, cliTimeoutMs, spawnTimeoutMs, audioMin });
+  const emptyRetry: ParakeetGapRetry = { gaps: 0, words: 0 };
+  const finish = (
+    words: LocalBridgeWord[],
+    gapRetry: ParakeetGapRetry,
+    gapRetryNote: string | null
+  ): { language: string; modelName: string; words: LocalBridgeWord[]; droppedSegments: LocalBridgeDroppedSegment[]; engine: LocalAsrEngineId; gapRetry: ParakeetGapRetry; gapRetryNote: string | null } => {
+    lastParakeetGapRetry = { retry: gapRetry, note: gapRetryNote };
+    return {
+      // Parakeet detects the language itself but the CLI does not report it:
+      // explicit requests keep their tag, `auto` stays `auto` (the transcribe
+      // layer asks for `--lang` exactly like the other undetectable paths).
+      language: lang && lang !== "auto" ? lang : "auto",
+      modelName: PARAKEET_MODEL_ID,
+      words,
+      droppedSegments: [],
+      engine: "parakeet",
+      gapRetry,
+      gapRetryNote,
+    };
+  };
+  // Dropped-gap retry: one extra CLI call over the speech-like holes, at most
+  // one round. A failed retry keeps the first result with a note.
+  const durationMs = audioMs ?? (firstWords.length > 0 ? firstWords[firstWords.length - 1].source_end_ms : 0);
+  if (durationMs <= 0) {
     throw new CutholError(
       DIAGNOSTICS.LOCAL_SPEECH_BRIDGE_FAILED("parakeet transcribe output", "Transcript holds no words.")
     );
   }
-  return {
-    // Parakeet detects the language itself but the CLI does not report it:
-    // explicit requests keep their tag, `auto` stays `auto` (the transcribe
-    // layer asks for `--lang` exactly like the other undetectable paths).
-    language: lang && lang !== "auto" ? lang : "auto",
-    modelName: PARAKEET_MODEL_ID,
-    words,
-    droppedSegments: [],
-    engine: "parakeet",
-  };
+  const decoded = decodePcm16kMono(options.audioFilePath);
+  if (!decoded) {
+    return finish(firstWords, emptyRetry, null);
+  }
+  const gaps = findParakeetDroppedGaps(firstWords, decoded.samples, decoded.sampleRate, durationMs);
+  if (gaps.length === 0) {
+    return finish(firstWords, emptyRetry, null);
+  }
+  const gapWavPath = path.join(
+    fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-parakeet-gaps-")),
+    "gaps.wav"
+  );
+  try {
+    const slices = buildGapRetryWav(decoded.samples, decoded.sampleRate, durationMs, gaps, gapWavPath);
+    const combinedMs = Math.ceil(fs.statSync(gapWavPath).size / 32);
+    const retryLimits = parakeetTimeouts(combinedMs);
+    let retryWords: LocalBridgeWord[];
+    try {
+      retryWords = runParakeetOnce({ bin, audioFilePath: gapWavPath, lang, cliTimeoutMs: retryLimits.cliTimeoutMs, spawnTimeoutMs: retryLimits.spawnTimeoutMs, audioMin: null });
+    } catch (err) {
+      const note =
+        `parakeet gap retry failed (${gaps.length} speech-like ${gaps.length === 1 ? "gap" : "gaps"} left as-is); ` +
+        (err instanceof Error ? err.message.split("\n")[0] : String(err)).slice(0, 200);
+      return finish(firstWords, { gaps: gaps.length, words: 0 }, note);
+    }
+    const recovered = mapGapRetryWords(retryWords, slices);
+    const merged = firstWords.concat(recovered).sort((a, b) => a.source_start_ms - b.source_start_ms || a.source_end_ms - b.source_end_ms);
+    if (merged.length === 0) {
+      throw new CutholError(
+        DIAGNOSTICS.LOCAL_SPEECH_BRIDGE_FAILED("parakeet transcribe output", "Transcript holds no words.")
+      );
+    }
+    return finish(merged, { gaps: gaps.length, words: recovered.length }, null);
+  } finally {
+    try {
+      fs.rmSync(path.dirname(gapWavPath), { recursive: true, force: true });
+    } catch {
+      // best-effort temp cleanup
+    }
+  }
 }

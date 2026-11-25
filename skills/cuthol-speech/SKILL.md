@@ -131,7 +131,10 @@ transcript is `CUTHOL-SYS06`; transcribe the asset first.
    (`ta_<asset>_<start>_<end>`). IDs are source-anchored, so they stay valid
    after the spine is split. Details: `references/cleanup.md`.
 3. **Decide one by one (`cut_candidates`):** contextual fillers and
-   repetition/restart candidates are never cut automatically. Pass
+   repetition/restart candidates are never cut automatically, and neither is an
+   automatic filler or repetition cut whose kept edge stays loud after edge
+   placement (it is listed in `review_candidates` with a reason instead of
+   being cut, since cutting it would leave an audible jump). Pass
    `cut_candidates=["cf_…", "rr_…", "rr_…:keep=1", "rr_…#1",
    "36150..42880ms"]` in the applying call. Detection is deliberately broad —
    read each candidate's `context`; never pass every `rr_` id wholesale.

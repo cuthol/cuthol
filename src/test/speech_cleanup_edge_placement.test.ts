@@ -295,11 +295,11 @@ test("4. summarizeJoinEdgeLoudness pure unit: threshold and worst-cap", () => {
   // Join at 5000..6000: kept edge before=5000 (loud), after=6000 (loud).
   const s = summarizeJoinEdgeLoudness({ clips, profileByHandle: new Map([["vid_01", profile]]) });
   assert.equal(s.total_joins, 1);
-  assert.equal(s.loud_joins, 2);
+  assert.equal(s.loud_joins, 1);
   assert.equal(s.loud_share, 1);
   assert.equal(s.abnormal, true);
   assert.ok(s.worst.length <= 5);
-  assert.ok(s.summary_line.includes("1 joins"));
+  assert.ok(s.summary_line.includes("1/1 loud joins"));
   // Quiet join: profile quiet at edges.
   const quiet = new Float64Array(400).fill(-60);
   const q = summarizeJoinEdgeLoudness({

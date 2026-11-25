@@ -5,7 +5,7 @@ import { CutholSequence, SpineClip } from "../core/schema.js";
 import { OPEN_STANDARDS } from "../core/standards.js";
 import { measureAssetAcousticWindows } from "../library/waveform.js";
 import { sourceMsToSequenceMs } from "../sequence/spine.js";
-import type { PlannedCutInterval } from "./cleanup.js";
+import type { ContextualFillerReviewCandidate, PlannedCutInterval } from "./cleanup.js";
 import {
   isKeptEdgeLoud,
   RawCandidate,
@@ -20,6 +20,8 @@ export interface EdgePlacementKindStats {
   edges_still_loud: number;
   /** Pause-path acoustic refinement count (kept separately, never in edges_moved). */
   edges_refined?: number;
+  /** Automatic cuts withheld for a loud kept edge and listed for the agent. */
+  listed?: number;
 }
 
 export interface EdgePlacementStats {
@@ -34,8 +36,10 @@ export function emptyEdgePlacementStats(): EdgePlacementStats {
 }
 
 export function formatEdgePlacementSummary(stats: EdgePlacementStats): string {
-  const wordPart = (name: string, s: EdgePlacementKindStats): string =>
-    `${name} ${s.cuts} cuts, ${s.edges_moved} edges moved, ${s.edges_still_loud} still loud`;
+  const wordPart = (name: string, s: EdgePlacementKindStats): string => {
+    const base = `${name} ${s.cuts} cuts, ${s.edges_moved} edges moved, ${s.edges_still_loud} still loud`;
+    return (s.listed ?? 0) > 0 ? `${base}, ${s.listed} listed (no quiet edge)` : base;
+  };
   const pausePart = (s: EdgePlacementKindStats): string =>
     `pause ${s.cuts} cuts, ${s.edges_still_loud} still loud`;
   return `edge placement: ${wordPart("filler", stats.filler)}; ${wordPart("repetition", stats.repetition)}; ${pausePart(stats.pause)}`;
@@ -838,6 +842,7 @@ export function planTargetClipsCuts(params: {
   globalSilenceFloorVal: number;
   edgePlacement: EdgePlacementStats;
   edgePlacementSummary: string;
+  listedReviewCandidates: ContextualFillerReviewCandidate[];
 } {
   const {
     sequence,
@@ -863,6 +868,7 @@ export function planTargetClipsCuts(params: {
   let totalSavedSeqMs = 0;
   let globalSilenceFloorVal: number = OPEN_STANDARDS.DIALOGUE_CLEANUP.SILENCE_FLOOR_DBFS;
   const edgePlacement = emptyEdgePlacementStats();
+  const allListedReviewCandidates: ContextualFillerReviewCandidate[] = [];
 
   for (const clip of targetClips) {
     const assetItem = sequence.library.find((a) => a.handle === clip.asset_handle);
@@ -991,6 +997,54 @@ export function planTargetClipsCuts(params: {
       acousticProfile,
     });
 
+    // Withhold automatic filler/repetition cuts whose final placement still
+    // leaves a loud kept edge: cutting them would leave an audible jump, so
+    // they are listed for the agent instead. Selected cuts (candidate_id)
+    // are the agent's choice and are always kept; pauses are untouched; with
+    // no acoustic profile the previous behaviour is unchanged.
+    const listedForClip: ContextualFillerReviewCandidate[] = [];
+    const listedKindsForClip: Array<"filler" | "repetition"> = [];
+    if (acousticProfile && acousticProfile.has_silence_variation) {
+      for (let i = plannedCuts.length - 1; i >= 0; i--) {
+        const cut = plannedCuts[i];
+        if (cut.kind !== "filler" && cut.kind !== "repetition") continue;
+        if (typeof cut.candidate_id === "string") continue;
+        const loudBefore = isKeptEdgeLoud(acousticProfile, cut.padded_source_start_ms, "before");
+        const loudAfter = isKeptEdgeLoud(acousticProfile, cut.padded_source_end_ms, "after");
+        if (!loudBefore && !loudAfter) continue;
+        const rawStart =
+          typeof cut.original_source_start_ms === "number"
+            ? cut.original_source_start_ms
+            : cut.raw_source_start_ms;
+        const rawEnd =
+          typeof cut.original_source_end_ms === "number"
+            ? cut.original_source_end_ms
+            : cut.raw_source_end_ms;
+        const assetHandle = cut.asset_handle ?? clip.asset_handle;
+        const edge = loudBefore && loudAfter ? "edges" : loudBefore ? "start edge" : "end edge";
+        listedForClip.push({
+          id: `cf_${assetHandle}_${rawStart}_${rawEnd}`,
+          clip_id: clip.id,
+          asset_handle: assetHandle,
+          word: cut.label,
+          punctuated_word: cut.label,
+          source_start_ms: rawStart,
+          source_end_ms: rawEnd,
+          duration_ms: rawEnd - rawStart,
+          sequence_start_ms: sourceMsToSequenceMs(clip, rawStart),
+          sequence_end_ms: sourceMsToSequenceMs(clip, rawEnd),
+          gap_before_ms: 0,
+          gap_after_ms: 0,
+          context: cut.label,
+          reason: `Withheld automatic ${cut.kind} cut: kept ${edge} is still loud after edge placement, cutting it would leave an audible jump at the kept edge`,
+        });
+        listedKindsForClip.push(cut.kind as "filler" | "repetition");
+        plannedCuts.splice(i, 1);
+      }
+    }
+    listedForClip.reverse();
+    listedKindsForClip.reverse();
+
     // Re-derive merged ranges from the snapped edges (same overlap-merge rule).
     mergedRanges.length = 0;
     for (const c of plannedCuts) {
@@ -1043,6 +1097,10 @@ export function planTargetClipsCuts(params: {
         edgePlacement[c.kind].cuts += 1;
       }
     }
+    for (const kind of listedKindsForClip) {
+      edgePlacement[kind].listed = (edgePlacement[kind].listed ?? 0) + 1;
+    }
+    allListedReviewCandidates.push(...listedForClip);
 
     totalSavedSourceMs += clipSavedSourceMs;
     totalSavedSeqMs += clipSavedSeqMs;
@@ -1069,5 +1127,6 @@ export function planTargetClipsCuts(params: {
     globalSilenceFloorVal,
     edgePlacement,
     edgePlacementSummary: formatEdgePlacementSummary(edgePlacement),
+    listedReviewCandidates: allListedReviewCandidates,
   };
 }

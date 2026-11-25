@@ -235,7 +235,7 @@ export function buildCleanupTrace(params: {
       "R2: A pause < min_pause_ms (or < min_pause_ms after acoustic narrowing) is treated as natural prosody and kept (TOO_SHORT / ACOUSTIC_GAP_TOO_SHORT)",
       "R3: A pause candidate overlapping a spoken ASR word is trimmed to the gap between words (TRIMMED_TO_WORD_GAP); rejected if the trimmed gap stays < min_pause_ms (OVERLAPS_WORD)",
       "R4: Long untranscribed sounds (> 120ms) inside a pause are never cut (UNTRANSCRIBED_AUDIO); the cut is split around them or shortened (SPLIT_AROUND_UNTRANSCRIBED_AUDIO)",
-      "R5: Pure filler sounds (ıı, ee, uh, um) and contextual fillers surrounded by pauses are cut; fluent contextual fillers (review_candidates), word-group repetitions and sentence restarts (repetition_candidates) are never cut automatically, listed with source-based stable ids, and cut with acoustic edge rules only when the agent selects them via cut_candidates",
+      "R5: Pure filler sounds (ıı, ee, uh, um) and contextual fillers surrounded by pauses are cut; fluent contextual fillers (review_candidates), word-group repetitions and sentence restarts (repetition_candidates) are never cut automatically, listed with source-based stable ids, and cut with acoustic edge rules only when the agent selects them via cut_candidates; an automatic filler or repetition cut whose kept edge is still loud after edge placement is likewise withheld and listed for the agent instead of cut",
       "R6: If a < 150ms leftover would remain between cuts or at clip ends, it is merged with the neighboring cut when it holds no speech (APPLIED_WITH_SLIVER_MERGE); when it holds speech the pause cut is narrowed or rejected (AVOID_SHORT_REMNANT_CLIP)",
     ],
     summary: {

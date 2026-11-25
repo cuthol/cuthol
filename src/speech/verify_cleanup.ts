@@ -32,7 +32,7 @@ import {
   transcribeWithLocalProvider,
 } from "./providers.js";
 import { loadCachedTranscriptForAsset } from "./transcribe.js";
-import { resolveLocalEngine, type LocalAsrEngineId } from "./local_engine.js";
+import { resolveLocalEngine, takeParakeetGapRetry, type LocalAsrEngineId } from "./local_engine.js";
 
 const FRAGMENT_MAX_MS = 200;
 const NEIGHBOR_CUT_MS = OPEN_STANDARDS.DIALOGUE_CLEANUP.MAX_PAD_MS;
@@ -133,6 +133,13 @@ export interface VerifyCleanupResult {
   unexpected_words: VerifyUnexpectedWord[];
   substituted_words: VerifySubstitutedWord[];
   join_edge_summary: VerifyJoinEdgeSummary;
+  /**
+   * Parakeet dropped-gap retry outcome for the re-transcription of the
+   * rendered spine audio: gaps re-decoded, words recovered. Present only
+   * when the re-transcription ran Parakeet fresh; absent on cache hits and
+   * non-Parakeet paths.
+   */
+  parakeet_gap_retry?: { gaps: number; words: number };
 }
 
 interface ExpectedTok {
@@ -857,6 +864,7 @@ export async function verifyCleanup(options: VerifyCleanupOptions): Promise<Veri
   let heardDoc: TranscriptDocument;
   let sha256: string;
   let cached: boolean;
+  let gapRetry: { gaps: number; words: number } | undefined;
   try {
     const transcribed = await transcribeRenderedSpeech({
       paths,
@@ -869,6 +877,10 @@ export async function verifyCleanup(options: VerifyCleanupOptions): Promise<Veri
     heardDoc = transcribed.doc;
     sha256 = transcribed.sha256;
     cached = transcribed.cached;
+    const taken = takeParakeetGapRetry();
+    if (taken !== null) {
+      gapRetry = { ...taken.retry };
+    }
   } finally {
     if (fs.existsSync(rendered.wavPath)) {
       try {
@@ -936,5 +948,6 @@ export async function verifyCleanup(options: VerifyCleanupOptions): Promise<Veri
     unexpected_words,
     substituted_words,
     join_edge_summary: joinEdgeSummary,
+    ...(gapRetry !== undefined ? { parakeet_gap_retry: gapRetry } : {}),
   };
 }

@@ -292,8 +292,8 @@ test("stale whole-file local record is re-transcribed once with the current engi
   });
   assert.equal(res.cached, false);
   assert.ok(res.transcript.text.includes("hello"));
-  assert.equal(res.transcript.engineRev, "v5");
-  assert.ok(readKey(wsDir, "vid_01", "local@v5:en")?.text.includes("hello"));
+  assert.equal(res.transcript.engineRev, "v6");
+  assert.ok(readKey(wsDir, "vid_01", "local@v6:en")?.text.includes("hello"));
 
   const again = await transcribeLibraryAsset({
     workspaceDir: wsDir,

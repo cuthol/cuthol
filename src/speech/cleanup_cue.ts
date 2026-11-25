@@ -127,6 +127,7 @@ export function cleanupLaneCueDialogue(options: {
     totalSavedSourceMs,
     totalSavedSeqMs,
     globalSilenceFloorVal,
+    listedReviewCandidates,
   } = planTargetClipsCuts({
     sequence: planningSequence,
     targetClips: virtualClips,
@@ -148,12 +149,14 @@ export function cleanupLaneCueDialogue(options: {
     selectedSpansByAsset: customSelectedSpansByAsset,
   });
 
+  const mergedReviewCandidates = [...allReviewCandidates, ...listedReviewCandidates];
+
   const buildTrace = (rev: number) =>
     buildCleanupTrace({
       rev,
       allPlannedCuts,
       allRejectedNearMisses,
-      allReviewCandidates,
+      allReviewCandidates: mergedReviewCandidates,
       allRepetitionCandidates: nearRepetitionCandidates,
       distantRepetitionCount: distantRepetitionCandidates.length,
       preservedUntranscribedCount: preservedUntranscribed.length,
@@ -190,7 +193,7 @@ export function cleanupLaneCueDialogue(options: {
     return {
       ...resultBase,
       dry_run: dryRun,
-      review_candidates: allReviewCandidates,
+      review_candidates: mergedReviewCandidates,
       repetition_candidates: nearRepetitionCandidates,
       distant_repetition_candidates: distantRepetitionCandidates,
       tail_without_audio_candidates: tailWithoutAudioCandidates,
@@ -210,7 +213,7 @@ export function cleanupLaneCueDialogue(options: {
   return {
     ...resultBase,
     dry_run: false,
-    review_candidates: filterReview(allReviewCandidates, selectedReviewIds),
+    review_candidates: filterReview(mergedReviewCandidates, selectedReviewIds),
     repetition_candidates: filterRepetition(nearRepetitionCandidates, selectedRepetitionIds),
     distant_repetition_candidates: filterRepetition(
       distantRepetitionCandidates,

@@ -29,12 +29,12 @@ import {
   transcribeWithDeepgram,
   transcribeWithLocalProvider,
 } from "./providers.js";
-import { LOCAL_ASR_ENGINE_REVISION, PARAKEET_LANGUAGES, resolveLocalEngine, type LocalAsrEngineId } from "./local_engine.js";
+import { LOCAL_ASR_ENGINE_REVISION, PARAKEET_LANGUAGES, PARAKEET_MODEL_ID, resolveLocalEngine, takeParakeetGapRetry, type LocalAsrEngineId } from "./local_engine.js";
 
 /**
  * Cache namespace of the local ASR path (old `local:*` keys miss). Keyless
- * engine transcripts are namespaced per engine (`local@v5+whisper`,
- * `local@v5+parakeet`) so one engine never serves the other's transcript;
+ * engine transcripts are namespaced per engine (`local@<rev>+whisper`,
+ * `local@<rev>+parakeet`) so one engine never serves the other's transcript;
  * sidecar/custom-cli transcripts stay under the engine-independent base key.
  */
 export function localAsrCachePrefix(engine?: string): string {
@@ -55,19 +55,16 @@ function isEngineMismatchedTranscript(doc: TranscriptDocument, engine: LocalAsrE
 }
 
 /**
- * True when a cached record was written by an older keyless local engine
- * (whole-file transcription without per-chunk filler prompts): skipped on
- * read so the asset is re-transcribed once with the current engine. Only
- * keyless-engine records (`faster-whisper-*` models) are stale-checked;
- * sidecar/custom-cli transcripts and cloud records are engine-independent.
+ * True when a cached record was written by an older keyless local engine:
+ * skipped on read so the asset is re-transcribed once with the current
+ * engine. Only keyless-engine records (`faster-whisper-*` models and
+ * Parakeet records) are stale-checked; sidecar/custom-cli transcripts and
+ * cloud records are engine-independent.
  */
 export function isStaleLocalEngineRecord(doc: TranscriptDocument): boolean {
-  return (
-    doc.provider === "local" &&
-    typeof doc.model === "string" &&
-    doc.model.startsWith("faster-whisper-") &&
-    doc.engineRev !== LOCAL_ASR_ENGINE_REVISION
-  );
+  if (doc.provider !== "local" || doc.engineRev === LOCAL_ASR_ENGINE_REVISION) return false;
+  if (typeof doc.model === "string" && doc.model.startsWith("faster-whisper-")) return true;
+  return doc.engine === "parakeet" || doc.model === PARAKEET_MODEL_ID;
 }
 
 /**
@@ -98,6 +95,13 @@ export interface TranscribeResult {
   transcript: TranscriptDocument;
   projected_sequence_words: TimedWordToken[];
   notes?: string[];
+  /**
+   * Parakeet dropped-gap retry outcome for this transcription: how many
+   * speech-like gaps were re-decoded and how many words that recovered.
+   * Present only on fresh Parakeet transcripts; absent on cache hits and
+   * non-Parakeet paths.
+   */
+  parakeet_gap_retry?: { gaps: number; words: number };
 }
 
 /** Language named by a transcript cache key, or null for generic keys. */
@@ -278,6 +282,7 @@ export async function transcribeLibraryAsset(options: {
   try {
     let doc: TranscriptDocument | null = null;
     let staleFallback: TranscriptDocument | null = null;
+    let gapRetryTaken: { retry: { gaps: number; words: number }; note: string | null } | null = null;
     if (!options.refresh) {
       let lookupKeys = resolveTranscribeLookupKeys(
         resolvedProvider.source,
@@ -468,6 +473,11 @@ export async function transcribeLibraryAsset(options: {
         });
       }
 
+      // The Parakeet bridge reports its dropped-gap retry out of band (the
+      // local provider return type is owned by providers.ts); consumed here
+      // so the transcribe output carries it. Non-Parakeet runs take null.
+      gapRetryTaken = takeParakeetGapRetry();
+
       // Clamp word & disfluency timestamps to [0, item.probe.duration_ms]
       const maxDurMs = item.probe.duration_ms;
       doc.words = doc.words
@@ -634,6 +644,9 @@ export async function transcribeLibraryAsset(options: {
       requestedAuto && isDeepgramAutoEnglishWithoutFillers(doc)
         ? [DIAGNOSTICS.DEEPGRAM_AUTO_ENGLISH_NO_FILLERS().formatted]
         : [];
+    if (gapRetryTaken?.note) {
+      notes.push(gapRetryTaken.note);
+    }
 
     return {
       handle: item.handle,
@@ -642,6 +655,7 @@ export async function transcribeLibraryAsset(options: {
       transcript: doc,
       projected_sequence_words: projectedWords,
       notes,
+      ...(gapRetryTaken !== null ? { parakeet_gap_retry: { ...gapRetryTaken.retry } } : {}),
     };
   } finally {
     ledger.close();

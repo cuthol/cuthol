@@ -23,8 +23,10 @@ import {
   isParakeetLanguage,
   PARAKEET_LANGUAGES,
   PARAKEET_MODEL_FILES,
+  parakeetTimeouts,
   resetParakeetProbeCache,
   resolveLocalEngine,
+  runLocalAsrBridge,
 } from "../speech/local_engine.js";
 import { transcribeWithLocalProvider } from "../speech/providers.js";
 import { describeLocalEngines } from "../speech/provider_select.js";
@@ -323,6 +325,132 @@ test("whisper transcript records provider, engine and word shape", async () => {
     rmRetrySync(dir);
     fs.rmSync(whisperRoot, { recursive: true, force: true });
     fs.rmSync(emptyCache, { recursive: true, force: true });
+  }
+});
+
+test("parakeet limits scale with audio length, floor at 280 s, capped", () => {
+  assert.deepEqual(parakeetTimeouts(undefined), { cliTimeoutMs: 280_000, spawnTimeoutMs: 290_000 });
+  assert.deepEqual(parakeetTimeouts(0), { cliTimeoutMs: 280_000, spawnTimeoutMs: 290_000 });
+  // 6 min clip: 1.5 x 360 s = 540 s, spawn 10 s over the CLI limit.
+  assert.deepEqual(parakeetTimeouts(360_000), { cliTimeoutMs: 540_000, spawnTimeoutMs: 550_000 });
+  // 25:41 talk: 1.5 x 1541 s, under the 4 x cap of 6164 s.
+  assert.deepEqual(parakeetTimeouts(1_541_000), { cliTimeoutMs: 2_311_500, spawnTimeoutMs: 2_321_500 });
+  // Short audio never drops below the floor.
+  assert.deepEqual(parakeetTimeouts(60_000), { cliTimeoutMs: 280_000, spawnTimeoutMs: 290_000 });
+});
+
+function makeParakeetArgvRecorder(dir: string): { bin: string; argvFile: string; transcript: string } {
+  const transcript = path.join(dir, "words.json");
+  fs.writeFileSync(
+    transcript,
+    JSON.stringify([{ text: "hello", start: 0.1, end: 0.4 }]),
+    "utf8"
+  );
+  const argvFile = path.join(dir, "argv.jsonl");
+  fs.writeFileSync(argvFile, "", "utf8");
+  const bin = path.join(dir, "fake_hf.mjs");
+  fs.writeFileSync(
+    bin,
+    `import fs from "node:fs";\n` +
+      `fs.appendFileSync(process.env.CUTHOL_TEST_ARGV_RECORD, JSON.stringify(process.argv.slice(2)) + "\\n", "utf8");\n` +
+      `process.stdout.write(JSON.stringify({ transcriptPath: process.env.CUTHOL_TEST_TRANSCRIPT }));\n`,
+    "utf8"
+  );
+  return { bin, argvFile, transcript };
+}
+
+function readRecordedTimeout(argvFile: string, index = 0): number {
+  const lines = fs.readFileSync(argvFile, "utf8").trim().split("\n");
+  const argv = JSON.parse(lines[index]) as string[];
+  const flag = argv.indexOf("--timeout");
+  assert.ok(flag >= 0, "fake bin saw --timeout");
+  return Number(argv[flag + 1]);
+}
+
+test("parakeet --timeout passed to HyperFrames grows with the audio duration", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-eng-timeout-"));
+  const fakeCache = makeFakeParakeetCache();
+  const { bin, argvFile, transcript } = makeParakeetArgvRecorder(dir);
+  const saved = {
+    CUTHOL_HYPERFRAMES_BIN: process.env.CUTHOL_HYPERFRAMES_BIN,
+    CUTHOL_TEST_ARGV_RECORD: process.env.CUTHOL_TEST_ARGV_RECORD,
+    CUTHOL_TEST_TRANSCRIPT: process.env.CUTHOL_TEST_TRANSCRIPT,
+    CUTHOL_PARAKEET_TIMEOUT_MS: process.env.CUTHOL_PARAKEET_TIMEOUT_MS,
+    HYPERFRAMES_CACHE_DIR: process.env.HYPERFRAMES_CACHE_DIR,
+  };
+  process.env.CUTHOL_HYPERFRAMES_BIN = bin;
+  process.env.CUTHOL_TEST_ARGV_RECORD = argvFile;
+  process.env.CUTHOL_TEST_TRANSCRIPT = transcript;
+  delete process.env.CUTHOL_PARAKEET_TIMEOUT_MS;
+  process.env.HYPERFRAMES_CACHE_DIR = fakeCache;
+  try {
+    const sixMin = runLocalAsrBridge({
+      audioFilePath: path.join(dir, "missing.wav"),
+      language: "en",
+      engine: "parakeet",
+      durationMs: 360_000,
+    });
+    assert.equal(sixMin.engine, "parakeet");
+    assert.ok(sixMin.words.length > 0);
+    const long = runLocalAsrBridge({
+      audioFilePath: path.join(dir, "missing.wav"),
+      language: "en",
+      engine: "parakeet",
+      durationMs: 1_541_000,
+    });
+    assert.equal(long.engine, "parakeet");
+    assert.equal(readRecordedTimeout(argvFile, 0), 540_000);
+    assert.equal(readRecordedTimeout(argvFile, 1), 2_311_500);
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    resetParakeetProbeCache();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(fakeCache, { recursive: true, force: true });
+  }
+});
+
+test("parakeet timeout reports itself, never the model re-download", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-eng-ptimeout-"));
+  const fakeCache = makeFakeParakeetCache();
+  const bin = path.join(dir, "sleepy_hf.mjs");
+  fs.writeFileSync(bin, `await new Promise((r) => setTimeout(r, 60_000));\n`, "utf8");
+  const saved = {
+    CUTHOL_HYPERFRAMES_BIN: process.env.CUTHOL_HYPERFRAMES_BIN,
+    CUTHOL_PARAKEET_TIMEOUT_MS: process.env.CUTHOL_PARAKEET_TIMEOUT_MS,
+    HYPERFRAMES_CACHE_DIR: process.env.HYPERFRAMES_CACHE_DIR,
+  };
+  process.env.CUTHOL_HYPERFRAMES_BIN = bin;
+  process.env.CUTHOL_PARAKEET_TIMEOUT_MS = "1000";
+  process.env.HYPERFRAMES_CACHE_DIR = fakeCache;
+  try {
+    assert.throws(
+      () =>
+        runLocalAsrBridge({
+          audioFilePath: path.join(dir, "missing.wav"),
+          language: "en",
+          engine: "parakeet",
+          durationMs: 360_000,
+        }),
+      (err: unknown) => {
+        const text = `${(err as Error).message}`;
+        assert.match(text, /CUTHOL-G239/);
+        assert.match(text, /timed out after 1 s on 6\.0 min of audio/);
+        assert.match(text, /--engine whisper/);
+        assert.doesNotMatch(text, /re-download|setup --local-speech --apply/);
+        return true;
+      }
+    );
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    resetParakeetProbeCache();
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(fakeCache, { recursive: true, force: true });
   }
 });
 

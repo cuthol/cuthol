@@ -735,6 +735,29 @@ export function resolveSelectedCutCandidates(params: {
         );
         continue;
       }
+      // A withheld automatic cut listed with a `cf_<asset>_<start>_<end>` id
+      // is not in the review list of this call: cut it from the id's span.
+      const tailFallback = /^cf_(?:[a-z0-9_]+_)?(\d+)_(\d+)$/i.exec(lower);
+      if (!foundCF && tailFallback) {
+        const sMs = parseInt(tailFallback[1], 10);
+        const eMs = parseInt(tailFallback[2], 10);
+        if (eMs > sMs) {
+          const assetPart = lower.slice(3, lower.length - `_${sMs}_${eMs}`.length);
+          const ownerClip =
+            targetClips.find((c) => c.asset_handle.toLowerCase() === assetPart) ?? targetClips[0];
+          if (ownerClip && !selectedReviewIds.has(lower)) {
+            selectedReviewIds.add(lower);
+            addSelectedSpan(customSelectedSpansByAsset, ownerClip.asset_handle, {
+              kind: "filler",
+              candidateId: lower,
+              label: lower,
+              startMs: sMs,
+              endMs: eMs,
+            });
+            continue;
+          }
+        }
+      }
     }
 
     if (lower.startsWith("ta_")) {

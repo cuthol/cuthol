@@ -99,6 +99,7 @@ export interface ContextualFillerReviewCandidate {
   gap_before_ms: number;
   gap_after_ms: number;
   context: string;
+  reason?: string;
 }
 
 export interface PreservedUntranscribedSpan {
@@ -137,8 +138,8 @@ export interface DialogueCleanupResult {
   preserved_untranscribed: PreservedUntranscribedSpan[];
   tail_without_audio_candidates: TailWithoutAudioCandidate[];
   edge_placement?: {
-    filler: { cuts: number; edges_moved: number; edges_still_loud: number };
-    repetition: { cuts: number; edges_moved: number; edges_still_loud: number };
+    filler: { cuts: number; edges_moved: number; edges_still_loud: number; listed?: number };
+    repetition: { cuts: number; edges_moved: number; edges_still_loud: number; listed?: number };
     pause: { cuts: number; edges_moved: number; edges_still_loud: number; edges_refined?: number };
   };
   edge_placement_summary?: string;
@@ -231,6 +232,7 @@ export function cleanupClipDialogue(options: {
     globalSilenceFloorVal,
     edgePlacement,
     edgePlacementSummary,
+    listedReviewCandidates,
   } = planTargetClipsCuts({
     sequence,
     targetClips,
@@ -252,12 +254,14 @@ export function cleanupClipDialogue(options: {
     selectedSpansByAsset: customSelectedSpansByAsset,
   });
 
+  const mergedReviewCandidates = [...allReviewCandidates, ...listedReviewCandidates];
+
   const buildTrace = (rev: number): DecisionTrace =>
     buildCleanupTrace({
       rev,
       allPlannedCuts,
       allRejectedNearMisses,
-      allReviewCandidates,
+      allReviewCandidates: mergedReviewCandidates,
       allRepetitionCandidates: nearRepetitionCandidates,
       distantRepetitionCount: distantRepetitionCandidates.length,
       preservedUntranscribedCount: preservedUntranscribed.length,
@@ -278,9 +282,9 @@ export function cleanupClipDialogue(options: {
   const clipIdsList = targetClips.map((c) => c.id);
   // The edge-placement aggregate only exists when filler/repetition cuts were
   // planned: pause-only projects keep byte-identical output.
-  const hasWordCuts = allPlannedCuts.some(
-    (c) => c.kind === "filler" || c.kind === "repetition"
-  );
+  const hasWordCuts =
+    allPlannedCuts.some((c) => c.kind === "filler" || c.kind === "repetition") ||
+    listedReviewCandidates.length > 0;
   const edgePlacementFields = hasWordCuts
     ? { edge_placement: edgePlacement, edge_placement_summary: edgePlacementSummary }
     : {};
@@ -295,7 +299,7 @@ export function cleanupClipDialogue(options: {
       saved_source_ms: totalSavedSourceMs,
       saved_sequence_ms: totalSavedSeqMs,
       cuts: allPlannedCuts,
-      review_candidates: allReviewCandidates,
+      review_candidates: mergedReviewCandidates,
       repetition_candidates: nearRepetitionCandidates,
       distant_repetition_candidates: distantRepetitionCandidates,
       preserved_untranscribed: preservedUntranscribed,
@@ -317,7 +321,7 @@ export function cleanupClipDialogue(options: {
     silentRemnantClipsToRemove,
     totalSavedSourceMs,
     totalSavedSeqMs,
-    allReviewCandidates,
+    allReviewCandidates: mergedReviewCandidates,
     allRepetitionCandidates: nearRepetitionCandidates,
     distantRepetitionCandidates,
     preservedUntranscribed,

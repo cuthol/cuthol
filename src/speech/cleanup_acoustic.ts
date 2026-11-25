@@ -469,10 +469,15 @@ export interface AutomaticEdgeRefinement {
 
 /**
  * Acoustic edge placement for automatic filler/repetition cuts.
- * Each edge moves within ±100 ms (5 ms steps): to the lowest-energy 20 ms
- * window below the speech threshold, preferring the move that grows kept
- * audio into the removed part; otherwise to the lowest-energy 10 ms point.
- * Edges never move into a neighbouring kept word (a 20 ms margin is kept).
+ * The two edges of a cut are placed as a pair (5 ms steps, up to 250 ms
+ * from the raw ASR edges): both kept edges quiet and the cut at least
+ * 80 ms, covering the above-threshold island the ASR filler belongs to.
+ * An edge may move past a kept word's ASR start/end only while every
+ * 25 ms window of that kept word it removes stays below the speech
+ * threshold (the ASR onset/offset was early/late); an above-threshold
+ * part of a kept word is never removed. When no pair satisfies "both
+ * quiet", the previous per-edge best-effort placement is kept.
+ * Pause cuts never reach this function.
  */
 export function refineAutomaticCutEdgesAcoustically(options: {
   rawStart: number;
@@ -497,15 +502,13 @@ export function refineAutomaticCutEdgesAcoustically(options: {
     stillLoudBefore: loud(rawStart, "before"),
     stillLoudAfter: loud(rawEnd, "after"),
   });
-  if (
-    !acousticProfile ||
-    !acousticProfile.has_silence_variation ||
-    rawEnd <= rawStart ||
-    (loud(rawStart, "before") === false && loud(rawEnd, "after") === false)
-  ) {
-    // Edges already quiet (or no profile): keep raw ASR edges byte-identical.
+  if (!acousticProfile || !acousticProfile.has_silence_variation || rawEnd <= rawStart) {
+    // No profile (or empty span): keep raw ASR edges byte-identical.
     return fallback();
   }
+  // Note: quiet raw edges do NOT return early here: the pair search below
+  // still runs so the cut covers the spoken island (a one-frame ASR span
+  // often sits fully in silence while missing the voiced island nearby).
   const winMs = acousticProfile.window_ms;
   const winDbs = acousticProfile.window_dbfs;
 
@@ -526,6 +529,153 @@ export function refineAutomaticCutEdgesAcoustically(options: {
     }
   }
 
+  const pairThr = edgeSpeechThresholdDbfs(acousticProfile);
+  const PAIR_SEARCH_MS = 250;
+  const PAIR_MIN_CUT_MS = 80;
+  const pairEnergy = (s: number, e: number): number =>
+    energyDbOverRange(winDbs, winMs, s, e);
+  const pairKeptQuiet = (edgeMs: number, side: "before" | "after"): boolean => {
+    const span =
+      side === "before" ? { s: edgeMs - 20, e: edgeMs } : { s: edgeMs, e: edgeMs + 20 };
+    return pairEnergy(span.s, span.e) <= pairThr;
+  };
+  // True when every overlapped 25 ms window stays below the speech
+  // threshold (soft kept-word trespass: the ASR onset/offset was early/late).
+  const spanAllQuiet = (s: number, e: number): boolean => {
+    if (e <= s) return true;
+    const w0 = Math.max(0, Math.floor(s / winMs));
+    const w1 = Math.min(winDbs.length, Math.ceil(e / winMs));
+    for (let w = w0; w < w1; w++) {
+      const ws = w * winMs;
+      const we = ws + winMs;
+      if (we <= s || ws >= e) continue;
+      if (winDbs[w] > pairThr) return false;
+    }
+    return true;
+  };
+  // Above-threshold island the ASR filler belongs to: the active run
+  // overlapping the raw span, else the nearest run between the neighbours.
+  const islandOf = (): { start: number; end: number } | null => {
+    const lo = prevKept ? Math.min(prevKept.source_start_ms, rawStart) : clip.source_in_ms;
+    const hi = nextKept ? Math.max(nextKept.source_end_ms, rawEnd) : clip.source_out_ms;
+    const w0 = Math.max(0, Math.floor(lo / winMs));
+    const w1 = Math.min(winDbs.length, Math.ceil(hi / winMs));
+    const runs: Array<{ start: number; end: number }> = [];
+    let rs = -1;
+    for (let w = w0; w <= w1; w++) {
+      const active = w < w1 && winDbs[w] > pairThr;
+      if (active && rs < 0) rs = w;
+      if (!active && rs >= 0) {
+        runs.push({ start: rs * winMs, end: w * winMs });
+        rs = -1;
+      }
+    }
+    if (runs.length === 0) return null;
+    const overlapping = runs.filter((r) => r.end > rawStart && r.start < rawEnd);
+    if (overlapping.length > 0) {
+      return {
+        start: Math.min(...overlapping.map((r) => r.start)),
+        end: Math.max(...overlapping.map((r) => r.end)),
+      };
+    }
+    let best = runs[0];
+    let bestDist = Math.min(Math.abs(rawStart - best.end), Math.abs(rawEnd - best.start));
+    for (const r of runs) {
+      const d = Math.min(Math.abs(rawStart - r.end), Math.abs(rawEnd - r.start));
+      if (d < bestDist) {
+        bestDist = d;
+        best = r;
+      }
+    }
+    return { start: best.start, end: best.end };
+  };
+  const island = islandOf();
+  const islandCovered = (s: number, e: number): boolean =>
+    !island || (s <= island.start && island.end <= e);
+  // A candidate edge may move past a kept word's ASR start/end only while
+  // every 25 ms window of that kept word it removes stays below threshold.
+  const edgeTrespassOk = (p: number, side: "before" | "after"): boolean => {
+    if (prevKept && side === "before" && p < prevKept.source_end_ms) {
+      if (p < prevKept.source_start_ms) return false;
+      if (!spanAllQuiet(p, prevKept.source_end_ms)) return false;
+    }
+    if (nextKept && side === "before" && p > nextKept.source_start_ms) {
+      if (!spanAllQuiet(nextKept.source_start_ms, p)) return false;
+    }
+    if (prevKept && side === "after" && p < prevKept.source_end_ms) {
+      if (!spanAllQuiet(p, prevKept.source_end_ms)) return false;
+    }
+    if (nextKept && side === "after" && p > nextKept.source_start_ms) {
+      if (p > nextKept.source_end_ms) return false;
+      if (!spanAllQuiet(nextKept.source_start_ms, p)) return false;
+    }
+    return true;
+  };
+  const placePair = (): AutomaticEdgeRefinement | null => {
+    if (rawEnd - rawStart < 1) return null;
+    const startLo = Math.max(
+      clip.source_in_ms,
+      rawStart - PAIR_SEARCH_MS,
+      prevKept ? prevKept.source_start_ms : clip.source_in_ms
+    );
+    const startHi = Math.min(rawStart + PAIR_SEARCH_MS, rawEnd);
+    const endLo = Math.max(rawEnd - PAIR_SEARCH_MS, rawStart);
+    const endHi = Math.min(
+      clip.source_out_ms,
+      rawEnd + PAIR_SEARCH_MS,
+      nextKept ? nextKept.source_end_ms : clip.source_out_ms
+    );
+    if (startHi < startLo || endHi < endLo) return null;
+    const starts: number[] = [];
+    for (let p = Math.ceil(startLo / 5) * 5; p <= startHi; p += 5) {
+      if (!edgeTrespassOk(p, "before") || !pairKeptQuiet(p, "before")) continue;
+      starts.push(p);
+    }
+    const ends: number[] = [];
+    for (let p = Math.ceil(endLo / 5) * 5; p <= endHi; p += 5) {
+      if (!edgeTrespassOk(p, "after") || !pairKeptQuiet(p, "after")) continue;
+      ends.push(p);
+    }
+    if (starts.length === 0 || ends.length === 0) return null;
+    const grownPreferred = (p: number, side: "before" | "after"): boolean =>
+      side === "before" ? p >= rawStart : p <= rawEnd;
+    let best: { s: number; e: number; pref: number; energy: number; dist: number } | null = null;
+    for (const s of starts) {
+      for (const e of ends) {
+        if (e - s < PAIR_MIN_CUT_MS) continue;
+        if (!islandCovered(s, e)) continue;
+        const pref =
+          (preferKeptIntact
+            ? (grownPreferred(s, "before") ? 1 : 0) + (grownPreferred(e, "after") ? 1 : 0)
+            : (!grownPreferred(s, "before") ? 1 : 0) + (!grownPreferred(e, "after") ? 1 : 0));
+        const energy = pairEnergy(s - 20, s) + pairEnergy(e, e + 20);
+        const dist = Math.abs(s - rawStart) + Math.abs(e - rawEnd);
+        if (
+          !best ||
+          pref > best.pref ||
+          (pref === best.pref && energy < best.energy - 1e-9) ||
+          (pref === best.pref && Math.abs(energy - best.energy) <= 1e-9 && dist < best.dist)
+        ) {
+          best = { s, e, pref, energy, dist };
+        }
+      }
+    }
+    if (!best) return null;
+    return {
+      startMs: best.s,
+      endMs: best.e,
+      movedStart: best.s !== rawStart,
+      movedEnd: best.e !== rawEnd,
+      stillLoudBefore: loud(best.s, "before"),
+      stillLoudAfter: loud(best.e, "after"),
+    };
+  };
+  const paired = pairKeptQuiet(rawStart, "before") &&
+    pairKeptQuiet(rawEnd, "after") &&
+    islandCovered(rawStart, rawEnd)
+    ? fallback()
+    : placePair();
+  if (paired) return paired;
   const placeEdge = (rawEdge: number, side: "before" | "after"): number => {
     // Preferred direction: grow kept audio into the removed part when
     // preferKeptIntact, else trim kept audio first (fallback direction).
@@ -663,6 +813,7 @@ export function summarizeJoinEdgeLoudness(options: {
   }
   const loud: LoudJoinEdge[] = [];
   let total = 0;
+  let loudJoins = 0;
   for (const [asset, list] of byAsset) {
     const profile = profileByHandle.get(asset);
     if (!profile) continue;
@@ -677,28 +828,32 @@ export function summarizeJoinEdgeLoudness(options: {
       const leftDb = maxDbAt(profile.window_dbfs, profile.window_ms, prev.source_out_ms - 20, prev.source_out_ms);
       const rightDb = maxDbAt(profile.window_dbfs, profile.window_ms, next.source_in_ms, next.source_in_ms + 20);
       const id = `ex_${asset}_${prev.source_out_ms}_${next.source_in_ms}`;
-      if (leftDb > thr) {
+      const leftLoud = leftDb > thr;
+      const rightLoud = rightDb > thr;
+      if (leftLoud) {
         loud.push({ join_id: id, asset_handle: asset, source_ms: prev.source_out_ms, edge: "left", max_dbfs: Number(leftDb.toFixed(2)) });
       }
-      if (rightDb > thr) {
+      if (rightLoud) {
         loud.push({ join_id: id, asset_handle: asset, source_ms: next.source_in_ms, edge: "right", max_dbfs: Number(rightDb.toFixed(2)) });
       }
+      if (leftLoud || rightLoud) loudJoins++;
     }
   }
   const worst = loud
     .slice()
     .sort((a, b) => b.max_dbfs - a.max_dbfs)
     .slice(0, 5);
-  const share = total === 0 ? 0 : loud.length / (total * 2);
+  // Share per join: a join is loud when any of its kept edges is loud.
+  const share = total === 0 ? 0 : loudJoins / total;
   const pct = Math.round(share * 100);
   const worstTxt =
     worst.length === 0
       ? "none loud"
       : worst.map((w) => `${w.join_id}@${w.edge} ${w.source_ms}ms`).join(", ");
-  const summary_line = `join edges: ${loud.length}/${total * 2} loud (${pct}%) across ${total} joins; worst: ${worstTxt}`;
+  const summary_line = `join edges: ${loudJoins}/${total} loud joins (${pct}%) across ${total} joins; worst: ${worstTxt}`;
   return {
     total_joins: total,
-    loud_joins: loud.length,
+    loud_joins: loudJoins,
     loud_share: Math.round(share * 10000) / 10000,
     worst,
     summary_line,
