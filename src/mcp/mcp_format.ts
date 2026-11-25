@@ -4,7 +4,7 @@ import path from "node:path";
 import { CUTHOL_PROGRESS_PREFIX } from "../core/progress.js";
 import { formatLiveNotesBlock } from "../live/live_inbox.js";
 import {
-  ActionSpec, findActionSpec,
+  ActionSpec, ACTION_SPECS, findActionSpec,
   TOOL_SPECS
 } from "./catalog.js";
 
@@ -124,31 +124,134 @@ function collectDiagnostics(env: Record<string, unknown>): DiagnosticLike[] {
 
 /** CLI-style suggestions ("cuthol brief --lens overview") translated to tool-call wording. */
 export function translateCliHint(text: string): string {
-  const flagToArg = (flags: string): string[] =>
-    flags
-      .trim()
-      .split(/\s(?=--)/)
-      .filter(Boolean)
-      .map((f) => {
-        const [k, ...rest] = f.replace(/^--/, "").split(/[ =]/);
-        return rest.length ? `${k.replace(/-/g, "_")}=${rest.join(" ")}` : `${k.replace(/-/g, "_")}=true`;
-      });
-  const withCommands = text.replace(
-    /'?cuthol ([a-z]+)(?: ([a-z][a-z-]*))?(?: (list|undo|redo|tag))?((?: --[a-z-]+(?:[ =](?!--)[^\s'|]+(?<!,))?)*)'?/g,
-    (match: string, group: string, action: string | undefined, sub: string | undefined, flags: string) => {
-      if (!TOOL_SPECS.some((t) => t.name === group)) return match;
-      let act = action ? action.replace(/-/g, "_") : undefined;
-      if (group === "workspace" && action === "journal") act = sub && sub !== "list" ? sub : "journal";
-      const actionDef = act ? findActionSpec(group, act) : undefined;
-      const args = flagToArg(flags ?? "");
-      const parts = [actionDef?.action ? `action=${actionDef.action}` : act ? `action=${act}` : null, ...args];
-      return `${group}(${parts.filter(Boolean).join(", ")})`;
+  return text.replace(/'?cuthol [^'`\n]*'?/g, translateOneCliCommand);
+}
+
+/** Splits a CLI fragment on whitespace, keeping `"quoted values"` together (quotes stripped). */
+function splitCliTokens(fragment: string): string[] {
+  const out: string[] = [];
+  const re = /"([^"]*)"|[^\s]+/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(fragment)) !== null) out.push(m[1] !== undefined ? m[1] : m[0]);
+  return out;
+}
+
+function formatHintValue(value: string | string[]): string {
+  const raw = Array.isArray(value) ? value.join(",") : value;
+  return /[\s,=()'"`]/.test(raw) ? `"${raw.replace(/"/g, "'")}"` : raw;
+}
+
+/**
+ * Maps one positional CLI argument to a parameter.
+ *
+ * A positional maps to a parameter only when the spec marks one (`positional: true`,
+ * e.g. `color look list`), or when the action has exactly one required parameter left
+ * unsatisfied by the flags (e.g. `extension enable karma`: only `name` is required).
+ * Otherwise the whole original CLI text is kept unchanged rather than emitting a
+ * broken call, because an unmapped positional would be lost or misattributed.
+ */
+function mapHintPositionals(
+  spec: ActionSpec,
+  flagNames: Set<string>,
+  positionals: string[]
+): { name: string; value: string | string[] } | null {
+  if (positionals.length === 0) return null;
+  const positionalMarked = spec.params.filter((p) => p.positional);
+  if (positionalMarked.length === 1) {
+    const target = positionalMarked[0];
+    if (target.enum && positionals.some((t) => !target.enum!.includes(t))) return null;
+    if (target.type === "string_list") return { name: target.name, value: positionals };
+    return positionals.length === 1 ? { name: target.name, value: positionals[0] } : null;
+  }
+  if (positionalMarked.length > 1) return null;
+  const missing = spec.params.filter((p) => p.required && !flagNames.has(p.name) && !p.mcpOnly);
+  // Exactly one required parameter means the positional is unambiguous; more than one
+  // (e.g. `spine split` with both `clip` and `at` required but no `--at` flag) or none
+  // (e.g. `color set <item>` where `item` is optional) keeps the original text.
+  // Note `spine split sp_02 --at …` still maps: `at` is satisfied by the flag, so only
+  // `clip` is missing.
+  if (missing.length !== 1) return null;
+  const target = missing[0];
+  if (target.enum && positionals.some((t) => !target.enum!.includes(t))) return null;
+  if (target.type === "string_list") return { name: target.name, value: positionals };
+  return positionals.length === 1 ? { name: target.name, value: positionals[0] } : null;
+}
+
+function translateOneCliCommand(match: string): string {
+  const quoted = match.length >= 2 && match.startsWith("'") && match.endsWith("'");
+  const inner = quoted ? match.slice(1, -1) : match;
+  const tokens = splitCliTokens(inner);
+  if (tokens[0] !== "cuthol" || tokens.length < 2) return match;
+  // Spec-driven match: the argv prefix decides the tool, so CLI groups without their own
+  // MCP tool still resolve (`cuthol settings list` -> `workspace`, `cuthol live wait` ->
+  // `workspace`, `cuthol export timeline` -> `render`). Unknown groups stay unchanged.
+  const candidates = ACTION_SPECS.filter((a) => a.argv.length > 0 && a.argv[0] === tokens[1]);
+  if (candidates.length === 0) return match;
+  const tool = candidates[0].tool;
+  if (!TOOL_SPECS.some((t) => t.name === tool)) return match;
+  // Longest argv-prefix match resolves multi-word sub-actions to the action the MCP
+  // server really exposes (`workspace changes show` -> `changes_show`,
+  // `spine envelope point add` -> `envelope_point_add`, `color look` -> `look`).
+  const words = tokens.slice(1);
+  let spec: ActionSpec | undefined;
+  let rest: string[] = [];
+  for (let len = words.length - 1; len >= 0 && !spec; len--) {
+    const prefix = words.slice(1, 1 + len);
+    spec = candidates.find((a) => a.argv.length - 1 === len && a.argv.slice(1).every((w, i) => w === prefix[i]));
+    if (spec) rest = words.slice(1 + len);
+  }
+  if (!spec) {
+    const named = words.length > 1 ? findActionSpec(tool, words[1].replace(/-/g, "_")) : findActionSpec(tool, null);
+    if (!named) return match;
+    spec = named;
+    rest = words.slice(words.length > 1 ? 2 : 1);
+  }
+  const flagValues = new Map<string, string>();
+  const positionals: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    const tok = rest[i];
+    if (tok.startsWith("--") && tok.length > 2) {
+      const body = tok.slice(2);
+      const eq = body.indexOf("=");
+      let key: string;
+      let value: string | undefined;
+      if (eq >= 0) {
+        key = body.slice(0, eq);
+        value = body.slice(eq + 1);
+      } else {
+        key = body;
+        const next = rest[i + 1];
+        if (next !== undefined && !next.startsWith("--")) {
+          value = next;
+          i++;
+        }
+      }
+      const norm = key.replace(/-/g, "_");
+      const param = spec.params.find((p) => (p.flag ?? p.name).replace(/-/g, "_") === norm);
+      if (!param || param.mcpOnly) return match;
+      const val = value ?? "true";
+      if (param.enum && !param.enum.includes(val)) return match;
+      flagValues.set(param.name, val);
+    } else if (tok === "--") {
+      return match;
+    } else {
+      positionals.push(tok);
     }
-  );
-  // Remaining standalone flags such as '--expect-rev 10'
-  return withCommands.replace(/'?--([a-z][a-z-]*)(?:[ =]([^\s'|]+(?<!,)))?'?/g, (_m, k: string, v: string | undefined) =>
-    v ? `${k.replace(/-/g, "_")}=${v}` : k.replace(/-/g, "_")
-  );
+  }
+  const mapped = mapHintPositionals(spec, new Set(flagValues.keys()), positionals);
+  if (positionals.length > 0 && !mapped) return match;
+  if (mapped) {
+    if (Array.isArray(mapped.value)) flagValues.set(mapped.name, mapped.value.join(","));
+    else flagValues.set(mapped.name, mapped.value);
+  }
+  const parts: string[] = [];
+  if (spec.action) parts.push(`action=${spec.action}`);
+  for (const prm of spec.params) {
+    const v = flagValues.get(prm.name);
+    if (v === undefined || prm.mcpOnly) continue;
+    parts.push(`${prm.name}=${formatHintValue(prm.type === "string_list" ? v.split(",") : v)}`);
+  }
+  return `${tool}(${parts.join(", ")})`;
 }
 
 const ENVELOPE_KEYS = new Set([

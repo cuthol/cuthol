@@ -56,6 +56,8 @@ export interface CompiledRenderPlan {
 export interface CompileSequenceOptions {
   activeWindowMs?: [number, number];
   singleFrameAtMs?: number;
+  /** Early window trim for single-frame compiles; defaults to on. */
+  singleFrameEarlyTrim?: boolean;
   minDurationMs?: number;
   workers?: number;
   useGpu?: boolean;

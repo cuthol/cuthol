@@ -21,6 +21,7 @@ import { BT709_TO_YUVA420P, BT709_SETPARAMS } from "./compile_color.js";
 import { buildCueOverlayEnableExpr, cueOverlapsWindowMs } from "../core/frame_time.js";
 import { resolveCueStartMs } from "../core/timeline.js";
 import { escapeFfmpegFilterPath } from "./compile_filters.js";
+import { applySingleFrameEarlyTrim } from "./single_frame_trim.js";
 import type { VideoGraphCompileContext } from "./compiler.js";
 import { compileTypographyAssFile } from "./ass_generator.js";
 
@@ -189,11 +190,15 @@ function overlayOwnLayerTextCue(ctx: VideoGraphCompileContext, lane: LaneSpec, c
   // The `format=rgba` must live inside the lavfi graph: a bare `-f lavfi -i color=…`
   // decodes through a format without alpha and the canvas arrives opaque (the layer would
   // cover the footage with black); inside the graph the transparent alpha survives.
+  // Bounded canvas: an unbounded lavfi input never ends and ffmpeg can hang while
+  // closing after the last frame. The layer only needs to cover the cue, so the canvas
+  // lasts the cue plus two frames (same `+ 2/fps` form as the looped still `-t`).
+  const canvasDurSec = (cue.duration_ms / 1000 + 2 / fps).toFixed(3);
   const colorIdx = ctx.addInput([
     "-f",
     "lavfi",
     "-i",
-    `color=c=black@0:s=${renderWidth}x${renderHeight}:r=${fps},format=rgba`,
+    `color=c=black@0:s=${renderWidth}x${renderHeight}:r=${fps}:d=${canvasDurSec},format=rgba`,
   ]);
   // Straight (non-premultiplied) alpha: transparent canvas, text burned on it, fx on the item
   // (which carries alpha), then placement for a moving cue, then the overlay. Timestamps
@@ -237,6 +242,30 @@ function overlayOwnLayerTextCue(ctx: VideoGraphCompileContext, lane: LaneSpec, c
     overlayY = chain.yExpr;
   }
   vFilters.push(`setpts=PTS+${cueStartSec}/TB`, BT709_TO_YUVA420P);
+  // Early window trim on the finished chain. The trailing `setpts` only shifts
+  // by a constant (no STARTPTS anchoring), so it never rejects the trim.
+  if (
+    ctx.compileOptions?.singleFrameAtMs !== undefined &&
+    ctx.compileOptions?.singleFrameEarlyTrim !== false
+  ) {
+    const startFrame = Math.max(0, Math.floor(((ctx.winLeadStartMs - cueStartMs) * fps) / 1000));
+    const winEndPadMs = ctx.winEndMs + 2000 / Math.max(1, fps);
+    const endFrame = Math.max(startFrame + 1, Math.ceil(((winEndPadMs - cueStartMs) * fps) / 1000));
+    // The trim anchor is the entry right after the cue-local `setpts=PTS-STARTPTS`,
+    // derived from the chain so head edits cannot silently move it.
+    const timingEndIdx = vFilters.indexOf("setpts=PTS-STARTPTS") + 1;
+    const early = applySingleFrameEarlyTrim({
+      entries: vFilters,
+      timingEndIdx,
+      startFrame,
+      endFrame,
+      fps,
+    });
+    if (early.applied) {
+      vFilters.length = 0;
+      vFilters.push(...early.entries);
+    }
+  }
   const layerPad = `[v_txtfx_${cue.id}]`;
   ctx.filterChains.push(`[${colorIdx}:v]${vFilters.join(",")}${layerPad}`);
   const nextPad = `[vc_${++ctx.vStepCounter}]`;

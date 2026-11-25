@@ -29,6 +29,16 @@ export function createApi() {
     token,
     url,
     get: async (p) => (await fetch(url(p))).json(),
+    getWithStatus: async (p) => {
+      const res = await fetch(url(p));
+      let body = null;
+      try {
+        body = await res.json();
+      } catch {
+        body = null;
+      }
+      return { status: res.status, body };
+    },
     post: async (p, body) => (await fetch(url(p), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body ?? {}) })).json(),
   };
 }

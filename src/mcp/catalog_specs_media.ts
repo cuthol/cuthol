@@ -112,6 +112,7 @@ export const MEDIA_ACTION_SPECS: ActionSpec[] = [
       p.speechLang(),
       { name: "provider", type: "string", description: "ASR provider: deepgram (default), local (sidecar transcript or CUTHOL_LOCAL_ASR_CMD), or ext:<extension>. Without it, CUTHOL_ASR_PROVIDER, then the project default (speech.providers), then deepgram." },
       { name: "refresh", type: "boolean", description: "Skip the transcript cache and re-transcribe, replacing the stored record." },
+      { name: "keyterms", type: "string_list", description: "Names and terms the recogniser would misspell (e.g. ['Cuthol','HyperFrames']); forwarded as provider keyterms/hotwords. A transcript cached without keyterms is not reused when keyterms are given." },
       p.verbose(),
     ],
   },

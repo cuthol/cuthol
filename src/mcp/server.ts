@@ -31,6 +31,7 @@ import {
   WORKSPACELESS_TOOLS,
 } from "./catalog.js";
 import { formatWorkspaceOpenSummary, loadSequence } from "../core/workspace.js";
+import { listExtensions } from "../extensions/ext_registry.js";
 import {
   buildSkillsCatalogSection,
   formatSkillsHint,
@@ -49,6 +50,7 @@ import { repairToolArguments, readRevision, tryParseJson, formatEnvelopeCompact,
 import { drainLiveInbox, formatLiveNotesBlock, LIVE_NOTES_HEADER } from "../live/live_inbox.js";
 import { McpReloadRelay, prependNoteToResponse, RELAY_CHILD_ENV } from "./mcp_reload.js";
 export { repairToolArguments, readWorkspaceRevision, translateCliHint, resolveActionSpecForCommand, formatEnvelopeCompact } from "./mcp_format.js";
+export { buildCliArgv } from "./catalog.js";
 export type { FormatEnvelopeCompactOptions } from "./mcp_format.js";
 
 
@@ -478,8 +480,23 @@ export class CutholMcpServer {
         }
         const { sequence } = loadSequence(dir);
         const extNote = this.externalChangesNote(dir);
+        let installedExtensions;
+        try {
+          installedExtensions = listExtensions(dir).extensions.map((e) => ({
+            name: e.name,
+            enabled: e.enabled,
+            description: e.description,
+          }));
+        } catch {
+          installedExtensions = (sequence.extensions ?? []).map((e) => ({
+            name: e.name,
+            enabled: true,
+            description: "",
+          }));
+        }
         const summary = formatWorkspaceOpenSummary(sequence, {
           verbose: false,
+          installedExtensions,
           ...(extNote ? { noticeLine: extNote } : {}),
         });
         // Opening runs in-process (no CLI envelope), so queued Live notes are delivered here.

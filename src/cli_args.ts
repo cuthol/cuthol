@@ -190,6 +190,8 @@ export const KNOWN_CLI_FLAGS = new Set([
   "gates",
   "lang",
   "provider",
+  "keyterm",
+  "keyterms",
   "voice",
   "model",
   "speed",
@@ -308,6 +310,15 @@ export function parsePropsJsonFlag(raw: string, commandName: string): Record<str
   );
 }
 
+// Value flags that accumulate across repeats (`--keyterm a --keyterm b` ===
+// `--keyterm a,b`). Every other value flag keeps last-wins.
+const REPEATABLE_FLAGS = new Set(["keyterm", "keyterms"]);
+
+function setValueFlag(flags: Record<string, string | boolean>, key: string, value: string): void {
+  const prev = flags[key];
+  flags[key] = REPEATABLE_FLAGS.has(key) && typeof prev === "string" ? `${prev},${value}` : value;
+}
+
 export function parseArgv(argv: string[]): ParsedArgs {
   const positionals: string[] = [];
   const flags: Record<string, string | boolean> = {};
@@ -318,7 +329,7 @@ export function parseArgv(argv: string[]): ParsedArgs {
       const eqIdx = token.indexOf("=");
       if (eqIdx > 0) {
         const key = token.slice(2, eqIdx);
-        flags[key] = token.slice(eqIdx + 1);
+        setValueFlag(flags, key, token.slice(eqIdx + 1));
       } else {
         const key = token.slice(2);
         const next = argv[i + 1];
@@ -330,7 +341,7 @@ export function parseArgv(argv: string[]): ParsedArgs {
             flags[key] = true;
           }
         } else if (next && !next.startsWith("--")) {
-          flags[key] = next;
+          setValueFlag(flags, key, next);
           i++;
         } else {
           flags[key] = true;
@@ -356,6 +367,26 @@ export function strFlag(flags: Record<string, string | boolean>, name: string, f
     );
   }
   return fallback;
+}
+
+/** Comma-separated list flag with a singular alias (`--keyterm a,b` / `--keyterms a,b`). */
+export function strListFlag(
+  flags: Record<string, string | boolean>,
+  name: string,
+  alias?: string
+): string[] | undefined {
+  const parts: string[] = [];
+  for (const key of alias ? [name, alias] : [name]) {
+    const val = flags[key];
+    if (typeof val === "string") {
+      parts.push(...val.split(",").map((s) => s.trim()).filter(Boolean));
+    } else if (val === true) {
+      throw new CutholError(
+        DIAGNOSTICS.UNKNOWN_FLAG(`--${key} (missing value)`, "cli", `--${key} <value>`)
+      );
+    }
+  }
+  return parts.length > 0 ? parts : undefined;
 }
 
 export function numFlag(flags: Record<string, string | boolean>, name: string, fallback?: number): number | undefined {

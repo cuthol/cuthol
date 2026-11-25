@@ -21,8 +21,12 @@ process.env.CUTHOL_SKILLS_AUTO = "0";
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-movingtext-"));
 
+test.after(() => fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+
 function ffmpeg(args: string[], cwd?: string): void {
-  const proc = spawnSync("ffmpeg", args, { encoding: "utf8", windowsHide: true, cwd });
+  const proc = spawnSync("ffmpeg", args, { encoding: "utf8", windowsHide: true, cwd, timeout: 300_000 });
+  if (proc.error && (proc.error as NodeJS.ErrnoException).code === "ETIMEDOUT")
+    assert.fail(`ffmpeg timed out after 300 s: ffmpeg ${args.slice(0, 6).join(" ")}…`);
   assert.equal(proc.status, 0, proc.stderr || proc.stdout || "ffmpeg failed");
 }
 
@@ -434,4 +438,56 @@ test("moving text: pixel fx and motion together render and the ink travels", () 
   const plan = compileSequenceRenderPlan(sequence, paths, "draft_480p");
   assert.ok(plan.filterComplex.includes("colorchannelmixer=aa=") === false, "opacity untouched without envelope");
   assert.ok(plan.filterComplex.includes(`[v_txtfx_${cueId}]`), "fx+moving text keeps its own layer");
+});
+
+/** Split a plan's flat inputArgs into one group per `-i` input. */
+function planInputGroups(plan: { inputArgs: string[] }): string[][] {
+  const groups: string[][] = [];
+  let cur: string[] = [];
+  const args = plan.inputArgs;
+  for (let i = 0; i < args.length; i++) {
+    cur.push(args[i]);
+    if (args[i] === "-i") {
+      cur.push(args[++i]);
+      groups.push(cur);
+      cur = [];
+    }
+  }
+  if (cur.length > 0) groups.push(cur);
+  return groups;
+}
+
+function assertNoUnboundedInput(plan: { inputArgs: string[]; fps: number }): void {
+  for (const g of planInputGroups(plan)) {
+    const src = g[g.indexOf("-i") + 1] ?? "";
+    const isLavfi = g.includes("lavfi");
+    if (isLavfi) assert.ok(src.includes("d="), `lavfi input must carry d= (bounded): ${src}`);
+    if (g.includes("-loop")) assert.ok(g.includes("-t"), `looped input must carry -t (bounded): ${src}`);
+  }
+}
+
+test("moving text: own-layer canvas input is bounded (cue seconds + 2/fps)", () => {
+  for (const [name, fx] of [["moving", true], ["fx", false]] as Array<[string, boolean]>) {
+    const wsDir = path.join(TMP, `ws_canvas_${name}`);
+    const { cueId } = makeProject(wsDir);
+    if (fx) {
+      setEnvelopes(wsDir, cueId, [xEnvelope(-30, 30, 3000)]);
+    } else {
+      updateSequenceInPlace(wsDir, (seq) => {
+        for (const lane of seq.lanes) {
+          const cue = lane.cues.find((c) => c.id === cueId);
+          if (cue) cue.fx = [{ id: "fx_01", kind: "ffmpeg", params: { filter: "eq=brightness=0" } }] as never;
+        }
+      });
+    }
+    const { sequence, paths } = loadSequence(wsDir);
+    const plan = compileSequenceRenderPlan(sequence, paths, "draft_480p");
+    assert.ok(plan.filterComplex.includes(`[v_txtfx_${cueId}]`), `${name} cue must take its own layer`);
+    const groups = planInputGroups(plan);
+    const canvas = groups.find((g) => (g[g.indexOf("-i") + 1] ?? "").startsWith("color=c=black@0"));
+    assert.ok(canvas, `${name} cue must have a canvas input`);
+    const want = `:d=${(3000 / 1000 + 2 / plan.fps).toFixed(3)}`;
+    assert.ok(canvas!.join(" ").includes(want), `${name} canvas must carry ${want}: ${canvas!.join(" ")}`);
+    assertNoUnboundedInput(plan);
+  }
 });

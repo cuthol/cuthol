@@ -179,6 +179,7 @@ export function analyzeAssetWaveform(options: {
   handle: string;
   bins?: number;
   pngOutPath?: string;
+  skipSequenceRef?: boolean;
 }): WaveformAnalysisResult {
   const { paths, sequence } = loadSequence(options.workspaceDir);
   const item = sequence.library.find((x) => x.handle === options.handle);
@@ -445,7 +446,7 @@ export function analyzeAssetWaveform(options: {
 
     const refId = `wave_${item.digest_sha256.slice(0, 8)}`;
     const current = sequence.library.find((x) => x.handle === item.handle);
-    if (current && current.analysis_refs.waveform !== refId) {
+    if (!options.skipSequenceRef && current && current.analysis_refs.waveform !== refId) {
       updateSequenceInPlace(options.workspaceDir, (seq) => {
         const target = seq.library.find((x) => x.handle === item.handle);
         if (target) {

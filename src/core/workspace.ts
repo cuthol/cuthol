@@ -34,6 +34,7 @@ import {
   restoreForJournalTraversal,
 } from "./external_changes.js";
 import { assertLiveWriteAllowed } from "../live/live_lock.js";
+import { listExtensions } from "../extensions/ext_registry.js";
 
 export const SEQUENCE_FILENAME = "cuthol.sequence.json";
 export const STATE_DIRNAME = ".cuthol";
@@ -742,9 +743,22 @@ export function tagCurrentRevision(dir: string, tag: string): JournalEntry {
   return entry;
 }
 
+export interface WorkspaceOpenExtensionItem {
+  name: string;
+  enabled: boolean;
+  description: string;
+}
+
 export function formatWorkspaceOpenSummary(
   seq: CutholSequence,
-  options: { verbose?: boolean; maxItems?: number; noticeLine?: string } = {}
+  options: {
+    verbose?: boolean;
+    maxItems?: number;
+    noticeLine?: string;
+    /** Precomputed installed-extension list (same data `extension list` reports).
+     * When omitted, only the enabled extensions stored on the sequence are shown. */
+    installedExtensions?: WorkspaceOpenExtensionItem[];
+  } = {}
 ): string {
   const maxItems = options.maxItems ?? 3;
   const totalMs = computeSequenceDurationMs(seq);
@@ -825,7 +839,24 @@ export function formatWorkspaceOpenSummary(
     );
   }
 
-  if (seq.extensions && seq.extensions.length > 0) {
+  // Installed extensions (name, enabled-for-this-project, one-line description —
+  // the same data `extension list` reports). Enabled state comes from the
+  // `seq.extensions` name set; anything installed but not mounted is disabled.
+  const installed = options.installedExtensions;
+  if (installed) {
+    if (installed.length === 0) {
+      lines.push(`- Extensions (0 installed): _(none)_`);
+    } else {
+      lines.push(
+        `- Extensions (${installed.length} installed): ${installed
+          .map(
+            (e) =>
+              `\`${e.name}\` (${e.enabled ? "enabled" : "disabled"}${e.description ? ` — ${e.description}` : ""})`
+          )
+          .join(", ")}`
+      );
+    }
+  } else if (seq.extensions && seq.extensions.length > 0) {
     lines.push(
       `- Enabled Extensions (${seq.extensions.length}): ${seq.extensions.map((e) => `\`${e.name}\` v${e.version}`).join(", ")}`
     );
@@ -889,6 +920,7 @@ export function openWorkspaceSummary(
   }>;
   spine_omitted?: number;
   lanes_summary: Array<{ id: string; kind: string; cues_count: number; muted: boolean }>;
+  extensions: WorkspaceOpenExtensionItem[];
   summary_text: string;
   external_changes?: ExternalChangesSummary;
 } {
@@ -924,6 +956,24 @@ export function openWorkspaceSummary(
   }));
   const spineOmitted = Math.max(0, sequence.spine.clips.length - spineSlice.length);
 
+  // Same data `extension list` reports: every installed extension with its
+  // enabled-for-this-project state and one-line description. Never throws:
+  // on any listing failure fall back to the enabled refs stored on the sequence.
+  let installedExtensions: WorkspaceOpenExtensionItem[];
+  try {
+    installedExtensions = listExtensions(dir).extensions.map((e) => ({
+      name: e.name,
+      enabled: e.enabled,
+      description: e.description,
+    }));
+  } catch {
+    installedExtensions = (sequence.extensions ?? []).map((e) => ({
+      name: e.name,
+      enabled: true,
+      description: "",
+    }));
+  }
+
   return {
     workspace_dir: paths.rootDir,
     project_id: sequence.meta.project_id,
@@ -946,8 +996,10 @@ export function openWorkspaceSummary(
       cues_count: l.cues.length,
       muted: l.muted,
     })),
+    extensions: installedExtensions,
     summary_text: formatWorkspaceOpenSummary(sequence, {
       ...options,
+      installedExtensions,
       ...(externalNotice ? { noticeLine: externalNotice } : {}),
     }),
     ...(externalChanges && externalNotice

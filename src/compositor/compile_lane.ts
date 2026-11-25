@@ -42,6 +42,7 @@ import {
   buildSubpixelScaleOrPanFilters,
   buildSeekableMediaInput,
 } from "./compile_filters.js";
+import { applySingleFrameEarlyTrim } from "./single_frame_trim.js";
 import {
   buildItemFxStage,
   emitFxStageParts,
@@ -881,6 +882,29 @@ function buildVisualAssetCueFilterChain(
   );
   const cueSpatialFilters = vFilters.slice(cueSpatialFilterStartIdx);
   vFilters.push(`settb=AVTB`, `setpts=PTS-STARTPTS+${cueStartSec}/TB`);
+  // Early window trim on the finished chain (before the chain's own end-of-chain
+  // window trim below, which is never examined or moved). The trailing
+  // PTS-anchoring `setpts` rejects the trim: dropping frames before it would
+  // shift every later timestamp, so footage/still cues keep today's path.
+  if (
+    ctx.compileOptions?.singleFrameAtMs !== undefined &&
+    ctx.compileOptions?.singleFrameEarlyTrim !== false
+  ) {
+    const startFrame = Math.max(0, Math.floor(((winLeadStartMs - cueStartMs) * fps) / 1000));
+    const winEndPadMs = winEndMs + 2000 / Math.max(1, fps);
+    const endFrame = Math.max(startFrame + 1, Math.ceil(((winEndPadMs - cueStartMs) * fps) / 1000));
+    const early = applySingleFrameEarlyTrim({
+      entries: vFilters,
+      timingEndIdx: cueSpatialFilterStartIdx,
+      startFrame,
+      endFrame,
+      fps,
+    });
+    if (early.applied) {
+      vFilters.length = 0;
+      vFilters.push(...early.entries);
+    }
+  }
   if (activeWin && (cueStartMs < winLeadStartMs - 1e-3 || cueEndMs > winEndMs + 1e-3)) {
     vFilters.push(`trim=start=${winLeadStartSec}:end=${winEndPadSec}`);
   }
@@ -1021,16 +1045,18 @@ function compileAssetLaneCue(
     const srcInSec = cueSeek ? cueSeek.localSrcInSec : (srcInMs / 1000).toFixed(3);
     const srcOutSec = cueSeek ? cueSeek.localSrcOutSec : (srcOutMs / 1000).toFixed(3);
     const inIdx = isStill
-      ? ctx.addInput([
-          "-loop",
-          "1",
-          "-framerate",
-          String(fps),
-          "-t",
-          (cue.duration_ms / 1000 + 2 / fps).toFixed(3),
-          "-i",
-          absAssetPath,
-        ])
+      ? compileOptions?.singleFrameAtMs !== undefined
+        ? ctx.addInput(["-framerate", String(fps), "-i", absAssetPath])
+        : ctx.addInput([
+            "-loop",
+            "1",
+            "-framerate",
+            String(fps),
+            "-t",
+            (cue.duration_ms / 1000 + 2 / fps).toFixed(3),
+            "-i",
+            absAssetPath,
+          ])
       : ctx.addInput(cueSeek!.inputArgs);
 
     const { vFilters, cueSpatialFilters, xExpr, yExpr } = buildVisualAssetCueFilterChain(ctx, {

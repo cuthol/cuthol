@@ -19,6 +19,7 @@ import { computeSceneThumbKey, isCompIgnoredFile, sceneThumbFile, COMP_IGNORE_DI
 import { LiveProxyManager, routeProxyRequest } from "./live_proxy.js";
 import { routeLiveCompRequest } from "./live_comp_serve.js";
 import { routeLiveFrameRequest } from "./live_frame.js";
+import { routeLiveWaveformRequest } from "./live_waveform.js";
 import { handleLiveNotesPost, routeLiveCoordsRequest } from "./live_notes_api.js";
 import { routeLiveColorRequest } from "./live_color_api.js";
 import { getSettingsView, routeLiveSettingsRequest } from "./live_settings_api.js";
@@ -766,6 +767,10 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
       }
       if (url.pathname === "/api/frame" && req.method === "GET") {
         routeLiveFrameRequest(root, req, res, Number(url.searchParams.get("at")));
+        return;
+      }
+      if (url.pathname.startsWith("/api/waveform/") && req.method === "GET") {
+        routeLiveWaveformRequest(root, req, res, decodeURIComponent(url.pathname.slice("/api/waveform/".length)));
         return;
       }
       if (url.pathname.startsWith("/comp/") && req.method === "GET") {

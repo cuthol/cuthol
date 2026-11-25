@@ -23,10 +23,14 @@ process.env.CUTHOL_SKILLS_AUTO = "0";
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-textfx-"));
 
+test.after(() => fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+
 type CueFx = CutholSequence["lanes"][number]["cues"][number]["fx"];
 
 function ffmpeg(args: string[], cwd?: string): void {
-  const proc = spawnSync("ffmpeg", args, { encoding: "utf8", windowsHide: true, cwd });
+  const proc = spawnSync("ffmpeg", args, { encoding: "utf8", windowsHide: true, cwd, timeout: 300_000 });
+  if (proc.error && (proc.error as NodeJS.ErrnoException).code === "ETIMEDOUT")
+    assert.fail(`ffmpeg timed out after 300 s: ffmpeg ${args.slice(0, 6).join(" ")}…`);
   assert.equal(proc.status, 0, proc.stderr || proc.stdout || "ffmpeg failed");
 }
 

@@ -35,8 +35,12 @@ process.env.CUTHOL_SKILLS_AUTO = "0";
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-fxstage-"));
 
+test.after(() => fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+
 function ffmpeg(args: string[], cwd?: string): { status: number; stderr: string } {
-  const proc = spawnSync("ffmpeg", args, { encoding: "utf8", windowsHide: true, cwd });
+  const proc = spawnSync("ffmpeg", args, { encoding: "utf8", windowsHide: true, cwd, timeout: 300_000 });
+  if (proc.error && (proc.error as NodeJS.ErrnoException).code === "ETIMEDOUT")
+    assert.fail(`ffmpeg timed out after 300 s: ffmpeg ${args.slice(0, 6).join(" ")}…`);
   return { status: proc.status ?? 1, stderr: proc.stderr ?? "" };
 }
 
@@ -270,8 +274,10 @@ function psnr(fileA: string, fileB: string, pixFmt: string, size: string): strin
       "-lavfi", "[0:v][1:v]psnr",
       "-f", "null", "-",
     ],
-    { encoding: "utf8", windowsHide: true }
+    { encoding: "utf8", windowsHide: true, timeout: 300_000 }
   );
+  if (proc.error && (proc.error as NodeJS.ErrnoException).code === "ETIMEDOUT")
+    assert.fail(`ffmpeg timed out after 300 s (psnr probe)`);
   assert.equal(proc.status, 0, `psnr failed: ${proc.stderr}`);
   const m = /average:([0-9.inf]+)/.exec(proc.stderr);
   assert.ok(m, `no PSNR in output: ${proc.stderr.slice(-400)}`);
@@ -416,7 +422,7 @@ test("alpha_keep wrapper: duration-changing effect keeps its length and alpha", 
       "-vf", "alphaextract,signalstats",
       "-f", "null", "-",
     ],
-    { encoding: "utf8", windowsHide: true }
+    { encoding: "utf8", windowsHide: true, timeout: 300_000 }
   );
   assert.equal(alphaMean.status, 0, `alpha probe failed`);
 });

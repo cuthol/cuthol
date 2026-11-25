@@ -281,6 +281,23 @@ export interface LiveIncidentReport {
 /** Environment variable the live server sets when it runs a human edit through the CLI. */
 export const LIVE_ACTOR_ENV = "CUTHOL_LIVE_ACTOR";
 
+/**
+ * One audio asset's waveform for the Live timeline (`GET /api/waveform/<handle>`).
+ *
+ * The snapshot never carries peaks: the window fetches each audio asset's
+ * waveform once (lazily, when an audio cue is first drawn) and slices the bins
+ * covering each cue's source range itself. `peaks` holds one normalized peak
+ * per bin (0..1, the same scale `drawWave` paints).
+ */
+export interface LiveWaveformResponse {
+  ok: true;
+  handle: string;
+  /** Bin count the server chose from the asset duration (~20 bins/s, clamped to 16..2000). */
+  bins_count: number;
+  duration_ms: number;
+  peaks: number[];
+}
+
 /** Graded-preview LUT payload of GET /api/color/lut and POST /api/color/preview. */
 export interface LiveColorLut {
   ok: true;

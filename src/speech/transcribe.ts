@@ -9,6 +9,7 @@
  */
 
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
@@ -67,12 +68,46 @@ function isPoisonedCacheRecord(key: string, docLanguage: string | undefined): bo
   return !sameLanguage(keyLang, docLanguage ?? "");
 }
 
+/** Trimmed keyterms, or null when none were given (cache keys stay byte-identical). */
+function normalizeKeyterms(keyterms: string[] | undefined): string[] | null {
+  if (!keyterms) return null;
+  const terms = keyterms.map((t) => t.trim()).filter(Boolean);
+  return terms.length > 0 ? terms : null;
+}
+
+/**
+ * A transcript stored by a keyterm-scoped run carries the terms on the
+ * document itself (extra JSON property, old records simply lack it). The
+ * `latest` pointer is shared by plain and keyterm runs so downstream readers
+ * always see the newest transcript, while a plain transcribe lookup skips
+ * marked records so a keyterm-biased transcript never serves a request that
+ * asked for none.
+ */
+interface KeytermMarkedTranscript extends TranscriptDocument {
+  keyterms?: string[];
+}
+
+function isKeytermMarkedTranscript(doc: TranscriptDocument): boolean {
+  const marked = doc as KeytermMarkedTranscript;
+  return Array.isArray(marked.keyterms) && marked.keyterms.length > 0;
+}
+
+function markTranscriptWithKeyterms(doc: TranscriptDocument, keyterms: string[]): TranscriptDocument {
+  return { ...doc, keyterms } as TranscriptDocument;
+}
+
 function resolveTranscribeLookupKeys(
   providerSource: string,
   cacheLangKey: string,
   lang: string,
-  requestedAuto: boolean
+  requestedAuto: boolean,
+  hasKeyterms: boolean
 ): string[] {
+  if (hasKeyterms) {
+    // Keyterms change the request, so only the keyterm-suffixed record may
+    // hit: a transcript cached without keyterms must never be returned.
+    return [cacheLangKey];
+  }
   if (requestedAuto) {
     // Auto-detection accepts whatever the transcript's language is; `auto` and
     // `latest` always point at the most recent transcript. An explicit provider
@@ -126,7 +161,17 @@ export async function transcribeLibraryAsset(options: {
           }).extension
         )
       : provider;
-  const cacheLangKey = `${providerKeyPrefix}:${lang}`;
+  // Keyterms are part of the transcription request, so they are part of the
+  // cache key: a short hash suffix keeps the `<provider>:<lang>` shape (and
+  // its language parsing) intact. Without keyterms every key is exactly as
+  // before, so existing cached transcripts keep hitting and are never
+  // re-transcribed for money; only an explicit keyterm list makes a new key.
+  const keyterms = normalizeKeyterms(options.keyterms);
+  const keytermSuffix = keyterms
+    ? `:k${createHash("sha256").update(keyterms.join("\0")).digest("hex").slice(0, 12)}`
+    : "";
+  const cacheProviderPrefix = `${providerKeyPrefix}${keytermSuffix}`;
+  const cacheLangKey = `${cacheProviderPrefix}:${lang}`;
 
   const ledger = new MediaLedger(paths.ledgerFile);
 
@@ -137,12 +182,16 @@ export async function transcribeLibraryAsset(options: {
         resolvedProvider.source,
         cacheLangKey,
         lang,
-        requestedAuto
+        requestedAuto,
+        keyterms !== null
       );
       for (const k of lookupKeys) {
         const candidate = ledger.getTranscript<TranscriptDocument>(item.digest_sha256, k);
         if (!candidate) continue;
         if (isPoisonedCacheRecord(k, candidate.language)) continue;
+        // A plain request never reads a keyterm-made record: when only a
+        // keyterm transcript is cached the lookup misses and transcribes.
+        if (keyterms === null && isKeytermMarkedTranscript(candidate)) continue;
         doc = candidate;
         break;
       }
@@ -154,7 +203,13 @@ export async function transcribeLibraryAsset(options: {
       // under the requested one when they differ.
       const hitLang = (doc.language ?? "").trim().toLowerCase();
       if (hitLang && hitLang !== "auto" && hitLang !== "latest") {
-        ledger.setTranscript(item.digest_sha256, hitLang, doc);
+        // A keyterm-scoped hit is re-keyed under its own scoped key only,
+        // never under a bare key another request could read.
+        ledger.setTranscript(
+          item.digest_sha256,
+          keyterms ? `${cacheProviderPrefix}:${hitLang}` : hitLang,
+          doc
+        );
       }
     } else {
       wasCached = false;
@@ -181,7 +236,7 @@ export async function transcribeLibraryAsset(options: {
             audioFilePath: absMediaPath,
             language: lang,
             durationMs: item.probe.duration_ms,
-            keyterms: options.keyterms,
+            keyterms: keyterms ?? undefined,
           })
         ).doc;
       } else if (provider === "local") {
@@ -189,7 +244,7 @@ export async function transcribeLibraryAsset(options: {
           audioFilePath: absMediaPath,
           language: lang,
           durationMs: item.probe.duration_ms,
-          keyterms: options.keyterms,
+          keyterms: keyterms ?? undefined,
         });
       } else {
         // Extract clean 16 kHz mono WAV into `.cuthol/blobs/` for fast upload to Deepgram
@@ -255,7 +310,7 @@ export async function transcribeLibraryAsset(options: {
           audioFilePath: wavForAsr,
           language: lang,
           durationMs: item.probe.duration_ms,
-          keyterms: options.keyterms,
+          keyterms: keyterms ?? undefined,
         });
       }
 
@@ -363,14 +418,28 @@ export async function transcribeLibraryAsset(options: {
         throw new CutholError(DIAGNOSTICS.ASR_LANGUAGE_REQUIRED(provider));
       }
       const realLang = detectedRaw && detectedRaw !== "auto" ? detectedRaw : lang;
-      ledger.setTranscript(item.digest_sha256, `${providerKeyPrefix}:${realLang}`, doc);
-      ledger.setTranscript(item.digest_sha256, realLang, doc);
-      ledger.setTranscript(item.digest_sha256, "auto", doc);
-      ledger.setTranscript(item.digest_sha256, "latest", doc);
-      if (requestedAuto) {
-        // The provider's own latest auto detection, so an explicit provider
-        // hits its own auto cache without ever reading another provider's.
-        ledger.setTranscript(item.digest_sha256, cacheLangKey, doc);
+      if (keyterms) {
+        // Keyterm-scoped transcripts stay under scoped keys only, plus the
+        // shared `latest` pointer (marked, so plain transcribe lookups skip
+        // it while downstream readers use the newest transcript either way).
+        // Bare/auto keys are never written here: a plain request must miss
+        // when no plain record exists.
+        const marked = markTranscriptWithKeyterms(doc, keyterms);
+        ledger.setTranscript(item.digest_sha256, `${cacheProviderPrefix}:${realLang}`, marked);
+        ledger.setTranscript(item.digest_sha256, "latest", marked);
+        if (requestedAuto) {
+          ledger.setTranscript(item.digest_sha256, cacheLangKey, marked);
+        }
+      } else {
+        ledger.setTranscript(item.digest_sha256, `${providerKeyPrefix}:${realLang}`, doc);
+        ledger.setTranscript(item.digest_sha256, realLang, doc);
+        ledger.setTranscript(item.digest_sha256, "auto", doc);
+        ledger.setTranscript(item.digest_sha256, "latest", doc);
+        if (requestedAuto) {
+          // The provider's own latest auto detection, so an explicit provider
+          // hits its own auto cache without ever reading another provider's.
+          ledger.setTranscript(item.digest_sha256, cacheLangKey, doc);
+        }
       }
     }
 
@@ -432,6 +501,18 @@ export function loadCachedTranscriptForAsset(
             "local:en",
           ];
 
+    // Newest-first: when the shared `latest` pointer names a transcript in the
+    // requested language it is the newest transcript of the asset, so it
+    // wins over older language-keyed records (e.g. plain then keyterm fix).
+    // Poisoned records are still skipped; other languages never match here.
+    if (normLang !== "auto") {
+      const newest = ledger.getTranscript<TranscriptDocument>(item.digest_sha256, "latest");
+      if (newest && !isPoisonedCacheRecord("latest", newest.language)) {
+        if (sameLanguage((newest.language ?? "").trim().toLowerCase(), normLang)) {
+          return newest;
+        }
+      }
+    }
     for (const key of candidateKeys) {
       const candidate = ledger.getTranscript<TranscriptDocument>(item.digest_sha256, key);
       if (!candidate) continue;

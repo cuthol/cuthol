@@ -28,6 +28,8 @@ import { appendSpineClip, setItemEnvelope } from "../sequence/spine_edit.js";
 
 const TEST_TMP = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-cr-"));
 
+test.after(() => fs.rmSync(TEST_TMP, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+
 let cachedMedia: string | null = null;
 function ensureMedia(): string {
   if (cachedMedia && fs.existsSync(cachedMedia)) return cachedMedia;
@@ -58,8 +60,10 @@ function ensureMedia(): string {
       "aac",
       out,
     ],
-    { encoding: "utf8" }
+    { encoding: "utf8", timeout: 300_000 }
   );
+  if (proc.error && (proc.error as NodeJS.ErrnoException).code === "ETIMEDOUT")
+    assert.fail(`ffmpeg timed out after 300 s (synthetic media)`);
   assert.equal(proc.status, 0, `synthetic media failed: ${proc.stderr}`);
   cachedMedia = out;
   return out;
@@ -252,7 +256,9 @@ test("unreadable Look LUT raises G441", () => {
 test("keyframed colour keeps channel order: a constant warm envelope renders like the static stage", () => {
   // haldclut on planar RGB swaps red and blue in ffmpeg 8.1; the keyframed path must use packed RGB.
   const src = path.join(TEST_TMP, "cr_patch.mkv");
-  const mk = spawnSync("ffmpeg", ["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=0x8C6E5A:s=64x64:d=1", "-frames:v", "1", "-pix_fmt", "yuv420p", "-c:v", "ffv1", src], { encoding: "utf8" });
+  const mk = spawnSync("ffmpeg", ["-y", "-v", "error", "-f", "lavfi", "-i", "color=c=0x8C6E5A:s=64x64:d=1", "-frames:v", "1", "-pix_fmt", "yuv420p", "-c:v", "ffv1", src], { encoding: "utf8", timeout: 300_000 });
+  if (mk.error && (mk.error as NodeJS.ErrnoException).code === "ETIMEDOUT")
+    assert.fail(`ffmpeg timed out after 300 s (color patch)`);
   assert.equal(mk.status, 0, mk.stderr);
   const run = (wsDir: string): number[] => {
     const { sequence } = loadSequence(wsDir);
@@ -265,7 +271,9 @@ test("keyframed colour keeps channel order: a constant warm envelope renders lik
     );
     assert.equal(filters.length, 1);
     const args = ["-v", "error", "-i", src, ...inputs.flat(), "-filter_complex", `[0:v]${filters[0]},scale=in_color_matrix=bt709:in_range=tv,format=rgb24`, "-frames:v", "1", "-f", "rawvideo", "-"];
-    const p = spawnSync("ffmpeg", args, { cwd: wsDir, encoding: "buffer" });
+    const p = spawnSync("ffmpeg", args, { cwd: wsDir, encoding: "buffer", timeout: 300_000 });
+    if (p.error && (p.error as NodeJS.ErrnoException).code === "ETIMEDOUT")
+      assert.fail(`ffmpeg timed out after 300 s (color stage probe)`);
     assert.equal(p.status, 0, String(p.stderr));
     const b = p.stdout;
     let r = 0, g = 0, bl = 0;

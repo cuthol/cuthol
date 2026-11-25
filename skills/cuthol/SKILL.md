@@ -90,9 +90,12 @@ whenever the spine or timing changes.
 An extension turns something built once (a look, a recurring graphic, a set,
 a transition, a prep workflow) into one command for later videos.
 
-- At the start of a session run `extension(action="list")`. Before writing a
-  composition, effect, transition or multi-step routine from scratch, check
-  whether an installed extension already does it; if so, use it.
+- At the start of a session read the extension list from `workspace.open`
+  (it reports every installed extension: name, enabled for this project or
+  not, one-line description). Before writing a composition, effect,
+  transition or multi-step routine from scratch, check whether an installed
+  extension already does it; if so, use it. Call `extension(action="list")`
+  only when you need details beyond that list.
 - When you build something the user is likely to reuse (e.g. they ask for the
   same thing a second time, or mention a series or channel), mention once per
   session that it can become an extension and that this makes their next

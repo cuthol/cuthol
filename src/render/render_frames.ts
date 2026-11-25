@@ -191,7 +191,7 @@ function buildSingleFrameFfmpegPlanFromCompiledPlan(
       const leadFrame = Math.max(0, Math.floor(Math.max(0, frameIdx - 2) / 3) * 3);
       const leadStartSec = (leadFrame / fps).toFixed(6);
       const hfSingleFrameRe = new RegExp(
-        `\\[${idx}:v\\]([\\s\\S]*?)tpad=stop_mode=clone:stop_duration=[\\d.]+,settb=AVTB,setpts=PTS-STARTPTS\\+([\\d.]+)/TB(\\[v_hf_[^\\]]+\\])`
+        `\\[${idx}:v\\]([^;]*?)tpad=stop_mode=clone:stop_duration=[\\d.]+,settb=AVTB,setpts=PTS-STARTPTS\\+([\\d.]+)/TB(\\[v_hf_[^\\]]+\\])`
       );
       if (hfSingleFrameRe.test(videoFilterComplex)) {
         // Decode the HyperFrames single-frame PNG once instead of re-decoding via `-loop 1`,
@@ -267,7 +267,7 @@ export function renderMultipleCompositeFramesRgb24(
   paths: WorkspacePaths,
   timestampsMs: number[],
   preset: RenderPreset = "draft_480p",
-  options?: { skipGates?: VerificationGateId[] }
+  options?: { skipGates?: VerificationGateId[]; singleFrameEarlyTrim?: boolean }
 ): Array<{
   rgbBuf: Buffer;
   width: number;
@@ -308,6 +308,7 @@ export function renderMultipleCompositeFramesRgb24(
       activeWindowMs: [exactFrameMs, exactFrameMs + frameDurMs],
       singleFrameAtMs: exactFrameMs,
       includeAudio: false,
+      singleFrameEarlyTrim: options?.singleFrameEarlyTrim,
     });
 
     const bboxTargets: Array<{ bboxPath: string; pngPath: string }> = [];

@@ -114,6 +114,7 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 | `compile_spine_timing.ts`, `compile_spine_color.ts`, `compile_spine_fx.ts`, `compile_spine_mask.ts`, `compile_spine_transition.ts`, `compile_spine_edge.ts` | Stages of the spine clip filter chain: timing / speed ramp, colour, per-clip fx, mask and motion blur, transitions (chain filters + overlay position), edge mode. Stage order is documented at the top of `compile_spine.ts`. |
 | `compile_audio.ts` | The audio graph shared by render and loudness measurement. |
 | `compile_filters.ts`, `compile_color.ts`, `compile_backdrop.ts` | Filter helpers; explicit BT.709 conversions; backdrop slices under compositions. |
+| `single_frame_trim.ts` | Pure helper inserting a frame-number early window trim into a finished single-frame clip/cue chain (with `((in-1)/fps)` counter rewrite). |
 | `hyperframes_bridge.ts` | Facade for everything HyperFrames: |
 | `hf_common.ts` | Package root, local HyperFrames CLI / GSAP lookup, shared types. |
 | `hf_lint.ts` | Lint with memo and severity mapping. |
@@ -195,5 +196,6 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 | `live_inbox.ts` | Notes from the window: write, peek, drain into the next CLI/MCP response (`live_notes`). |
 | `live_server.ts` | Local HTTP/SSE server: state feed, notes, lock, human edits. |
 | `live_window.ts` | Opens the window (app-mode Chromium, else default browser). |
+| `live_waveform.ts` (+ worker) | `GET /api/waveform/<handle>`: per-asset cached waveform peaks for the timeline, analyzed in a worker thread. |
 | `live_config.ts` | Open mode `ask|on|off` (env > project > user). |
 | `ui/` | The window: `app.js` shell + store, one `<region>.js/.css` per panel, `live_client.js` connection. |

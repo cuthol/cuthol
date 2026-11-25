@@ -549,8 +549,91 @@ export function mount(root, ctx) {
     g.restore();
   }
 
+  // Per-asset waveforms fetched from the server (`GET /api/waveform/<handle>`),
+  // keyed by asset handle. The snapshot never carries peaks, and the cue object
+  // (`it.ref`) is never written to: each cue slices the bins covering its own
+  // source range out of its asset's peaks.
+  // Retry policy for failed waveform fetches: a 404 (unknown handle, asset
+  // without audio) is permanent and never retried in this window session;
+  // other failures back off (5 s, then 30 s) and then stop.
+  // states: loading | ready | failed | gone (404) | dead (gave up)
+  function waveRetryDelayMs(fails) {
+    if (fails <= 1) return 5000;
+    if (fails === 2) return 30000;
+    return Infinity;
+  }
+  window.__tlWavePolicy = { retryDelayMs: waveRetryDelayMs };
+  const waveCache = new Map(); // handle -> { state, peaks, bins_count, duration_ms, failedAt, fails }
+  window.__tlWaveStats = { requested: 0, ready: 0 };
+  function wavePeaksForCue(it) {
+    const handle = it.ref?.asset_handle;
+    if (!handle) return null;
+    let rec = waveCache.get(handle);
+    if (rec?.state === "ready") return sliceWaveBins(rec, it);
+    if (!rec) {
+      rec = { state: "loading", peaks: null, bins_count: 0, duration_ms: 0, failedAt: 0, fails: 0 };
+      waveCache.set(handle, rec);
+    } else if (rec.state === "loading" || rec.state === "gone" || rec.state === "dead") {
+      return null;
+    } else if (Date.now() - rec.failedAt < waveRetryDelayMs(rec.fails)) {
+      return null;
+    } else {
+      rec.state = "loading";
+    }
+    window.__tlWaveStats.requested++;
+    const done = typeof ctx.api.getWithStatus === "function"
+      ? ctx.api.getWithStatus(`/api/waveform/${encodeURIComponent(handle)}`)
+      : ctx.api.get(`/api/waveform/${encodeURIComponent(handle)}`).then((body) => ({ status: body?.ok === false ? 500 : 200, body }));
+    done.then(({ status, body }) => {
+      const cur = waveCache.get(handle);
+      if (!cur) return;
+      if (body?.ok && Array.isArray(body.peaks) && body.peaks.length > 0 && body.duration_ms > 0) {
+        cur.state = "ready";
+        cur.peaks = body.peaks;
+        cur.bins_count = body.bins_count;
+        cur.duration_ms = body.duration_ms;
+        window.__tlWaveStats.ready++;
+      } else if (status === 404) {
+        cur.state = "gone";
+        cur.failedAt = Date.now();
+      } else {
+        cur.fails++;
+        cur.failedAt = Date.now();
+        cur.state = waveRetryDelayMs(cur.fails) === Infinity ? "dead" : "failed";
+      }
+      requestDraw();
+    }).catch(() => {
+      const cur = waveCache.get(handle);
+      if (cur) {
+        cur.fails++;
+        cur.failedAt = Date.now();
+        cur.state = waveRetryDelayMs(cur.fails) === Infinity ? "dead" : "failed";
+      }
+    });
+    return null;
+  }
+
+  // Bins covering the cue's source range: the asset waveform spans the whole
+  // asset duration, the cue plays [source_in .. source_out] of it (rate-aware,
+  // mirroring the audio compiler's source mapping).
+  function sliceWaveBins(rec, it) {
+    const n = rec.peaks.length;
+    const dur = rec.duration_ms;
+    const rate = Number.isFinite(it.ref?.playback?.rate) && it.ref.playback.rate > 0 ? it.ref.playback.rate : 1;
+    const srcIn = Math.max(0, it.ref?.source_in_ms ?? 0);
+    const cueDur = Math.max(0, (it.end ?? 0) - (it.start ?? 0));
+    const maxOut = rate === 1 ? srcIn + cueDur : srcIn + Math.round(cueDur * rate);
+    const srcOut = Math.min(dur, it.ref?.source_out_ms ?? maxOut, maxOut);
+    if (!(srcOut > srcIn)) return rec.peaks.length > 0 ? [rec.peaks[0]] : null;
+    const i0 = Math.max(0, Math.min(n - 1, Math.floor((srcIn / dur) * n)));
+    const i1 = Math.max(i0 + 1, Math.min(n, Math.ceil((srcOut / dur) * n)));
+    return rec.peaks.slice(i0, i1);
+  }
+
   // Audio cue: waveform plus a label, with the block outlined so it reads
-  // as a block against the track background even without peak data.
+  // as a block against the track background even without peak data. The
+  // waveform uses the lane's full drawable height (2 px padding top/bottom);
+  // the label is overlaid on a translucent strip so it stays readable.
   function drawAudioCue(g, it, x, y, w, h) {
     g.save();
     g.globalAlpha = 0.6;
@@ -559,14 +642,19 @@ export function mount(root, ctx) {
     roundRect(g, x + 0.5, y + 0.5, w - 1, h - 1, 4);
     g.stroke();
     g.restore();
-    drawWave(g, it, x, y, w, h - 14);
-    if (w > 60) drawItemLabel(g, it.label, x, y + h - 15, w, 14, true);
+    drawWave(g, wavePeaksForCue(it), x, y + 2, w, h - 4);
+    if (w > 60) {
+      g.save();
+      g.fillStyle = "rgba(0, 0, 0, 0.55)";
+      g.fillRect(x + 1, y + h - 15, w - 2, 14);
+      g.restore();
+      drawItemLabel(g, it.label, x, y + h - 15, w, 14, true);
+    }
   }
 
-  function drawWave(g, it, x, y, w, h) {
-    // Peaks come from the waveform analysis once the server exposes it
-    // (contract wish); until then a flat center bar marks audio cues.
-    const peaks = Array.isArray(it.ref?.waveform_peaks) ? it.ref.waveform_peaks : null;
+  function drawWave(g, peaks, x, y, w, h) {
+    // Without peak data (not fetched yet, or the fetch failed) a flat center
+    // bar marks audio cues.
     g.fillStyle = C.wave;
     if (!peaks?.length) {
       g.fillRect(x + 4, y + h / 2 - 1, Math.max(0, w - 8), 2);
@@ -576,7 +664,7 @@ export function mount(root, ctx) {
     const bw = Math.max(1, (w - 8) / n);
     for (let i = 0; i < n; i++) {
       const v = Math.min(1, Math.max(0.03, peaks[i]));
-      const bh = v * (h - 12);
+      const bh = v * h;
       g.fillRect(x + 4 + i * bw, y + h / 2 - bh / 2, Math.max(1, bw - 0.5), bh);
     }
   }

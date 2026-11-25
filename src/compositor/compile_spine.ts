@@ -47,6 +47,7 @@ import {
   buildSubpixelScaleOrPanFilters,
   buildSeekableMediaInput,
 } from "./compile_filters.js";
+import { applySingleFrameEarlyTrim } from "./single_frame_trim.js";
 import {
   PLACEMENT_CHANNELS,
   placementAnimatesAny,
@@ -144,15 +145,24 @@ function buildSpineClipFilterChain(
   const baseCenterY = Math.round((renderHeight - spEffH) / 2);
 
   // Stage 1: timing
-  const vFilters: string[] = buildSpineClipTimingFilters({
-    clip,
-    asset,
-    isStill,
-    fps,
-    srcInSec,
-    srcOutSec,
-    effectiveRate,
-  });
+  const isSingleFrameStill =
+    ctx.compileOptions?.singleFrameAtMs !== undefined && isStill;
+  const timingFilters: string[] = isSingleFrameStill
+    ? [
+        `fps=${fps}:eof_action=pass`,
+        `tpad=stop_mode=clone:stop_duration=${(clip.duration_ms / 1000 + 2 / fps).toFixed(3)}`,
+      ]
+    : buildSpineClipTimingFilters({
+        clip,
+        asset,
+        isStill,
+        fps,
+        srcInSec,
+        srcOutSec,
+        effectiveRate,
+      });
+  const vFilters: string[] = [...timingFilters];
+  const timingEndIdx = vFilters.length;
   // Stage 1b: motion blur (shutter over source frames, before geometry)
   vFilters.push(...buildSpineClipMotionBlurFilters(clip));
   const spSpatialFilterStartIdx = vFilters.length;
@@ -263,6 +273,7 @@ function buildSpineClipFilterChain(
     targetW,
     targetH,
     vFilters,
+    timingEndIdx,
     spSpatialFilterStartIdx,
     clipColorSpec,
     spRgbaIdx,
@@ -299,6 +310,7 @@ function appendSpineClipTransitionsAndScale(
     targetW: number;
     targetH: number;
     vFilters: string[];
+    timingEndIdx: number;
     spSpatialFilterStartIdx: number;
     clipColorSpec: ReturnType<typeof resolveSourceColorSpec>;
     spRgbaIdx: number;
@@ -353,6 +365,7 @@ function appendSpineClipTransitionsAndScale(
     targetW,
     targetH,
     vFilters,
+    timingEndIdx,
     spSpatialFilterStartIdx,
     clipColorSpec,
     spRgbaIdx,
@@ -443,6 +456,31 @@ function appendSpineClipTransitionsAndScale(
 
   const spSpatialFilters = vFilters.slice(spSpatialFilterStartIdx);
   vFilters.push(`settb=AVTB`, `setpts=PTS+${tlInSec}/TB`);
+  // Early window trim on the finished chain (before the chain's own end-of-chain
+  // window trim below, which is never examined or moved). A downstream
+  // PTS-anchoring filter (`setpts` with STARTPTS) rejects the trim: dropping
+  // frames before it would shift every later timestamp.
+  if (
+    ctx.compileOptions?.singleFrameAtMs !== undefined &&
+    ctx.compileOptions?.singleFrameEarlyTrim !== false &&
+    !(outTrans && outTrans.duration_ms > 0) &&
+    !(incomingTransition && incomingTransition.duration_ms > 0)
+  ) {
+    const startFrame = Math.max(0, Math.floor(((winLeadStartMs - clipStartMs) * fps) / 1000));
+    const winEndPadMs = winEndMs + 2000 / Math.max(1, fps);
+    const endFrame = Math.max(startFrame + 1, Math.ceil(((winEndPadMs - clipStartMs) * fps) / 1000));
+    const early = applySingleFrameEarlyTrim({
+      entries: vFilters,
+      timingEndIdx,
+      startFrame,
+      endFrame,
+      fps,
+    });
+    if (early.applied) {
+      vFilters.length = 0;
+      vFilters.push(...early.entries);
+    }
+  }
   if (activeWin && (clipStartMs < winLeadStartMs - 1e-3 || clipEndMs > winEndMs + 1e-3)) {
     vFilters.push(`trim=start=${winLeadStartSec}:end=${winEndPadSec}`);
   }
@@ -629,17 +667,22 @@ export function compileSpineClip(ctx: VideoGraphCompileContext, i: number): void
         allowClipSeek
       );
   // A still image is a single frame: loop it so it covers the whole source range of the clip.
+  // In single-frame compiles the picture is decoded once; `tpad=clone` in the
+  // timing block covers the clip (the looped range is identical content).
+  const singleFrameStill = compileOptions?.singleFrameAtMs !== undefined && isStill;
   const inIdx = isStill
-    ? ctx.addInput([
-        "-loop",
-        "1",
-        "-framerate",
-        String(fps),
-        "-t",
-        (clip.source_out_ms / 1000 + 2 / fps).toFixed(3),
-        "-i",
-        absAssetPath,
-      ])
+    ? singleFrameStill
+      ? ctx.addInput(["-framerate", String(fps), "-i", absAssetPath])
+      : ctx.addInput([
+          "-loop",
+          "1",
+          "-framerate",
+          String(fps),
+          "-t",
+          (clip.source_out_ms / 1000 + 2 / fps).toFixed(3),
+          "-i",
+          absAssetPath,
+        ])
     : ctx.addInput(clipSeek!.inputArgs);
 
   const srcInSec = clipSeek ? clipSeek.localSrcInSec : (clip.source_in_ms / 1000).toFixed(3);

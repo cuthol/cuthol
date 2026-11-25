@@ -8,7 +8,7 @@ import { describeProviderResolution, setProjectProviderDefaults } from "./speech
 import { synthesizeVoiceover } from "./speech/synthesize.js";
 import { transcribeLibraryAsset } from "./speech/transcribe.js";
 import { verifyCleanup } from "./speech/verify_cleanup.js";
-import { boolFlag, numFlag, strFlag } from "./cli_args.js";
+import { boolFlag, numFlag, strFlag, strListFlag } from "./cli_args.js";
 import {
   CLI_NOT_HANDLED,
   CliCommandContext,
@@ -26,6 +26,7 @@ export async function runSpeechCommand(ctx: CliCommandContext): Promise<CliComma
       handle,
       language: strFlag(flags, "lang"),
       provider: strFlag(flags, "provider"),
+      keyterms: strListFlag(flags, "keyterms", "keyterm"),
       refresh: boolFlag(flags, "refresh", false),
     });
     const payload = flags["verbose"]

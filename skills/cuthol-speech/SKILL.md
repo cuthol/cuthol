@@ -28,7 +28,10 @@ search ignores case and diacritics.
 - Transcribe the **asset** (`vid_01`, `aud_01`), not a clip. Words project onto
   every clip and voiceover cue using that asset, and stay correct after trims,
   speed changes and cuts. Check brand names and rare nouns with
-  `library.query(text=…)` first — they are often misheard.
+  `library.query(text=…)` first — they are often misheard. Pass them as
+  `--keyterm <word>` (repeat the flag or comma-separate; MCP: `keyterms=[…]`);
+  they are forwarded to the recogniser as keyterms/hotwords and scoped into
+  the transcript cache key.
 - Providers: `deepgram` (default, needs `DEEPGRAM_API_KEY`), `local`
   (keyless when set up, else a `<file>.transcript.json` sidecar or
   `CUTHOL_LOCAL_ASR_CMD`), or `ext:<extension>` (an extension ASR provider).
