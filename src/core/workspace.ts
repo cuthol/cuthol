@@ -7,9 +7,39 @@
 
 import crypto from "node:crypto";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
-import { syncAllCompositionBridges } from "../compositor/bridge_exporter.js";
 import { CutholError, DIAGNOSTICS } from "./diagnostics.js";
+
+// Heavy commit-path modules stay out of the top-level import graph so that
+// reading commands (which only use workspace_read.js re-exports) never pay
+// for them. They load synchronously on first mutating use via require()
+// (supported for ES modules on Node 22.12+), keeping every call site sync.
+const requireHeavy = createRequire(import.meta.url);
+type BridgeExporter = typeof import("../compositor/bridge_exporter.js");
+type ExternalChangesModule = typeof import("./external_changes.js");
+type LiveLockModule = typeof import("../live/live_lock.js");
+type ExtRegistryModule = typeof import("../extensions/ext_registry.js");
+let cachedBridges: BridgeExporter | null = null;
+let cachedExtChanges: ExternalChangesModule | null = null;
+let cachedLiveLock: LiveLockModule | null = null;
+let cachedExtRegistry: ExtRegistryModule | null = null;
+function bridges(): BridgeExporter {
+  cachedBridges ??= requireHeavy("../compositor/bridge_exporter.js") as BridgeExporter;
+  return cachedBridges;
+}
+function extChanges(): ExternalChangesModule {
+  cachedExtChanges ??= requireHeavy("./external_changes.js") as ExternalChangesModule;
+  return cachedExtChanges;
+}
+function liveLock(): LiveLockModule {
+  cachedLiveLock ??= requireHeavy("../live/live_lock.js") as LiveLockModule;
+  return cachedLiveLock;
+}
+function extRegistry(): ExtRegistryModule {
+  cachedExtRegistry ??= requireHeavy("../extensions/ext_registry.js") as ExtRegistryModule;
+  return cachedExtRegistry;
+}
 import {
   buildEnvelopeState,
   computeSequenceDelta,
@@ -21,80 +51,42 @@ import { AspectPreset, createEmptySequence, CutholSequence } from "./schema.js";
 import { formatTimecode } from "./time.js";
 import { computeSequenceDurationMs } from "./timeline.js";
 import { audioJoinFadeMsOf, DEFAULT_AUDIO_JOIN_FADE_MS } from "../sequence/tempo.js";
+import type { ExternalChanges } from "./external_changes.js";
 import {
-  assertBridgeWontRewriteExternal,
-  assertMutatorKeptExternalFiles,
-  captureCommitPrestate,
-  clearExtchangeState,
-  detectExternalChanges,
-  ExternalChanges,
-  finalizeCommitManifest,
-  formatExternalNotice,
-  pruneExtchangeRevisions,
-  refreshManifestIfWasClean,
-  restoreForJournalTraversal,
-} from "./external_changes.js";
-import { assertLiveWriteAllowed } from "../live/live_lock.js";
-import { listExtensions } from "../extensions/ext_registry.js";
+  buildEnvelopeHistory,
+  ensureWorkspaceDirectories,
+  ExternalChangesSummary,
+  JournalEntry,
+  JournalManifest,
+  loadJournalManifest,
+  loadSequence,
+  resolveWorkspacePaths,
+  toExternalChangesSummary,
+  WorkspacePaths,
+} from "./workspace_read.js";
 
-export const SEQUENCE_FILENAME = "cuthol.sequence.json";
-export const STATE_DIRNAME = ".cuthol";
-export const JOURNAL_INDEX_FILENAME = "journal.json";
-
-export interface JournalEntry {
-  revision: number;
-  timestamp: string;
-  operation: string;
-  tag: string | null;
-  snapshot_file: string;
-  delta_summary?: string;
-  inverse_kind?: InverseOperationKind;
-  inverse_summary?: string;
-  affected_ids?: string[];
-  touches_protected?: boolean;
-  protected_ids?: string[];
-  /** Set when this commit folded an externally edited `cuthol.sequence.json` without adopt. */
-  absorbed_external_sequence?: string;
-}
-
-export interface JournalManifest {
-  cursor_revision: number;
-  entries: JournalEntry[];
-}
-
-export interface WorkspacePaths {
-  rootDir: string;
-  sequenceFile: string;
-  stateDir: string;
-  ledgerFile: string;
-  journalDir: string;
-  journalIndexFile: string;
-  monitorDir: string;
-  blobsDir: string;
-}
-
-export function resolveWorkspacePaths(dir: string): WorkspacePaths {
-  const rootDir = path.resolve(dir);
-  const stateDir = path.join(rootDir, STATE_DIRNAME);
-  return {
-    rootDir,
-    sequenceFile: path.join(rootDir, SEQUENCE_FILENAME),
-    stateDir,
-    ledgerFile: path.join(stateDir, "ledger.sqlite"),
-    journalDir: path.join(stateDir, "journal"),
-    journalIndexFile: path.join(stateDir, JOURNAL_INDEX_FILENAME),
-    monitorDir: path.join(stateDir, "monitor"),
-    blobsDir: path.join(stateDir, "blobs"),
-  };
-}
-
-export function ensureWorkspaceDirectories(paths: WorkspacePaths): void {
-  fs.mkdirSync(paths.rootDir, { recursive: true });
-  fs.mkdirSync(paths.stateDir, { recursive: true });
-  fs.mkdirSync(paths.journalDir, { recursive: true });
-  fs.mkdirSync(paths.monitorDir, { recursive: true });
-  fs.mkdirSync(paths.blobsDir, { recursive: true });
-}
+// Lightweight readers live in `./workspace_read.js` so reading commands never
+// load this module's heavy commit path; re-exported here for compatibility.
+export {
+  buildEnvelopeHistory,
+  buildWorkspaceEnvelopeHeader,
+  ensureWorkspaceDirectories,
+  loadJournalManifest,
+  loadSequence,
+  resolveWorkspacePaths,
+  toExternalChangesSummary,
+} from "./workspace_read.js";
+export type {
+  ExternalChangesSummary,
+  JournalEntry,
+  JournalManifest,
+  WorkspacePaths,
+} from "./workspace_read.js";
+export {
+  JOURNAL_INDEX_FILENAME,
+  SEQUENCE_FILENAME,
+  STATE_DIRNAME,
+} from "./workspace_read.js";
 
 function writeJsonAtomically(filePath: string, data: unknown): void {
   const tmpPath = `${filePath}.tmp_${process.pid}_${crypto.randomUUID()}`;
@@ -199,27 +191,9 @@ export function initWorkspace(options: {
     ],
   };
   writeJsonAtomically(paths.journalIndexFile, manifest);
-  clearExtchangeState(paths);
+  extChanges().clearExtchangeState(paths);
 
   return { paths, sequence };
-}
-
-export function loadSequence(dir: string): { paths: WorkspacePaths; sequence: CutholSequence } {
-  const paths = resolveWorkspacePaths(dir);
-  if (!fs.existsSync(paths.sequenceFile)) {
-    throw new CutholError(DIAGNOSTICS.WORKSPACE_NOT_FOUND(paths.rootDir));
-  }
-  ensureWorkspaceDirectories(paths);
-  const raw = fs.readFileSync(paths.sequenceFile, "utf8");
-  const sequence = JSON.parse(raw) as CutholSequence;
-  return { paths, sequence };
-}
-
-export function loadJournalManifest(paths: WorkspacePaths): JournalManifest {
-  if (!fs.existsSync(paths.journalIndexFile)) {
-    return { cursor_revision: 1, entries: [] };
-  }
-  return JSON.parse(fs.readFileSync(paths.journalIndexFile, "utf8")) as JournalManifest;
 }
 
 /**
@@ -241,18 +215,18 @@ export function commitSequenceMutation<T>(
   mutator: (seq: CutholSequence, paths: WorkspacePaths) => T,
   options: CommitSequenceMutationOptions = {}
 ): { result: T; sequence: CutholSequence; revision: number } {
-  assertLiveWriteAllowed(dir, operation);
+  liveLock().assertLiveWriteAllowed(dir, operation);
   const { paths, sequence } = loadSequence(dir);
   const cloned: CutholSequence = structuredClone(sequence);
-  const extPrestate = captureCommitPrestate(paths, sequence, { stashPending: true });
+  const extPrestate = extChanges().captureCommitPrestate(paths, sequence, { stashPending: true });
 
   const result = mutator(cloned, paths);
 
   // G211: a Cuthol commit must not silently overwrite externally-changed
   // composition files. Both checks run before any journal write.
-  assertMutatorKeptExternalFiles(paths, extPrestate);
+  extChanges().assertMutatorKeptExternalFiles(paths, extPrestate);
   if (!options.allowExternalRewrite) {
-    assertBridgeWontRewriteExternal(paths, cloned, extPrestate);
+    extChanges().assertBridgeWontRewriteExternal(paths, cloned, extPrestate);
   }
 
   const manifest = loadJournalManifest(paths);
@@ -312,7 +286,7 @@ export function commitSequenceMutation<T>(
   };
   writeJsonAtomically(paths.journalIndexFile, nextManifest);
 
-  pruneExtchangeRevisions(
+  extChanges().pruneExtchangeRevisions(
     paths,
     prunedEntries.map((e) => e.revision)
   );
@@ -331,13 +305,13 @@ export function commitSequenceMutation<T>(
   }
 
   try {
-    syncAllCompositionBridges(cloned, paths);
+    bridges().syncAllCompositionBridges(cloned, paths);
   } catch {
     // non-blocking bridge sync
   }
 
   try {
-    finalizeCommitManifest(paths, nextRevision, cloned, extPrestate);
+    extChanges().finalizeCommitManifest(paths, nextRevision, cloned, extPrestate);
   } catch {
     // non-blocking known-state recording (a later detection re-baselines)
   }
@@ -353,10 +327,10 @@ export function updateSequenceInPlace(
   dir: string,
   mutator: (seq: CutholSequence, paths: WorkspacePaths) => void
 ): CutholSequence {
-  assertLiveWriteAllowed(dir, "sequence.update");
+  liveLock().assertLiveWriteAllowed(dir, "sequence.update");
   const { paths, sequence } = loadSequence(dir);
   const cloned: CutholSequence = structuredClone(sequence);
-  const extPrestate = captureCommitPrestate(paths, sequence);
+  const extPrestate = extChanges().captureCommitPrestate(paths, sequence);
   mutator(cloned, paths);
 
   writeJsonAtomically(paths.sequenceFile, cloned);
@@ -371,13 +345,13 @@ export function updateSequenceInPlace(
   }
 
   try {
-    syncAllCompositionBridges(cloned, paths);
+    bridges().syncAllCompositionBridges(cloned, paths);
   } catch {
     // non-blocking bridge sync
   }
 
   try {
-    refreshManifestIfWasClean(paths, cloned, extPrestate);
+    extChanges().refreshManifestIfWasClean(paths, cloned, extPrestate);
   } catch {
     // non-blocking known-state refresh
   }
@@ -410,91 +384,6 @@ export interface StepJournalResult {
   history: CutholEnvelopeHistory;
 }
 
-export function buildEnvelopeHistory(
-  manifest: JournalManifest,
-  currentSeq?: CutholSequence
-): CutholEnvelopeHistory {
-  const idx = manifest.entries.findIndex((e) => e.revision === manifest.cursor_revision);
-  const undoDepth = Math.max(0, idx);
-  const redoDepth = idx >= 0 ? Math.max(0, manifest.entries.length - 1 - idx) : 0;
-
-  // Check currently locked lanes in `currentSeq` so dynamically locked cues are also marked protected
-  const lockedCueIds = new Set<string>();
-  if (currentSeq) {
-    for (const lane of currentSeq.lanes) {
-      if (lane.locked) {
-        for (const c of lane.cues) {
-          lockedCueIds.add(c.id);
-        }
-      }
-    }
-  }
-
-  let undoPreview: CutholEnvelopeHistory["undo_preview"] = null;
-  if (idx > 0) {
-    const curEntry = manifest.entries[idx];
-    const affects = curEntry.affected_ids ?? [];
-    const dynamicProtected = affects.some((id) => lockedCueIds.has(id));
-    undoPreview = {
-      revision: curEntry.revision,
-      operation: curEntry.operation,
-      delta_summary: curEntry.delta_summary ?? curEntry.operation,
-      inverse_kind: curEntry.inverse_kind ?? "modifying",
-      inverse_summary: curEntry.inverse_summary ?? `${curEntry.operation} will be undone`,
-      affects,
-      touches_protected: Boolean(curEntry.touches_protected || dynamicProtected),
-    };
-  }
-
-  let nextRedo: CutholEnvelopeHistory["next_redo"] = null;
-  if (idx >= 0 && idx + 1 < manifest.entries.length) {
-    const rEntry = manifest.entries[idx + 1];
-    nextRedo = {
-      revision: rEntry.revision,
-      operation: rEntry.operation,
-      delta_summary: rEntry.delta_summary ?? rEntry.operation,
-      affects: rEntry.affected_ids ?? [],
-    };
-  }
-
-  const activeSlice = idx >= 0 ? manifest.entries.slice(Math.max(0, idx - 4), idx + 1) : [];
-  const breadcrumb = activeSlice.map(
-    (e) => `r${e.revision} ${e.delta_summary ?? e.operation}`
-  );
-
-  return {
-    undo_depth: undoDepth,
-    redo_depth: redoDepth,
-    undo_preview: undoPreview,
-    next_redo: nextRedo,
-    breadcrumb,
-  };
-}
-
-export function buildWorkspaceEnvelopeHeader(dir: string): {
-  schema_version: "cuthol.envelope/1";
-  state: CutholEnvelopeState;
-  delta?: { summary: string; affected_ids: string[] };
-  history: CutholEnvelopeHistory;
-} {
-  const { paths, sequence } = loadSequence(dir);
-  const manifest = loadJournalManifest(paths);
-  const curEntry = manifest.entries.find((e) => e.revision === manifest.cursor_revision);
-  return {
-    schema_version: "cuthol.envelope/1",
-    state: buildEnvelopeState(sequence),
-    ...(curEntry
-      ? {
-          delta: {
-            summary: curEntry.delta_summary ?? curEntry.operation,
-            affected_ids: curEntry.affected_ids ?? [],
-          },
-        }
-      : {}),
-    history: buildEnvelopeHistory(manifest, sequence),
-  };
-}
-
 export function stepJournal(
   dir: string,
   direction: "undo" | "redo",
@@ -503,7 +392,7 @@ export function stepJournal(
   const opts: StepJournalOptions =
     typeof stepsOrOpts === "number" ? { steps: stepsOrOpts } : stepsOrOpts;
 
-  if (!opts.dryRun) assertLiveWriteAllowed(dir, `journal.${direction}`);
+  if (!opts.dryRun) liveLock().assertLiveWriteAllowed(dir, `journal.${direction}`);
   const { paths, sequence: currentSeq } = loadSequence(dir);
   const manifest = loadJournalManifest(paths);
   const idx = manifest.entries.findIndex((e) => e.revision === manifest.cursor_revision);
@@ -638,8 +527,8 @@ export function stepJournal(
   // G211: the trailing bridge sync must not silently revert the user's own
   // edit to an externally-changed entry HTML (checked before any write).
   if (!opts.dryRun) {
-    const extPrestate = captureCommitPrestate(paths, currentSeq);
-    assertBridgeWontRewriteExternal(paths, restored, extPrestate);
+    const extPrestate = extChanges().captureCommitPrestate(paths, currentSeq);
+    extChanges().assertBridgeWontRewriteExternal(paths, restored, extPrestate);
   }
 
   const prevRev = manifest.cursor_revision;
@@ -648,12 +537,12 @@ export function stepJournal(
     manifest.cursor_revision = targetEntry.revision;
     writeJsonAtomically(paths.journalIndexFile, manifest);
     try {
-      syncAllCompositionBridges(restored, paths);
+      bridges().syncAllCompositionBridges(restored, paths);
     } catch {
       // non-blocking bridge sync
     }
     try {
-      const restoreNotes = restoreForJournalTraversal(
+      const restoreNotes = extChanges().restoreForJournalTraversal(
         paths,
         direction,
         traversedEntries.map((e) => e.revision),
@@ -869,35 +758,6 @@ export function formatWorkspaceOpenSummary(
   return lines.join("\n");
 }
 
-export interface ExternalChangesSummary {
-  digest: string;
-  cursor_revision: number;
-  counts: ExternalChanges["counts"];
-  sequence: ExternalChanges["sequence"];
-  compositions: ExternalChanges["compositions"];
-  notice: string;
-  diagnostic: ReturnType<typeof DIAGNOSTICS.EXTERNAL_CHANGES_PRESENT>;
-}
-
-export function toExternalChangesSummary(
-  changes: ExternalChanges,
-  notice: string
-): ExternalChangesSummary {
-  const bits = changes.compositions.map(
-    (c) => `${c.key}: ${c.added.length + c.modified.length + c.deleted.length} file${c.added.length + c.modified.length + c.deleted.length === 1 ? "" : "s"}`
-  );
-  if (changes.sequence) bits.push("cuthol.sequence.json");
-  return {
-    digest: changes.digest,
-    cursor_revision: changes.cursor_revision,
-    counts: changes.counts,
-    sequence: changes.sequence,
-    compositions: changes.compositions,
-    notice,
-    diagnostic: DIAGNOSTICS.EXTERNAL_CHANGES_PRESENT(bits.join("; ") || "changes"),
-  };
-}
-
 export function openWorkspaceSummary(
   dir: string,
   options: { verbose?: boolean; maxItems?: number } = {}
@@ -932,8 +792,8 @@ export function openWorkspaceSummary(
   let externalChanges: ExternalChanges | null = null;
   let externalNotice: string | null = null;
   try {
-    externalChanges = detectExternalChanges(paths.rootDir);
-    externalNotice = formatExternalNotice(externalChanges, "cli");
+    externalChanges = extChanges().detectExternalChanges(paths.rootDir);
+    externalNotice = extChanges().formatExternalNotice(externalChanges, "cli");
   } catch {
     externalChanges = null;
     externalNotice = null;
@@ -965,7 +825,7 @@ export function openWorkspaceSummary(
   // on any listing failure fall back to the enabled refs stored on the sequence.
   let installedExtensions: WorkspaceOpenExtensionItem[];
   try {
-    installedExtensions = listExtensions(dir).extensions.map((e) => ({
+    installedExtensions = extRegistry().listExtensions(dir).extensions.map((e) => ({
       name: e.name,
       enabled: e.enabled,
       description: e.description,

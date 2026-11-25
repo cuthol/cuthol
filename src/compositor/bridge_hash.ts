@@ -3,6 +3,15 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
+  currentHashGeneration,
+  findProjectRoot,
+  getPersistedContentMemo,
+  getPersistedDirHashes,
+  hashFileContent,
+  setPersistedContentMemo,
+  setPersistedDirHashes,
+} from "../core/file_hash_index.js";
+import {
   CUTHOL_BRIDGE_SCHEMA,
   CUTHOL_RUNTIME_VERSION, CutholBridgeV1
 } from "./cuthol_runtime.js";
@@ -33,11 +42,231 @@ function safeRealpath(p: string): string {
 }
 
 /**
+ * Identity key for cycle detection. Plain directories use their absolute
+ * path (a cycle is impossible without a link); only links pay for
+ * `realpathSync`, which dominated profiles on large composition trees.
+ */
+function dirIdentityKey(fullPath: string, isLink: boolean): string | null {
+  if (!isLink) return fullPath;
+  try {
+    return fs.realpathSync(fullPath);
+  } catch {
+    return null;
+  }
+}
+
+const dirHashMemo = new Map<string, { gen: number; fp: string; hash: string }>();
+const bundleMemo = new Map<string, { gen: number; fp: string; filesHash: string; legacyHash: string }>();
+
+/**
+ * Cheap stat-only fingerprint of everything the composition directory
+ * hashers can include (a superset of each walker's inputs: any file a hash
+ * covers is covered here, so a fingerprint match implies identical hashes).
+ * Format: `rel:size:full-precision-mtimeMs` per file, hashed.
+ */
+export function fingerprintCompositionDir(rootDir: string): string | null {
+  const absRoot = path.resolve(rootDir);
+  const parts: string[] = [];
+  const visited = new Set<string>();
+  try {
+    visited.add(fs.realpathSync(absRoot));
+  } catch {
+    visited.add(absRoot);
+  }
+  const walk = (currentDir: string, relPrefix: string): boolean => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(currentDir, { withFileTypes: true });
+    } catch {
+      return true;
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      const relPath = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
+      const fullPath = path.join(currentDir, entry.name);
+      const isLink = entry.isSymbolicLink();
+      let isDir = entry.isDirectory();
+      let isFile = entry.isFile();
+      if (isLink) {
+        try {
+          const targetStat = fs.statSync(fullPath);
+          isDir = targetStat.isDirectory();
+          isFile = targetStat.isFile();
+        } catch {
+          continue;
+        }
+      }
+      if (isDir) {
+        if (IGNORED_COMPOSITION_SUBDIRS.has(entry.name)) continue;
+        const key = dirIdentityKey(fullPath, isLink);
+        if (key === null || visited.has(key)) continue;
+        visited.add(key);
+        if (!walk(fullPath, relPath)) return false;
+      } else if (isFile) {
+        let st: fs.Stats;
+        try {
+          st = fs.statSync(fullPath);
+          if (!st.isFile()) continue;
+        } catch {
+          continue;
+        }
+        parts.push(`${relPath}:${st.size}:${st.mtimeMs}`);
+      }
+    }
+    return true;
+  };
+  if (!walk(absRoot, "")) return null;
+  return crypto.createHash("sha256").update(parts.join("\n")).digest("hex");
+}
+
+/**
+ * Directory-hash memo scoped to one command generation: the first hash of a
+ * composition per command walks and reads; repeats only re-walk stats for the
+ * fingerprint. A new command generation always recomputes at least once, so
+ * an edit between two calls in one long-lived process is never hidden.
+ */
+export function memoizedCompositionDirHash(kind: string, rootDir: string, compute: () => string): string {
+  const gen = currentHashGeneration();
+  const absRoot = path.resolve(rootDir);
+  const key = `${kind}\n${absRoot}`;
+  const fp = getCompositionFingerprint(absRoot);
+  const hit = dirHashMemo.get(key);
+  if (hit && hit.gen === gen && fp !== null && hit.fp === fp) return hit.hash;
+  const hash = compute();
+  if (fp !== null) {
+    if (dirHashMemo.size > 2000) dirHashMemo.clear();
+    dirHashMemo.set(key, { gen, fp, hash });
+  }
+  return hash;
+}
+
+/**
+ * Sweep-scoped fingerprint sharing. Within one synchronous sweep (one bridge
+ * sync pass, one verify run) every caller shares a single stat-only walk per
+ * composition; Cuthol's own writes evict that composition through
+ * `invalidateCompositionDirHashes`, and synchronous execution means no
+ * external edit can interleave. Outside a sweep (tests, Live probes, render
+ * pipelines calling leaf functions directly) every call walks fresh, so an
+ * edit between two calls of one process is never hidden behind a memo keyed
+ * by command generation alone.
+ */
+let sweepFpCache: Map<string, string | null> | null = null;
+let sweepDepth = 0;
+
+/** Opens (or joins, when nested) a fingerprint-sharing sweep. */
+export function beginCompositionSweep(): void {
+  sweepDepth += 1;
+  if (sweepFpCache === null) sweepFpCache = new Map();
+}
+
+/** Leaves a sweep opened by `beginCompositionSweep`; the outermost close drops the cache. */
+export function endCompositionSweep(): void {
+  if (sweepDepth > 0) sweepDepth -= 1;
+  if (sweepDepth === 0) sweepFpCache = null;
+}
+
+/**
+ * Stat-only fingerprint of a composition directory. Shared per sweep when a
+ * sweep is active, otherwise walked fresh on every call (no memo).
+ */
+export function getCompositionFingerprint(rootDir: string): string | null {
+  const absRoot = path.resolve(rootDir);
+  const cache = sweepFpCache;
+  if (cache !== null) {
+    const hit = cache.get(absRoot);
+    if (hit !== undefined) return hit;
+    const fp = fingerprintCompositionDir(absRoot);
+    if (cache.size > 2000) cache.clear();
+    cache.set(absRoot, fp);
+    return fp;
+  }
+  return fingerprintCompositionDir(absRoot);
+}
+
+/**
+ * Files hash + legacy directory hash of a composition, sharing one
+ * fingerprint walk. Within a command generation each composition is fully
+ * hashed at most once per content state; repeats are memo hits.
+ */
+export function getCompositionDirHashes(rootDir: string, seed = ""): {
+  fp: string | null;
+  filesHash: string;
+  legacyHash: string;
+} {
+  const absRoot = path.resolve(rootDir);
+  return getCompositionDirHashesWithFp(absRoot, getCompositionFingerprint(absRoot), seed);
+}
+
+export function getCompositionDirHashesWithFp(
+  absRoot: string,
+  fp: string | null,
+  seed = ""
+): {
+  fp: string | null;
+  filesHash: string;
+  legacyHash: string;
+} {
+  const gen = currentHashGeneration();
+  // The raw hashes embed seeds such as the invoked renderer version, so
+  // seeded variants are memoized and persisted separately.
+  const memoKey = `${seed}\n${absRoot}`;
+  const persistedKey = fp !== null ? `${seed}\n${fp}` : null;
+  const hit = bundleMemo.get(memoKey);
+  if (hit && hit.gen === gen && fp !== null && hit.fp === fp) {
+    return { fp, filesHash: hit.filesHash, legacyHash: hit.legacyHash };
+  }
+  if (fp !== null && persistedKey !== null) {
+    // First touch in this process: a fingerprint match in the persisted
+    // index reuses both hashes without reading a single byte. Paths this
+    // process already saw never reach here with a matching fingerprint
+    // unless their bytes were re-read (see `hashFileContent`'s seen-before
+    // rule), so a forged size+mtime between two calls of one process still
+    // recomputes from disk.
+    const projectRoot = findProjectRoot(absRoot);
+    if (projectRoot) {
+      const persisted = getPersistedDirHashes(projectRoot, persistedKey);
+      if (persisted) {
+        if (bundleMemo.size > 2000) bundleMemo.clear();
+        bundleMemo.set(memoKey, { gen, fp, filesHash: persisted.filesHash, legacyHash: persisted.legacyHash });
+        return { fp, filesHash: persisted.filesHash, legacyHash: persisted.legacyHash };
+      }
+    }
+  }
+  const filesHash = hashCompositionFilesExcludingBridgeDataUncached(absRoot);
+  const legacyHash = hashDirectoryRecursiveUncached(absRoot);
+  if (fp !== null && persistedKey !== null) {
+    if (bundleMemo.size > 2000) bundleMemo.clear();
+    bundleMemo.set(memoKey, { gen, fp, filesHash, legacyHash });
+    const projectRoot = findProjectRoot(absRoot);
+    if (projectRoot) setPersistedDirHashes(projectRoot, persistedKey, { filesHash, legacyHash });
+  }
+  return { fp, filesHash, legacyHash };
+}
+
+/**
+ * Drops memoized fingerprints and directory hashes for one composition
+ * directory. Called whenever Cuthol itself writes under it, so later reads
+ * in the same command observe the new bytes.
+ */
+export function invalidateCompositionDirHashes(rootDir: string): void {
+  const absRoot = path.resolve(rootDir);
+  sweepFpCache?.delete(absRoot);
+  bundleMemo.delete(absRoot);
+  for (const key of [...dirHashMemo.keys()]) {
+    if (key.endsWith(`\n${absRoot}`)) dirHashMemo.delete(key);
+  }
+}
+
+/**
  * Deterministically hashes an entire composition directory tree (including `assets/`,
  * `compositions/`, fonts, images, CSS, JS, HTML) while ignoring transient output directories.
  * The invoked HyperFrames package version is part of the digest.
  */
 export function hashDirectoryRecursive(rootDir: string): string {
+  return getCompositionDirHashes(rootDir).legacyHash;
+}
+
+function hashDirectoryRecursiveUncached(rootDir: string): string {
   const absRoot = path.resolve(rootDir);
   const visitedDirs = new Set<string>([safeRealpath(absRoot)]);
   const rendererVersion = readInvokedHyperFramesVersion();
@@ -68,9 +297,10 @@ export function hashDirectoryRecursive(rootDir: string): string {
       const relPath = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
       const fullPath = path.join(currentDir, entry.name);
 
+      const isLink = entry.isSymbolicLink();
       let isDir = entry.isDirectory();
       let isFile = entry.isFile();
-      if (entry.isSymbolicLink()) {
+      if (isLink) {
         try {
           const targetStat = fs.statSync(fullPath);
           isDir = targetStat.isDirectory();
@@ -82,18 +312,24 @@ export function hashDirectoryRecursive(rootDir: string): string {
 
       if (isDir) {
         if (IGNORED_COMPOSITION_SUBDIRS.has(entry.name)) continue;
-        const realDir = safeRealpath(fullPath);
-        if (visitedDirs.has(realDir)) continue;
+        const realDir = dirIdentityKey(fullPath, isLink);
+        if (realDir === null || visitedDirs.has(realDir)) continue;
         visitedDirs.add(realDir);
         walk(fullPath, relPath);
       } else if (isFile) {
-        try {
-          const fileBuf = fs.readFileSync(fullPath);
-          const fileDigest = crypto.createHash("sha256").update(fileBuf).digest("hex");
-          hash.update(`file:${relPath}:${fileBuf.length}:${fileDigest}\n`);
-        } catch {
-          // ignore unreadable transient file
+        // Shared per-command content cache: each file is read once no matter
+        // how many verify/bridge passes hash this directory.
+        const fileDigest = hashFileContent(fullPath);
+        if (fileDigest !== null) {
+          let size = 0;
+          try {
+            size = fs.statSync(fullPath).size;
+          } catch {
+            size = 0;
+          }
+          hash.update(`file:${relPath}:${size}:${fileDigest}\n`);
         }
+        // ignore unreadable transient file
       }
     }
   };
@@ -298,6 +534,10 @@ export function analyzeCompositionDataUsage(
  * The invoked HyperFrames package version is part of the digest.
  */
 export function hashCompositionFilesExcludingBridgeData(rootDir: string): string {
+  return getCompositionDirHashes(rootDir).filesHash;
+}
+
+function hashCompositionFilesExcludingBridgeDataUncached(rootDir: string): string {
   const absRoot = path.resolve(rootDir);
   const visitedDirs = new Set<string>([safeRealpath(absRoot)]);
   const rendererVersion = readInvokedHyperFramesVersion();
@@ -335,9 +575,10 @@ export function hashCompositionFilesExcludingBridgeData(rootDir: string): string
       }
       const fullPath = path.join(currentDir, entry.name);
 
+      const isLink = entry.isSymbolicLink();
       let isDir = entry.isDirectory();
       let isFile = entry.isFile();
-      if (entry.isSymbolicLink()) {
+      if (isLink) {
         try {
           const targetStat = fs.statSync(fullPath);
           isDir = targetStat.isDirectory();
@@ -349,18 +590,24 @@ export function hashCompositionFilesExcludingBridgeData(rootDir: string): string
 
       if (isDir) {
         if (IGNORED_COMPOSITION_SUBDIRS.has(entry.name)) continue;
-        const realDir = safeRealpath(fullPath);
-        if (visitedDirs.has(realDir)) continue;
+        const realDir = dirIdentityKey(fullPath, isLink);
+        if (realDir === null || visitedDirs.has(realDir)) continue;
         visitedDirs.add(realDir);
         walk(fullPath, relPath);
       } else if (isFile) {
-        try {
-          const fileBuf = fs.readFileSync(fullPath);
-          const fileDigest = crypto.createHash("sha256").update(fileBuf).digest("hex");
-          hash.update(`file:${relPath}:${fileBuf.length}:${fileDigest}\n`);
-        } catch {
-          // ignore unreadable transient file
+        // Shared per-command content cache: each file is read once no matter
+        // how many verify/bridge passes hash this directory.
+        const fileDigest = hashFileContent(fullPath);
+        if (fileDigest !== null) {
+          let size = 0;
+          try {
+            size = fs.statSync(fullPath).size;
+          } catch {
+            size = 0;
+          }
+          hash.update(`file:${relPath}:${size}:${fileDigest}\n`);
         }
+        // ignore unreadable transient file
       }
     }
   };
@@ -369,11 +616,45 @@ export function hashCompositionFilesExcludingBridgeData(rootDir: string): string
   return hash.digest("hex");
 }
 
+/**
+ * Memoized used-payload hashes. The result is a pure function of the usage
+ * analysis and the bridge payload's own hashes: an identical
+ * (`sliceHash`, `globalHash`) pair with the same usage object always yields
+ * the same used hashes, so the 60 big payload stringifies per command (two
+ * per composition cue) collapse to one. Keyed by usage object identity, so a
+ * changed analysis never reuses an older answer.
+ */
+const usedHashesMemo = new WeakMap<
+  CompositionDataUsage,
+  Map<string, { usedSliceHash: string; usedGlobalHash: string }>
+>();
+
 export function computeUsedBridgePayloadHashes(
   bridgeData: Partial<CutholBridgeV1> | null | undefined,
   usage: CompositionDataUsage
 ): { usedSliceHash: string; usedGlobalHash: string } {
   const d = bridgeData ?? {};
+  // Fast path: the used hashes are fully determined by the payload's own
+  // hashes (same slice + global bytes with the same usage ⇒ same answer).
+  const payloadKey = `${typeof d.hash === "string" ? d.hash : ""}\n${typeof d.global?.hash === "string" ? d.global.hash : ""}`;
+  let inner = usedHashesMemo.get(usage);
+  if (inner) {
+    const hit = inner.get(payloadKey);
+    if (hit) return hit;
+  } else {
+    inner = new Map();
+    usedHashesMemo.set(usage, inner);
+  }
+  const computed = computeUsedBridgePayloadHashesUncached(d, usage);
+  if (inner.size > 200) inner.clear();
+  inner.set(payloadKey, computed);
+  return computed;
+}
+
+function computeUsedBridgePayloadHashesUncached(
+  d: Partial<CutholBridgeV1>,
+  usage: CompositionDataUsage
+): { usedSliceHash: string; usedGlobalHash: string } {
   const comp = d.composition ?? ({} as Partial<CutholBridgeV1["composition"]>);
   const usedLocalPayload: Record<string, unknown> = {
     schema: d.schema ?? CUTHOL_BRIDGE_SCHEMA,
@@ -470,11 +751,60 @@ export function computeUsedBridgePayloadHashes(
  * Checks whether a HyperFrames composition directory (entry HTML or user JS files)
  * references `C.audio` / `C.global.audio` / `data.audio`.
  */
+const usageMemo = new Map<string, CompositionDataUsage>();
+
+/**
+ * Memoized composition data-usage analysis. The result depends only on the
+ * composition's authored files (captured by its content hash) and the cue
+ * preset, so one analysis per composition is shared by the bridge sync and
+ * every verify pass of the command instead of re-reading all sources.
+ * Analyses are also persisted across processes keyed by content hash (never
+ * by stat), so a repeat run with identical bytes never re-reads: a content
+ * hash provably describes identical inputs, so the persisted answer cannot
+ * hide an edit.
+ */
+export function analyzeCompositionDataUsageCached(
+  compDir: string,
+  entryHtml = "index.html",
+  props?: Record<string, unknown>,
+  filesHash?: string
+): CompositionDataUsage {
+  const preset = typeof props?.preset === "string" ? props.preset : "";
+  let resolvedHash = filesHash ?? "";
+  if (!resolvedHash) {
+    try {
+      resolvedHash = hashCompositionFilesExcludingBridgeData(compDir);
+    } catch {
+      resolvedHash = "";
+    }
+  }
+  const absCompDir = path.resolve(compDir);
+  const key = `${entryHtml}\n${preset}\n${resolvedHash}`;
+  const rootDir = findProjectRoot(absCompDir);
+  if (rootDir && resolvedHash) {
+    const persisted = getPersistedContentMemo(rootDir, key);
+    if (persisted && typeof persisted === "object") {
+      const usage = persisted as CompositionDataUsage;
+      if (usageMemo.size > 2000) usageMemo.clear();
+      usageMemo.set(`${absCompDir}\n${key}`, usage);
+      return usage;
+    }
+  }
+  const memKey = `${absCompDir}\n${key}`;
+  const hit = usageMemo.get(memKey);
+  if (hit) return hit;
+  const usage = analyzeCompositionDataUsage(compDir, entryHtml, props);
+  if (usageMemo.size > 2000) usageMemo.clear();
+  usageMemo.set(memKey, usage);
+  if (rootDir && resolvedHash) setPersistedContentMemo(rootDir, key, usage);
+  return usage;
+}
+
 export function compositionUsesAudio(compDir: string, entryHtml = "index.html"): boolean {
-  const usage = analyzeCompositionDataUsage(compDir, entryHtml);
+  const usage = analyzeCompositionDataUsageCached(compDir, entryHtml);
   return usage.usesLocalAudio || usage.usesGlobalAudio;
 }
 
 export function compositionUsesGlobal(compDir: string, entryHtml = "index.html"): boolean {
-  return analyzeCompositionDataUsage(compDir, entryHtml).usesAnyGlobal;
+  return analyzeCompositionDataUsageCached(compDir, entryHtml).usesAnyGlobal;
 }

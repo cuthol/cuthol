@@ -1,32 +1,19 @@
 // CLI 'lane' command group handler (split out of cli.ts).
 import fs from "node:fs";
 import path from "node:path";
-import { syncEnabledExtensionAssetsToComposition } from "./compositor/bridge_exporter.js";
-import {
-  ensureCompositionRuntimeFiles,
-  HyperFramesPresetKind,
-  validateHyperFramesCompositionContract,
-} from "./compositor/hyperframes_bridge.js";
-import { attachScaffoldToRevision, scaffoldBeforeCommit } from "./compositor/scaffold_guard.js";
-import { readCurrentScriptErrorRecord } from "./compositor/coords_extract.js";
-import {
-  probeScriptRecordsChildSync,
-  scriptRecordToDiagnostic,
-} from "./compositor/hf_script_errors.js";
+import type { HyperFramesPresetKind } from "./compositor/hyperframes_bridge.js";
+import type { scaffoldBeforeCommit } from "./compositor/scaffold_guard.js";
 import { CutholDiagnostic, CutholError, DIAGNOSTICS } from "./core/diagnostics.js";
-import { CompositionAudioMode, HyperFramesCompositeMode, LaneCue, LaneKind } from "./core/schema.js";
+import type {
+  CompositionAudioMode,
+  HyperFramesCompositeMode,
+  LaneCue,
+  LaneKind,
+} from "./core/schema.js";
 import { parseTimeMs } from "./core/time.js";
-import { loadSequence, setLaneLockStatus, setLaneMuteStatus } from "./core/workspace.js";
-import { commitVerifiedMutation, VerificationReport } from "./verify/gates.js";
-import {
-  addLaneCue,
-  exciseLaneCueRanges,
-  LaneExciseRippleAcross,
-  removeLaneCues,
-  updateLaneCue,
-} from "./sequence/lanes.js";
-import { boolFlag, numFlag, parseExciseRanges, parsePropsJsonFlag, strFlag } from "./cli_args.js";
-import { bareDurationWarning } from "./cli_cmd_composition.js";
+import type { VerificationReport } from "./verify/gates.js";
+import type { LaneExciseRippleAcross } from "./sequence/lanes.js";
+import { boolFlag, jsonFixCommand, numFlag, parseExciseRanges, parseJsonFlag, strFlag } from "./cli_args.js";
 import {
   CLI_NOT_HANDLED,
   CliCommandContext,
@@ -46,11 +33,12 @@ function parseCompositionAudioFlag(cueId: string, raw: string | undefined): Comp
 }
 
 /** Journaled, undoable `composition_audio` switch on a composition cue. */
-function setCueCompositionAudio(
+async function setCueCompositionAudio(
   workspaceDir: string,
   cueId: string,
   mode: CompositionAudioMode
-): { cue: LaneCue; revision: number; verification: VerificationReport } {
+): Promise<{ cue: LaneCue; revision: number; verification: VerificationReport }> {
+  const { commitVerifiedMutation } = await import("./verify/gates.js");
   const { result, revision, verification } = commitVerifiedMutation(workspaceDir, `lane.update-cue(${cueId})`, (seq) => {
     const target = seq.lanes.flatMap((l) => l.cues).find((c) => c.id === cueId);
     if (!target) {
@@ -70,9 +58,10 @@ function setCueCompositionAudio(
   return { cue: result, revision, verification };
 }
 
-export function runLaneCommand(ctx: CliCommandContext): CliCommandResult {
+export async function runLaneCommand(ctx: CliCommandContext): Promise<CliCommandResult> {
   const { action, rest, flags, workspaceDir } = ctx;
   if (action === "lock" || action === "unlock") {
+    const { setLaneLockStatus } = await import("./core/workspace.js");
     const laneId = strFlag(flags, "lane") ?? rest[0] ?? "ln_titles";
     const res = setLaneLockStatus({
       workspaceDir,
@@ -86,6 +75,7 @@ export function runLaneCommand(ctx: CliCommandContext): CliCommandResult {
     return;
   }
   if (action === "mute" || action === "unmute") {
+    const { setLaneMuteStatus } = await import("./core/workspace.js");
     const laneId = strFlag(flags, "lane") ?? rest[0] ?? "ln_titles";
     const res = setLaneMuteStatus({
       workspaceDir,
@@ -100,6 +90,7 @@ export function runLaneCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "add-cue") {
+    const { addLaneCue } = await import("./sequence/lanes.js");
     const laneId = strFlag(flags, "lane", "ln_titles")!;
     const kind = strFlag(flags, "kind") as LaneKind | undefined;
     const durRaw = strFlag(flags, "duration", "3000ms")!;
@@ -142,6 +133,22 @@ export function runLaneCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "add-composition") {
+    const { loadSequence } = await import("./core/workspace.js");
+    const { addLaneCue } = await import("./sequence/lanes.js");
+    const { ensureCompositionRuntimeFiles, validateHyperFramesCompositionContract } = await import(
+      "./compositor/hyperframes_bridge.js"
+    );
+    const { attachScaffoldToRevision, scaffoldBeforeCommit } = await import(
+      "./compositor/scaffold_guard.js"
+    );
+    const { readCurrentScriptErrorRecord } = await import("./compositor/coords_extract.js");
+    const { probeScriptRecordsChildSync, scriptRecordToDiagnostic } = await import(
+      "./compositor/hf_script_errors.js"
+    );
+    const { syncEnabledExtensionAssetsToComposition } = await import(
+      "./compositor/bridge_exporter.js"
+    );
+    const { bareDurationWarning } = await import("./cli_cmd_composition.js");
     const laneId = strFlag(flags, "lane", "ln_motion")!;
     const compDir =
       strFlag(flags, "comp-dir") ??
@@ -163,7 +170,20 @@ export function runLaneCommand(ctx: CliCommandContext): CliCommandResult {
     const anchorRef = strFlag(flags, "anchor");
     const offsetRaw = strFlag(flags, "offset", "0ms")!;
     const propsRaw = strFlag(flags, "props", "{}")!;
-    const props = parsePropsJsonFlag(propsRaw, "lane.add-composition");
+    const compDirFlag =
+      strFlag(flags, "comp-dir") !== undefined
+        ? `--comp-dir ${compDir}`
+        : strFlag(flags, "composition-dir") !== undefined
+          ? `--composition-dir ${compDir}`
+          : strFlag(flags, "dir-comp") !== undefined
+            ? `--dir-comp ${compDir}`
+            : `--comp-dir ${compDir}`;
+    const props = parseJsonFlag(propsRaw, {
+      command: "lane add-composition",
+      flag: "props",
+      kind: "object",
+      fixCommand: jsonFixCommand("lane add-composition", "props", compDirFlag),
+    }) as Record<string, unknown>;
     const transparent = boolFlag(flags, "transparent", true) ?? true;
     const mode = (strFlag(flags, "mode", "overlay_alpha") as HyperFramesCompositeMode) ?? "overlay_alpha";
     const durationMs = parseTimeMs(durRaw);
@@ -305,7 +325,7 @@ export function runLaneCommand(ctx: CliCommandContext): CliCommandResult {
     const addCompAudio = parseCompositionAudioFlag(res.cue.id, strFlag(flags, "composition-audio"));
     let emitted = res;
     if (addCompAudio !== undefined && addCompAudio !== "mix") {
-      emitted = setCueCompositionAudio(workspaceDir, res.cue.id, addCompAudio);
+      emitted = await setCueCompositionAudio(workspaceDir, res.cue.id, addCompAudio);
     }
     const durationWarning = bareDurationWarning(strFlag(flags, "duration"));
     const addDiagnostics = [
@@ -325,6 +345,7 @@ export function runLaneCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "update-cue") {
+    const { updateLaneCue } = await import("./sequence/lanes.js");
     const cueId = strFlag(flags, "cue") ?? strFlag(flags, "id") ?? rest[0];
     if (!cueId) throw new Error("Provide --cue <cue_XX>.");
     const atRaw = strFlag(flags, "at");
@@ -388,13 +409,14 @@ export function runLaneCommand(ctx: CliCommandContext): CliCommandResult {
         })
       : null;
     if (compAudioMode !== undefined) {
-      res = setCueCompositionAudio(workspaceDir, cueId, compAudioMode);
+      res = await setCueCompositionAudio(workspaceDir, cueId, compAudioMode);
     }
     emitEnvelopeJson(workspaceDir, "lane.update-cue", { action: "lane.update-cue", ...res });
     return;
   }
 
   if (action === "excise") {
+    const { exciseLaneCueRanges } = await import("./sequence/lanes.js");
     const cueId =
       strFlag(flags, "cue") ?? strFlag(flags, "id") ?? strFlag(flags, "clip") ?? rest[0];
     const rangesRaw = strFlag(flags, "ranges");
@@ -424,6 +446,7 @@ export function runLaneCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "remove-cue") {
+    const { removeLaneCues } = await import("./sequence/lanes.js");
     const cuesRaw = strFlag(flags, "cues") ?? strFlag(flags, "cue") ?? rest[0];
     if (!cuesRaw) throw new Error("Provide --cues <cue_01,cue_02>.");
     const cueIds = cuesRaw.split(",").map((s) => s.trim()).filter(Boolean);

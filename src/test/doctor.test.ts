@@ -20,8 +20,8 @@ import {
 
 function healthy(): DoctorProbes {
   return {
-    nodeVersion: "v22.5.0",
-    nodeEnginesRange: ">=22.5.0",
+    nodeVersion: "v22.12.0",
+    nodeEnginesRange: ">=22.12.0",
     ffmpegMajor: 8,
     ffmpegToken: "8.1.1",
     ffprobeMajor: 8,
@@ -46,7 +46,7 @@ test("healthy probes: all checks ok", () => {
 });
 
 test("node below engines range fails", () => {
-  const check = checkNode({ nodeVersion: "v20.1.0", nodeEnginesRange: ">=22.5.0" });
+  const check = checkNode({ nodeVersion: "v20.1.0", nodeEnginesRange: ">=22.12.0" });
   assert.equal(check.status, "fail");
   assert.match(check.fix, /Node\.js/);
 });

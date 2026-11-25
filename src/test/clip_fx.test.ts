@@ -595,12 +595,15 @@ test("manifest fx validation pins animatable, placeholders and template safety t
   });
 });
 
-test("spine fx CLI adds, sets, lists and removes (repeatable --param)", () => {
-  withFxWorkspace((ws) => {
+test("spine fx CLI adds, sets, lists and removes (repeatable --param)", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-fx-"));
+  const ws = path.join(tmp, "proj");
+  try {
+    initWorkspace({ dir: ws, title: "fx", aspect: "16:9", fps: 30 });
     writeExtension(ws, FXDEMO_MANIFEST);
     enableExtensionInWorkspace({ workspaceDir: ws, name: "fxdemo" });
     const { clipId } = setupClip(ws);
-    const run = (rest: string[], flags: Record<string, string | boolean>): void => {
+    const run = async (rest: string[], flags: Record<string, string | boolean>): Promise<void> => {
       const ctx: CliCommandContext = {
         group: "spine",
         action: "fx",
@@ -612,12 +615,12 @@ test("spine fx CLI adds, sets, lists and removes (repeatable --param)", () => {
       const orig = console.log;
       console.log = () => {};
       try {
-        runSpineCommand(ctx);
+        await runSpineCommand(ctx);
       } finally {
         console.log = orig;
       }
     };
-    run(["add"], { clip: clipId, kind: "ext:fxdemo/soft_blur", param: "sigma=8" });
+    await run(["add"], { clip: clipId, kind: "ext:fxdemo/soft_blur", param: "sigma=8" });
     assert.deepEqual(listSpineFx({ workspaceDir: ws, clipId }).fx[0].params, { sigma: 8 });
     const savedArgv = process.argv;
     process.argv = [
@@ -636,7 +639,7 @@ test("spine fx CLI adds, sets, lists and removes (repeatable --param)", () => {
       "b=2",
     ];
     try {
-      run(["add"], { clip: clipId, kind: "ext:fxdemo/duo" });
+      await run(["add"], { clip: clipId, kind: "ext:fxdemo/duo" });
     } finally {
       process.argv = savedArgv;
     }
@@ -644,14 +647,16 @@ test("spine fx CLI adds, sets, lists and removes (repeatable --param)", () => {
       listSpineFx({ workspaceDir: ws, clipId }).fx.find((f) => f.kind === "ext:fxdemo/duo")?.params,
       { a: 1, b: 2 }
     );
-    run(["set"], { clip: clipId, fx: "fx_01", params: '{"sigma": 9}' });
+    await run(["set"], { clip: clipId, fx: "fx_01", params: '{"sigma": 9}' });
     assert.deepEqual(listSpineFx({ workspaceDir: ws, clipId }).fx[0].params, { sigma: 9 });
-    run(["remove"], { clip: clipId, fx: "fx_01" });
+    await run(["remove"], { clip: clipId, fx: "fx_01" });
     assert.ok(!listSpineFx({ workspaceDir: ws, clipId }).fx.some((f) => f.id === "fx_01"));
-    run(["list"], { clip: clipId });
-    assert.throws(() => run(["bogus"], { clip: clipId }), /subcommand/);
-    assert.throws(() => run(["add"], { clip: clipId }), /either '--kind/);
-  });
+    await run(["list"], { clip: clipId });
+    await assert.rejects(run(["bogus"], { clip: clipId }), /subcommand/);
+    await assert.rejects(run(["add"], { clip: clipId }), /either '--kind/);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("disabled fx emits no filters and its envelopes stay dormant", () => {

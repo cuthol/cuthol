@@ -28,10 +28,25 @@ import {
   CutholBridgeV1, getCutholRuntimeJsSource
 } from "./cuthol_runtime.js";
 import { resolveExtension } from "../extensions/manager.js";
+
+/**
+ * Extension resolution, deliberately unmemoized: the registry inputs live on
+ * disk and can change between two calls of one process (tests, Live) without
+ * starting a new command generation, so a memoized answer could resolve a
+ * stale extension for the rest of the command.
+ */
+function resolveExtensionCached(
+  seq: CutholSequence,
+  name: string,
+  rootDir: string
+): ReturnType<typeof resolveExtension> {
+  return resolveExtension(name, rootDir);
+}
 import { syncSharedProjectAssetsToComposition } from "./bridge_extension_assets.js";
 import { exportBridgeDataForCue, isAutoAnalyzingInBridge } from "./bridge_export_cue.js";
-import { analyzeCompositionDataUsage, computeUsedBridgePayloadHashes, hashDirectoryRecursive, extractScalarHyperFramesVariables, findBundledGsapMinJs } from "./bridge_hash.js";
-export { hashDirectoryRecursive, extractScalarHyperFramesVariables, analyzeCompositionDataUsage, hashCompositionFilesExcludingBridgeData, computeUsedBridgePayloadHashes, compositionUsesAudio } from "./bridge_hash.js";
+import { analyzeCompositionDataUsage, analyzeCompositionDataUsageCached, beginCompositionSweep, computeUsedBridgePayloadHashes, endCompositionSweep, hashDirectoryRecursive, extractScalarHyperFramesVariables, findBundledGsapMinJs, invalidateCompositionDirHashes } from "./bridge_hash.js";
+import { currentHashGeneration, hashFileContent, readTextIfExists, writeFileCached } from "../core/file_hash_index.js";
+export { hashDirectoryRecursive, extractScalarHyperFramesVariables, analyzeCompositionDataUsage, analyzeCompositionDataUsageCached, hashCompositionFilesExcludingBridgeData, computeUsedBridgePayloadHashes, compositionUsesAudio, getCompositionDirHashes, getCompositionFingerprint, invalidateCompositionDirHashes, memoizedCompositionDirHash } from "./bridge_hash.js";
 export type { CompositionDataUsage } from "./bridge_hash.js";
 export { syncEnabledExtensionAssetsToComposition, detectCompositionExtensionCopyDrift, syncSharedProjectAssetsToComposition, compositionReferencesSharedAssets } from "./bridge_extension_assets.js";
 export { exportBridgeDataForCue } from "./bridge_export_cue.js";
@@ -86,10 +101,8 @@ export function syncCompositionBridgeFiles(
   // 1. Check if `cuthol-data.json` already has the exact same `sliceHash` (and `global` payload)
   const entryRel = cue.composition.entry_html || "index.html";
   const entryHtmlPath = path.join(compDir, entryRel);
-  const existingEntryHtml = fs.existsSync(entryHtmlPath)
-    ? fs.readFileSync(entryHtmlPath, "utf8")
-    : null;
-  const usage = analyzeCompositionDataUsage(compDir, entryRel, cue.composition.props);
+  const existingEntryHtml = readTextIfExists(entryHtmlPath);
+  const usage = analyzeCompositionDataUsageCached(compDir, entryRel, cue.composition.props);
   const compUsesGlobal = usage.usesAnyGlobal;
 
   let existingHash: string | null = null;
@@ -100,7 +113,7 @@ export function syncCompositionBridgeFiles(
   let hasExistingGlobal = false;
   if (fs.existsSync(dataJsonPath) && fs.existsSync(dataJsPath)) {
     try {
-      existingDataJsonRaw = fs.readFileSync(dataJsonPath, "utf8");
+      existingDataJsonRaw = readTextIfExists(dataJsonPath) ?? fs.readFileSync(dataJsonPath, "utf8");
       const parsed = JSON.parse(existingDataJsonRaw) as Partial<CutholBridgeV1> & {
         hash?: string;
         global?: { hash?: string };
@@ -134,27 +147,38 @@ export function syncCompositionBridgeFiles(
   } = {};
   if (fs.existsSync(metaSidecarPath)) {
     try {
-      existingBridgeMeta = JSON.parse(fs.readFileSync(metaSidecarPath, "utf8"));
+      const metaRaw = readTextIfExists(metaSidecarPath) ?? fs.readFileSync(metaSidecarPath, "utf8");
+      existingBridgeMeta = JSON.parse(metaRaw);
     } catch {
       existingBridgeMeta = {};
     }
   }
 
-  const jsonStr = JSON.stringify(bridgeData, null, 2);
   const newWarningsJson = JSON.stringify(bridgeData.warnings ?? []);
   const sliceChanged = existingHash !== bridgeData.hash;
   const globalChanged = existingGlobalHash !== (bridgeData.global?.hash ?? null);
   const warningsChanged = existingWarningsJson !== newWarningsJson;
-  const fullJsonChanged = existingDataJsonRaw !== jsonStr;
 
-  const needsDataWrite =
+  // The pretty-printed payload is the most expensive value built here (global
+  // audio envelopes run to thousands of frames), yet it only matters when an
+  // earlier signal already forces a write or an explicit sync compares bytes.
+  // Untouched compositions skip the stringify entirely; the write decision is
+  // unchanged, so bytes on disk are identical.
+  const needsDataWriteEarly =
     sliceChanged ||
     !hasExistingGlobal ||
     warningsChanged ||
     (compUsesGlobal && globalChanged) ||
     usedSliceChanged ||
-    usedGlobalChanged ||
-    (options?.explicit === true && fullJsonChanged);
+    usedGlobalChanged;
+  let jsonStr = "";
+  let fullJsonChanged = false;
+  if (needsDataWriteEarly || options?.explicit === true) {
+    jsonStr = JSON.stringify(bridgeData, null, 2);
+    fullJsonChanged = existingDataJsonRaw !== jsonStr;
+  }
+
+  const needsDataWrite = needsDataWriteEarly || (options?.explicit === true && fullJsonChanged);
 
   let validLegacyDirHashes = Array.isArray(existingBridgeMeta.validLegacyDirHashes)
     ? [...existingBridgeMeta.validLegacyDirHashes]
@@ -175,11 +199,10 @@ export function syncCompositionBridgeFiles(
 
   if (needsDataWrite) {
     const compactJsPayload = JSON.stringify(bridgeData);
-    fs.writeFileSync(dataJsonPath, jsonStr, "utf8");
-    fs.writeFileSync(
+    writeFileCached(dataJsonPath, jsonStr);
+    writeFileCached(
       dataJsPath,
-      `/* Auto-generated by Cuthol (${bridgeData.hash}) — window-local + global timeline slice */\nwindow.__CUTHOL_DATA__ = ${compactJsPayload};\n`,
-      "utf8"
+      `/* Auto-generated by Cuthol (${bridgeData.hash}) — window-local + global timeline slice */\nwindow.__CUTHOL_DATA__ = ${compactJsPayload};\n`
     );
     updated = true;
     updatedFiles.push("assets/cuthol-data.json", "assets/cuthol-data.js");
@@ -203,23 +226,32 @@ export function syncCompositionBridgeFiles(
     }
   }
 
-  try {
-    fs.writeFileSync(
-      metaSidecarPath,
-      JSON.stringify(
-        {
-          usedSliceHash: nextUsedHashes.usedSliceHash,
-          usedGlobalHash: nextUsedHashes.usedGlobalHash,
-          validLegacyDirHashes,
-          lastDataChangeReason,
-        },
-        null,
-        2
-      ),
-      "utf8"
-    );
-  } catch {
-    // ignore sidecar write error
+  // Conditional sidecar write: the previous unconditional rewrite touched the
+  // mtime of every composition on every sync, invalidating content hashes.
+  const nextMetaJson = JSON.stringify(
+    {
+      usedSliceHash: nextUsedHashes.usedSliceHash,
+      usedGlobalHash: nextUsedHashes.usedGlobalHash,
+      validLegacyDirHashes,
+      lastDataChangeReason,
+    },
+    null,
+    2
+  );
+  let existingMetaRaw: string | null = null;
+  if (fs.existsSync(metaSidecarPath)) {
+    try {
+      existingMetaRaw = readTextIfExists(metaSidecarPath);
+    } catch {
+      existingMetaRaw = null;
+    }
+  }
+  if (existingMetaRaw !== nextMetaJson) {
+    try {
+      writeFileCached(metaSidecarPath, nextMetaJson);
+    } catch {
+      // ignore sidecar write error
+    }
   }
 
   // 2. Conditionally write `cuthol-runtime.js` only if missing or content differs
@@ -233,11 +265,9 @@ export function syncCompositionBridgeFiles(
       "if (!audioFps || !arr || !arr.length) return 0;",
       "if (!audioFps || !arr || !arr.length) { var aw = (Array.isArray(d.warnings) && d.warnings[0]) || 'Audio energy (C.audio) data empty — C.audio returns 0'; if (warnings.indexOf(aw) < 0) warnings.push(aw); return 0; }"
     );
-  const existingRuntime = fs.existsSync(runtimeJsPath)
-    ? fs.readFileSync(runtimeJsPath, "utf8")
-    : null;
+  const existingRuntime = readTextIfExists(runtimeJsPath);
   if (existingRuntime !== runtimeSource) {
-    fs.writeFileSync(runtimeJsPath, runtimeSource, "utf8");
+    writeFileCached(runtimeJsPath, runtimeSource);
     updated = true;
     updatedFiles.push("assets/cuthol-runtime.js");
     updateReasons.push("runtime_updated");
@@ -246,11 +276,9 @@ export function syncCompositionBridgeFiles(
   // 3. Conditionally write `cuthol-vars.json` (scalar variables for `--variables-file`)
   const scalarVars = extractScalarHyperFramesVariables(cue.composition.props);
   const varsJsonStr = JSON.stringify(scalarVars, null, 2);
-  const existingVars = fs.existsSync(varsJsonPath)
-    ? fs.readFileSync(varsJsonPath, "utf8")
-    : null;
+  const existingVars = readTextIfExists(varsJsonPath);
   if (existingVars !== varsJsonStr) {
-    fs.writeFileSync(varsJsonPath, varsJsonStr, "utf8");
+    writeFileCached(varsJsonPath, varsJsonStr);
     updated = true;
     updatedFiles.push("assets/cuthol-vars.json");
     updateReasons.push("props_vars_updated");
@@ -300,7 +328,7 @@ export function syncCompositionBridgeFiles(
     if (enabledRefs.length > 0) {
       for (const extRef of enabledRefs) {
         try {
-          const ext = resolveExtension(extRef.name, paths.rootDir);
+          const ext = resolveExtensionCached(seq, extRef.name, paths.rootDir);
           const isPinnedMatch =
             ext.contentHash === extRef.content_hash && ext.version === extRef.version;
           const allowOverwriteExistingCopy = isPinnedMatch && options?.explicit === true;
@@ -317,17 +345,25 @@ export function syncCompositionBridgeFiles(
                 if (ent.isDirectory()) {
                   syncDirConditionally(sFull, dFull, relFile);
                 } else if (ent.isFile()) {
-                  const sBuf = fs.readFileSync(sFull);
+                  // Hash first; read bytes lazily only when a copy must be
+                  // written (copies are virtually always in sync).
                   const dExists = fs.existsSync(dFull);
-                  if (
+                  const needsWrite =
                     !dExists ||
-                    (allowOverwriteExistingCopy && Buffer.compare(sBuf, fs.readFileSync(dFull)) !== 0)
-                  ) {
-                    fs.writeFileSync(dFull, sBuf);
-                    updated = true;
-                    updatedFiles.push(relFile);
-                    if (!updateReasons.includes("extension_assets_updated")) {
-                      updateReasons.push("extension_assets_updated");
+                    (allowOverwriteExistingCopy &&
+                      hashFileContent(sFull) !== hashFileContent(dFull));
+                  if (needsWrite) {
+                    const sBuf = fs.readFileSync(sFull);
+                    if (
+                      !dExists ||
+                      (allowOverwriteExistingCopy && Buffer.compare(sBuf, fs.readFileSync(dFull)) !== 0)
+                    ) {
+                      writeFileCached(dFull, sBuf);
+                      updated = true;
+                      updatedFiles.push(relFile);
+                      if (!updateReasons.includes("extension_assets_updated")) {
+                        updateReasons.push("extension_assets_updated");
+                      }
                     }
                   }
                 }
@@ -341,19 +377,18 @@ export function syncCompositionBridgeFiles(
             const srcHelperPath = path.join(ext.dir, ext.helperRelPath);
             if (fs.existsSync(srcHelperPath)) {
               activeHelperNames.push(ext.name);
-              const rawHelper = fs.readFileSync(srcHelperPath, "utf8");
+              const rawHelper =
+                readTextIfExists(srcHelperPath) ?? fs.readFileSync(srcHelperPath, "utf8");
               const wrappedHelper =
                 `if (typeof window !== "undefined") { window.__cuthol = window.__cuthol || {}; window.__cuthol.ext = window.__cuthol.ext || {}; }\n` +
                 rawHelper;
               const destHelperPath = path.join(assetsDir, `cuthol-ext-${ext.name}.js`);
-              const existingHelper = fs.existsSync(destHelperPath)
-                ? fs.readFileSync(destHelperPath, "utf8")
-                : null;
+              const existingHelper = readTextIfExists(destHelperPath);
               if (
                 existingHelper === null ||
                 (allowOverwriteExistingCopy && existingHelper !== wrappedHelper)
               ) {
-                fs.writeFileSync(destHelperPath, wrappedHelper, "utf8");
+                writeFileCached(destHelperPath, wrappedHelper);
                 updated = true;
                 updatedFiles.push(`assets/cuthol-ext-${ext.name}.js`);
                 if (!updateReasons.includes("extension_helper_updated")) {
@@ -408,7 +443,7 @@ export function syncCompositionBridgeFiles(
     }
 
     if (nextHtml !== html) {
-      fs.writeFileSync(entryHtmlPath, nextHtml, "utf8");
+      writeFileCached(entryHtmlPath, nextHtml);
       updated = true;
       updatedFiles.push(entryRel);
       updateReasons.push("entry_html_scripts_injected");
@@ -431,6 +466,7 @@ export function syncCompositionBridgeFiles(
       const bundledGsap = findBundledGsapMinJs();
       if (bundledGsap) {
         fs.copyFileSync(bundledGsap, gsapPath);
+        invalidateCompositionDirHashes(compDir);
         updated = true;
         updatedFiles.push("assets/gsap.min.js");
         updateReasons.push("gsap_injected");
@@ -442,6 +478,10 @@ export function syncCompositionBridgeFiles(
   const reason = updated
     ? updateReasons.join(", ")
     : "already_in_sync (bridge files on disk already match current sequence state; Cuthol auto-syncs on edits and media analysis)";
+
+  // Every write above changed bytes under this composition: drop memoized
+  // fingerprints/hashes so later reads in the same command see the new state.
+  if (updated) invalidateCompositionDirHashes(compDir);
 
   return {
     updated,
@@ -486,24 +526,33 @@ export function syncAllCompositionBridges(
     reason: string;
   }> = [];
 
-  for (const lane of seq.lanes) {
-    for (const cue of lane.cues) {
-      if (cue.kind === "composition" && cue.composition) {
-        const res = syncCompositionBridgeFiles(seq, cue, paths, options);
-        if (res) {
-          results.push({
-            cueId: cue.id,
-            compositionDir: cue.composition.composition_dir,
-            updated: res.updated,
-            in_sync: res.in_sync,
-            sliceHash: res.sliceHash,
-            globalHash: res.globalHash,
-            updated_files: res.updated_files,
-            reason: res.reason,
-          });
+  // One fingerprint-sharing sweep for the whole pass: every composition is
+  // stat-walked once no matter how many cues and callers touch it. Cuthol's
+  // own writes evict per composition; synchronous execution means no
+  // external edit can interleave.
+  beginCompositionSweep();
+  try {
+    for (const lane of seq.lanes) {
+      for (const cue of lane.cues) {
+        if (cue.kind === "composition" && cue.composition) {
+          const res = syncCompositionBridgeFiles(seq, cue, paths, options);
+          if (res) {
+            results.push({
+              cueId: cue.id,
+              compositionDir: cue.composition.composition_dir,
+              updated: res.updated,
+              in_sync: res.in_sync,
+              sliceHash: res.sliceHash,
+              globalHash: res.globalHash,
+              updated_files: res.updated_files,
+              reason: res.reason,
+            });
+          }
         }
       }
     }
+  } finally {
+    endCompositionSweep();
   }
   return results;
 }

@@ -1,19 +1,11 @@
 // CLI 'verify', 'monitor', 'render', and 'brief' command group handlers (split out of cli.ts).
-import { BriefLens, renderSequenceBrief } from "./brief/inspector.js";
-import {
-  adoptExternalCompositionEdits,
-  detectExternalChanges,
-  formatExternalNotice,
-} from "./core/external_changes.js";
-import { RenderPreset } from "./compositor/compiler.js";
-import { CutholDiagnostic, CutholError, DIAGNOSTICS, VerificationGateId } from "./core/diagnostics.js";
+import type { BriefLens } from "./brief/inspector.js";
+import type { RenderPreset } from "./compositor/compiler.js";
+import { CutholError, DIAGNOSTICS } from "./core/diagnostics.js";
+import type { CutholDiagnostic, VerificationGateId } from "./core/diagnostics.js";
 import { parseTimeMs } from "./core/time.js";
 import { computeSequenceDurationMs } from "./core/timeline.js";
-import { loadSequence, toExternalChangesSummary } from "./core/workspace.js";
-import { captureMonitorFrame, captureMonitorSheet } from "./monitor/preview.js";
-import { captureMonitorTimeline } from "./monitor/timeline_view.js";
-import { renderSequenceToMp4 } from "./render/renderer.js";
-import { runWorkspaceVerification } from "./verify/gates.js";
+import { loadSequence, toExternalChangesSummary } from "./core/workspace_read.js";
 import { boolFlag, numFlag, strFlag } from "./cli_args.js";
 import {
   CLI_NOT_HANDLED,
@@ -58,7 +50,8 @@ function attachAtWarning<T extends { diagnostics: CutholDiagnostic[] }>(
   return { ...result, diagnostics: [...result.diagnostics, warning] };
 }
 
-export function runVerifyCommand(ctx: CliCommandContext): CliCommandResult {
+export async function runVerifyCommand(ctx: CliCommandContext): Promise<CliCommandResult> {
+  const { runWorkspaceVerification } = await import("./verify/gates.js");
   const { flags, workspaceDir } = ctx;
   const gatesRaw = strFlag(flags, "gates");
   const gates =
@@ -80,8 +73,9 @@ export function runVerifyCommand(ctx: CliCommandContext): CliCommandResult {
  * untouched) before a read command, so the agent's natural "write the file,
  * then look" loop needs no explicit `changes adopt`. Returns the INFO line or null.
  */
-function autoAdoptCompositionEdits(workspaceDir: string): { diagnostic: CutholDiagnostic; line: string } | null {
+async function autoAdoptCompositionEdits(workspaceDir: string): Promise<{ diagnostic: CutholDiagnostic; line: string } | null> {
   try {
+    const { adoptExternalCompositionEdits } = await import("./core/external_changes.js");
     const adopted = adoptExternalCompositionEdits(workspaceDir, { automatic: true });
     if (!adopted) return null;
     return {
@@ -108,10 +102,12 @@ function hideHud(flags: Record<string, string | boolean>): boolean {
   return (boolFlag(flags, "no-hud", false) ?? false) || ((boolFlag(flags, "hud", true) ?? true) === false);
 }
 
-export function runMonitorCommand(ctx: CliCommandContext): CliCommandResult {
+export async function runMonitorCommand(ctx: CliCommandContext): Promise<CliCommandResult> {
+  const { captureMonitorFrame, captureMonitorSheet } = await import("./monitor/preview.js");
+  const { captureMonitorTimeline } = await import("./monitor/timeline_view.js");
   const { action, rest, flags, workspaceDir } = ctx;
   const adopted = action === "frame" || action === "sheet" || action === "timeline"
-    ? autoAdoptCompositionEdits(workspaceDir)
+    ? await autoAdoptCompositionEdits(workspaceDir)
     : null;
   if (action === "frame") {
     const atRaw = strFlag(flags, "at") ?? rest[0] ?? "0ms";
@@ -193,7 +189,8 @@ export function runMonitorCommand(ctx: CliCommandContext): CliCommandResult {
   return CLI_NOT_HANDLED;
 }
 
-export function runRenderCommand(ctx: CliCommandContext): CliCommandResult {
+export async function runRenderCommand(ctx: CliCommandContext): Promise<CliCommandResult> {
+  const { renderSequenceToMp4 } = await import("./render/renderer.js");
   const { action, rest, flags, workspaceDir } = ctx;
   const isActionPreset =
     action === "draft_480p" ||
@@ -208,7 +205,7 @@ export function runRenderCommand(ctx: CliCommandContext): CliCommandResult {
   const encoderRaw = strFlag(flags, "encoder") as "auto" | "nvenc" | "libx264" | undefined;
   const overlayRes = strFlag(flags, "overlay-res");
   const profile = boolFlag(flags, "profile", false) ?? false;
-  const adopted = autoAdoptCompositionEdits(workspaceDir);
+  const adopted = await autoAdoptCompositionEdits(workspaceDir);
   const res = renderSequenceToMp4({
     workspaceDir,
     preset,
@@ -222,16 +219,18 @@ export function runRenderCommand(ctx: CliCommandContext): CliCommandResult {
   return;
 }
 
-export function runBriefCommand(ctx: CliCommandContext): CliCommandResult {
+export async function runBriefCommand(ctx: CliCommandContext): Promise<CliCommandResult> {
+  const { renderSequenceBrief } = await import("./brief/inspector.js");
+  const extMod = await import("./core/external_changes.js");
   const { action, flags, workspaceDir, formatFlag } = ctx;
   // Brief stays read-only: it reports outside edits (file names) instead of adopting them.
   const { sequence } = loadSequence(workspaceDir);
   // External-change top line (null when clean: outputs stay byte-identical).
-  let extChanges: ReturnType<typeof detectExternalChanges> | null = null;
+  let extChanges: ReturnType<typeof extMod.detectExternalChanges> | null = null;
   let extNotice: string | null = null;
   try {
-    extChanges = detectExternalChanges(workspaceDir);
-    extNotice = formatExternalNotice(extChanges, "cli");
+    extChanges = extMod.detectExternalChanges(workspaceDir);
+    extNotice = extMod.formatExternalNotice(extChanges, "cli");
   } catch {
     extChanges = null;
     extNotice = null;

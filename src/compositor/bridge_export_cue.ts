@@ -18,8 +18,54 @@ import {
   compileLocalWordsPausesSentences,
 } from "./bridge_export_local.js";
 import { compileGlobalBridgeSlice } from "./bridge_export_global.js";
+import { currentHashGeneration } from "../core/file_hash_index.js";
 
 export let isAutoAnalyzingInBridge = false;
+
+// One shared ledger connection per database file per command generation:
+// opening sqlite, initializing the schema and closing it once instead of
+// once per composition cue. Queries are fresh statements, so every read
+// still observes the latest committed data; a new generation (each command)
+// always opens a new connection.
+let sharedLedger: { gen: number; file: string; ledger: MediaLedger } | null = null;
+
+function getSharedLedger(sqliteFile: string): MediaLedger {
+  const gen = currentHashGeneration();
+  if (sharedLedger && (sharedLedger.gen !== gen || sharedLedger.file !== sqliteFile)) {
+    try {
+      sharedLedger.ledger.close();
+    } catch {
+      // ignore close error on rotation
+    }
+    sharedLedger = null;
+  }
+  if (!sharedLedger) {
+    sharedLedger = { gen, file: sqliteFile, ledger: new MediaLedger(sqliteFile) };
+  }
+  return sharedLedger.ledger;
+}
+
+/**
+ * Closes the command-scoped shared ledger, if any. Called at command end so
+ * no sqlite handle outlives the command (stale handles block directory
+ * removal on Windows and pin WAL files).
+ */
+export function closeSharedCommandLedger(): void {
+  if (sharedLedger) {
+    try {
+      sharedLedger.ledger.close();
+    } catch {
+      // ignore close error
+    }
+    sharedLedger = null;
+  }
+}
+
+// One shared connection per database file while a command scope is active
+// (generation > 0); without a scope every context opens its own connection
+// exactly as before. Queries are fresh statements, so every read observes
+// the latest committed data, including writes from other connections in the
+// same process (ingest, auto-analysis, tests).
 
 export interface BridgeCueExportContext {
   seq: CutholSequence;
@@ -109,7 +155,9 @@ function createBridgeCueExportContext(
     paths &&
     (fs.existsSync(paths.ledgerFile) ||
       (usesAudio && fs.existsSync(path.dirname(paths.ledgerFile))))
-      ? new MediaLedger(paths.ledgerFile)
+      ? currentHashGeneration() > 0
+        ? getSharedLedger(paths.ledgerFile)
+        : new MediaLedger(paths.ledgerFile)
       : null;
 
   const localWaveCache = new Map<string, WaveformAnalysisResult>();
@@ -328,6 +376,8 @@ export function exportBridgeDataForCue(
     };
     return outPayload;
   } finally {
-    ledger?.close();
+    // Shared command-scope ledgers are closed on generation rotation; only
+    // per-cue instances (no active scope) are closed here, as before.
+    if (currentHashGeneration() === 0) ledger?.close();
   }
 }

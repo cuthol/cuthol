@@ -26,7 +26,7 @@ Cost: hard `rect`/`split` masks (no feather) render at ~1.1x plain speed.
 Soft or shaped masks evaluate per pixel: ~18x a 1080p segment on the test
 machine, so prefer hard masks for long masters.
 
-## Motion blur (`spine.motion-blur`)
+## Motion blur (`spine(action="motion_blur")`, CLI `spine motion-blur`)
 
 `motion_blur(clip, shutter?, subframes?, off?)` — a shutter over source
 frames: `tmix` blends the current frame with the previous `subframes - 1`

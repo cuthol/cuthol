@@ -10,6 +10,8 @@
 //   --look look_01[:0.6]                look binding
 //   --amount tone=0.5,hsl_01=0.8        block amounts (HSL by id)
 //   --remove tone,hsl:hsl_01            blocks to drop
+import fs from "node:fs";
+import path from "node:path";
 import type { ColorCurvePoint, ColorStageBlockName, ColorStageSpec, HslQualifierBlock } from "./types.js";
 import { COLOR_STAGE_ORDER } from "./types.js";
 
@@ -67,10 +69,16 @@ export interface ParsedColorFlags {
   remove: Array<ColorStageBlockName | `hsl:${string}`>;
 }
 
-export function parseColorFlags(f: ColorFlagInput, current?: ColorStageSpec): ParsedColorFlags {
+export function parseColorFlags(
+  f: ColorFlagInput,
+  current?: ColorStageSpec,
+  flagLabel = "--patch",
+  commandLabel = "color set",
+  fixCommand?: string
+): ParsedColorFlags {
   let patch: ColorStageSpec = {};
   if (f.patch !== undefined) {
-    const obj = typeof f.patch === "string" ? safeJson(f.patch) : f.patch;
+    const obj = typeof f.patch === "string" ? safeJson(f.patch, flagLabel, commandLabel, fixCommand) : f.patch;
     if (!obj || typeof obj !== "object" || Array.isArray(obj)) throw new ColorFlagError("--patch must be a JSON object");
     for (const k of Object.keys(obj)) {
       if (!(COLOR_STAGE_ORDER as readonly string[]).includes(k)) {
@@ -176,12 +184,45 @@ export function parseColorFlags(f: ColorFlagInput, current?: ColorStageSpec): Pa
   return { patch, remove };
 }
 
-function safeJson(s: string): unknown {
+function safeJson(s: string, flagLabel = "--patch", commandLabel = "color set", fixCommand?: string): unknown {
+  const text = resolveJsonFlagFile(s, flagLabel, commandLabel, fixCommand);
   try {
-    return JSON.parse(s);
+    return JSON.parse(text.replace(/\bNaN\b|\bInfinity\b|-Infinity\b/g, "null"));
   } catch {
-    throw new ColorFlagError("--patch must be valid JSON");
+    throw new ColorFlagError(jsonFlagErrorText(text, flagLabel, commandLabel, "a JSON object", fixCommand));
   }
+}
+
+/** Shared inline-JSON / `file:` / `@` loader for colour JSON flags. */
+function resolveJsonFlagFile(s: string, flagLabel: string, commandLabel: string, fixCommand?: string): string {
+  const t = s.trim();
+  const stripped = t.length >= 2 && ((t.startsWith("'") && t.endsWith("'")) || (t.startsWith('"') && t.endsWith('"')));
+  const text = stripped ? t.slice(1, -1).trim() : t;
+  let ref: string | null = null;
+  if (text.startsWith("file:")) ref = text.slice("file:".length);
+  else if (text.startsWith("@")) ref = text.slice(1);
+  if (ref === null) return s;
+  const retry = fixCommand ?? `${flagLabel} file:patch.json`;
+  if (!ref.trim()) throw new ColorFlagError(`${flagLabel} of '${commandLabel}' points at an empty file path; use ${retry}`);
+  const resolved = path.resolve(process.cwd(), ref.trim());
+  try {
+    return fs.readFileSync(resolved, "utf8");
+  } catch (err) {
+    const detail = err instanceof Error ? err.message.split("\n")[0] : String(err);
+    throw new ColorFlagError(`${flagLabel} of '${commandLabel}' points at a file that cannot be read ('${text}' resolved to '${resolved}': ${detail}). Retry as '${retry}' (write the JSON into the file first).`);
+  }
+}
+
+function jsonFlagErrorText(received: string, flagLabel: string, commandLabel: string, expected: string, fixCommand?: string): string {
+  const text = received.trim();
+  const preview = text.length > 60 ? `${text.slice(0, 60)}…` : text;
+  const stripped = text.length > 0 && /[{,[]\s*[A-Za-z_][A-Za-z0-9_]*\s*:/.test(text);
+  const retry = fixCommand ?? `${flagLabel} file:patch.json`;
+  return (
+    `${flagLabel} of '${commandLabel}' got text that is not JSON (got '${preview}'; expected ${expected}).` +
+    (stripped ? " The shell stripped the double quotes (typical: Windows PowerShell to cuthol.cmd turns '{\"a\":1}' into '{a:1}')." : "") +
+    ` Retry as '${retry}' (write the JSON into the file first).`
+  );
 }
 
 /** One-line description of a stage in block units (for agent output). */

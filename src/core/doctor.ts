@@ -88,7 +88,7 @@ function satisfiesEngines(version: string, range: string): boolean {
 
 export function checkNode(probes: DoctorProbes = {}): DoctorCheck {
   const version = probes.nodeVersion ?? process.version;
-  const range = probes.nodeEnginesRange ?? readPackageJsonField("engines.node") ?? ">=22.5.0";
+  const range = probes.nodeEnginesRange ?? readPackageJsonField("engines.node") ?? ">=22.12.0";
   if (satisfiesEngines(version, range)) {
     return { id: "node", status: "ok", found: `node ${version} satisfies ${range}`, fix: "none" };
   }

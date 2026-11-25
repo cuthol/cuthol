@@ -33,8 +33,8 @@ export const LOCAL_ASR_ENGINE_REVISION = "v5";
 /** Parallel chunk workers for keyless local ASR (each loads its own model copy). */
 export function localAsrJobs(): number {
   const raw = (process.env.CUTHOL_LOCAL_ASR_JOBS ?? "").trim();
-  const n = raw ? Number.parseInt(raw, 10) : 2;
-  if (!Number.isFinite(n)) return 2;
+  const n = raw ? Number.parseInt(raw, 10) : 4;
+  if (!Number.isFinite(n)) return 4;
   return Math.min(8, Math.max(1, Math.floor(n)));
 }
 

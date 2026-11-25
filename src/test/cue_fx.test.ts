@@ -298,29 +298,32 @@ test("brief shows fx lines only when fx exist", () => {
   });
 });
 
-test("CLI spine fx --item plus legacy --clip, catalog shows alpha", () => {
-  withWs((ws) => {
+test("CLI spine fx --item plus legacy --clip, catalog shows alpha", async () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-cuefx-"));
+  const ws = path.join(tmp, "proj");
+  try {
+    initWorkspace({ dir: ws, title: "cuefx", aspect: "16:9", fps: 30 });
     setupBrollCue(ws);
     const cueId = loadSequence(ws).sequence.lanes.flatMap((l) => l.cues)[0].id;
-    const run = (rest: string[], flags: Record<string, string | boolean>): void => {
+    const run = async (rest: string[], flags: Record<string, string | boolean>): Promise<void> => {
       const ctx: CliCommandContext = {
         group: "spine", action: "fx", rest, flags, workspaceDir: ws, formatFlag: "",
       };
       const orig = console.log;
       console.log = () => {};
       try {
-        runSpineCommand(ctx);
+        await runSpineCommand(ctx);
       } finally {
         console.log = orig;
       }
     };
-    run(["add"], { item: cueId, filter: "gblur=sigma=3" });
+    await run(["add"], { item: cueId, filter: "gblur=sigma=3" });
     assert.deepEqual(listSpineFx({ workspaceDir: ws, item: cueId }).fx.map((f) => f.id), ["fx_01"]);
-    run(["set"], { item: cueId, fx: "fx_01", filter: "gblur=sigma=5" });
-    run(["list"], { item: cueId });
-    run(["remove"], { clip: cueId, fx: "fx_01" });
+    await run(["set"], { item: cueId, fx: "fx_01", filter: "gblur=sigma=5" });
+    await run(["list"], { item: cueId });
+    await run(["remove"], { clip: cueId, fx: "fx_01" });
     assert.deepEqual(listSpineFx({ workspaceDir: ws, item: cueId }).fx, []);
-    assert.throws(() => run(["add"], {}), /--item/);
+    await assert.rejects(run(["add"], {}), /--item/);
     const dir = path.join(ws, ".cuthol", "extensions", "alphademo");
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(
@@ -338,7 +341,9 @@ test("CLI spine fx --item plus legacy --clip, catalog shows alpha", () => {
     const defs = listEffectDefinitions(loadSequence(ws).sequence, { rootDir: ws });
     assert.equal(defs.find((d) => d.kind === "ext:alphademo/blurry")?.alpha, "process");
     assert.equal(defs.find((d) => d.kind === "ext:alphademo/grainy")?.alpha, "keep");
-  });
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });
 
 test("MCP: tool count unchanged, spine fx add with item works", async () => {

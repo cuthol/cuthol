@@ -17,6 +17,7 @@ import { W1C3_DOCS } from "./docs_w1c3.js";
 import { W1D_DOCS } from "./docs_w1d.js";
 import { W1D2_DOCS } from "./docs_w1d2.js";
 import { EFFECTS_DOCS } from "./docs_effects.js";
+import { JSON_FLAG_DOCS } from "./docs_kz1.js";
 import { TOPIC_DOCS } from "./docs_topics.js";
 
 export const ALL_DIAGNOSTIC_DOCS: DiagnosticDoc[] = [
@@ -37,6 +38,7 @@ export const ALL_DIAGNOSTIC_DOCS: DiagnosticDoc[] = [
   ...W1D2_DOCS,
   ...EFFECTS_DOCS,
   ...W1E_DOCS,
+  ...JSON_FLAG_DOCS,
 ];
 
 export interface ExplainResult {

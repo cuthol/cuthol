@@ -102,23 +102,35 @@ function computeAlphaBboxJsonFromRgbaBuffer(buf: Buffer, probeW = 320, probeH = 
   );
 }
 
+interface SheetLaneOrder {
+  lane: CutholSequence["lanes"][number];
+  orderedCues: CutholSequence["lanes"][number]["cues"];
+}
+
 function resolveActiveCompositionRefsAt(
   seq: CutholSequence,
   paths: WorkspacePaths,
   exactFrameMs: number,
-  fps: number
+  fps: number,
+  laneOrder?: SheetLaneOrder[]
 ): { canReuseTemplate: boolean; signature: string; refs: ActiveCompFrameRef[] } {
   const frameDurMs = 1000 / Math.max(1, fps);
   const winStart = exactFrameMs - 1e-3;
   const winEnd = exactFrameMs + frameDurMs;
   const refs: ActiveCompFrameRef[] = [];
-  const sortedLanes = [...seq.lanes].sort((a, b) => a.z_index - b.z_index);
+  // Lane/cue order does not depend on the cell time: the sheet builds it
+  // once and reuses it for every cell instead of re-sorting per cell.
+  const lanes =
+    laneOrder ??
+    [...seq.lanes]
+      .sort((a, b) => a.z_index - b.z_index)
+      .map((lane) => ({
+        lane,
+        orderedCues: [...lane.cues].sort((a, b) => resolveCueStartMs(seq, a) - resolveCueStartMs(seq, b)),
+      }));
 
-  for (const lane of sortedLanes) {
+  for (const { lane, orderedCues } of lanes) {
     if (lane.muted) continue;
-    const orderedCues = [...lane.cues].sort(
-      (a, b) => resolveCueStartMs(seq, a) - resolveCueStartMs(seq, b)
-    );
     for (const cue of orderedCues) {
       if (cue.kind !== "composition" || !cue.composition) continue;
       const cueStartMs = resolveCueStartMs(seq, cue);
@@ -320,13 +332,21 @@ export function renderMultipleCompositeFramesRgb24(
   const batchShaderJobs: PrePassJob[] = [];
   const releaseReadLocks: Array<() => void> = [];
   const planWarnings: CutholDiagnostic[][] = [];
+  // Lane/cue order is identical for every cell: sort once per sheet instead
+  // of once per cell inside `resolveActiveCompositionRefsAt`.
+  const sheetLaneOrder: SheetLaneOrder[] = [...seq.lanes]
+    .sort((a, b) => a.z_index - b.z_index)
+    .map((lane) => ({
+      lane,
+      orderedCues: [...lane.cues].sort((a, b) => resolveCueStartMs(seq, a) - resolveCueStartMs(seq, b)),
+    }));
   const plans: SingleFrameFfmpegPlan[] = timestampsMs.map((atMs) => {
     // Snap from the raw request, not the rounded clamp: rounding first can
     // push a timestamp inside frame N onto frame N+1 across a cue boundary.
     const frameIdx = Math.max(0, Math.min(lastFrameIdx, Math.floor((atMs / 1000) * fps + 1e-6)));
     const exactFrameMs = (frameIdx * 1000) / fps;
 
-    const activeInfo = resolveActiveCompositionRefsAt(seq, paths, exactFrameMs, fps);
+    const activeInfo = resolveActiveCompositionRefsAt(seq, paths, exactFrameMs, fps, sheetLaneOrder);
     const compiledPlan = compileSequenceRenderPlan(seq, paths, preset, {
       activeWindowMs: [exactFrameMs, exactFrameMs + frameDurMs],
       singleFrameAtMs: exactFrameMs,

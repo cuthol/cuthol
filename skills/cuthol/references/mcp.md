@@ -37,7 +37,7 @@ with the absolute `dist/mcp_bin.js` path as above, or
 `"command": "cmd", "args": ["/c", "cuthol", "mcp"]`.
 `cuthol setup` prints the exact entry for your machine.
 
-Requirements on the machine: Node.js ≥ 22.5, `ffmpeg`/`ffprobe` 8.x on PATH (or `cuthol setup --ffmpeg --apply`), and a Chrome that HyperFrames can launch (for overlays). API keys are only needed for transcription and voiceover; they can also live in a `.env` file inside the project folder. After adding or editing `.mcp.json`, restart the MCP client session and approve the server; to verify the server directly over stdio, send `initialize` followed by `tools/list` to `node dist/cli.js mcp` and confirm 15 tools are returned.
+Requirements on the machine: Node.js ≥ 22.12, `ffmpeg`/`ffprobe` 8.x on PATH (or `cuthol setup --ffmpeg --apply`), and a Chrome that HyperFrames can launch (for overlays). API keys are only needed for transcription and voiceover; they can also live in a `.env` file inside the project folder. After adding or editing `.mcp.json`, restart the MCP client session and approve the server; to verify the server directly over stdio, send `initialize` followed by `tools/list` to `node dist/cli.js mcp` and confirm 15 tools are returned.
 
 Environment switches:
 - **MCP server**: `CUTHOL_WORKSPACE` (default project), `CUTHOL_MCP_PROGRESSIVE=1` (start with core tools only; unlock with `discover_capabilities`), `CUTHOL_MCP_STRUCTURED=1` (also send the full JSON as `structuredContent`), `CUTHOL_MCP_TIMEOUT_MS`.

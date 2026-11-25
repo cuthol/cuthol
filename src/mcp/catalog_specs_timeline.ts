@@ -123,7 +123,7 @@ export const TIMELINE_ACTION_SPECS: ActionSpec[] = [
       { name: "duration", type: "time", description: `Transition length (default 400ms; at most half of the shorter clip). ${TIME_HELP}` },
       { name: "easing", type: "string", description: "Easing curve.", enum: ["linear", "ease_in", "ease_out", "ease_in_out", "cubic_bezier"] },
       { name: "bezier", type: "string", flag: "easing", description: "Cubic-bezier control points 'x1,y1,x2,y2' with x1,x2 in 0..1, e.g. '0.25,0.1,0.25,1'. Sent as --easing; overrides `easing` when both are given." },
-      { name: "params", type: "object", description: "Parameters of an extension (ext:) transition as an object, e.g. {\"yon\": \"sol\"}. Only for ext: kinds." },
+      { name: "params", type: "object", description: "Parameters of an extension (ext:) transition as an object (CLI also takes file:path, e.g. file:params.json), e.g. {\"yon\": \"sol\"}. Only for ext: kinds." },
     ],
   },
   {
@@ -262,7 +262,7 @@ export const TIMELINE_ACTION_SPECS: ActionSpec[] = [
       p.clip("Spine clip (sp_XX) id (alias of `item`).", false),
       { name: "kind", type: "string", description: "Effect kind: 'motion' for a placement layer (x_pct/y_pct/rotation_deg add, scale_x/scale_y/opacity multiply), or extension effect 'ext:<extension>/<name>' (enable the extension first)." },
       { name: "filter", type: "string", description: "Raw ffmpeg chain instead of kind, e.g. 'gblur=sigma=3'. No graph separators or file-reading filters." },
-      { name: "params", type: "object", description: "Effect parameters as an object, e.g. {\"sigma\": 4}." },
+      { name: "params", type: "object", description: "Effect parameters as an object (CLI also takes file:path, e.g. file:params.json), e.g. {\"sigma\": 4}." },
     ],
   },
   {
@@ -276,7 +276,7 @@ export const TIMELINE_ACTION_SPECS: ActionSpec[] = [
       p.clip("Spine clip (sp_XX) id (alias of `item`).", false),
       { name: "fx", type: "string", description: "Effect id inside the item (fx_XX).", required: true },
       { name: "filter", type: "string", description: "New raw chain (only for kind 'ffmpeg' effects)." },
-      { name: "params", type: "object", description: "Parameter updates as an object, e.g. {\"sigma\": 6}." },
+      { name: "params", type: "object", description: "Parameter updates as an object (CLI also takes file:path, e.g. file:params.json), e.g. {\"sigma\": 6}." },
       { name: "enabled", type: "boolean", description: "Enable (true) or disable (false) the entry without removing it." },
     ],
   },
@@ -332,7 +332,7 @@ export const TIMELINE_ACTION_SPECS: ActionSpec[] = [
     params: [
       { name: "kind", type: "string", description: "Effect kind to see (e.g. 'ext:<extension>/<name>')." },
       { name: "filter", type: "string", description: "Raw ffmpeg chain instead of kind." },
-      { name: "params", type: "object", description: "Effect parameters as an object, e.g. {\"sigma\": 4}." },
+      { name: "params", type: "object", description: "Effect parameters as an object (CLI also takes file:path, e.g. file:params.json), e.g. {\"sigma\": 4}." },
       { name: "sweep", type: "string", description: "Sweep one param: 'param=a..b[:n]' (default 5 rows)." },
       { name: "at", type: "string", description: "Comma-separated seconds for the columns (default 3 spread over the card)." },
       { name: "on", type: "string", description: "'card' (default) or a spine clip id whose source is copied into the sandbox." },
@@ -348,7 +348,7 @@ export const TIMELINE_ACTION_SPECS: ActionSpec[] = [
     params: [
       { name: "item", type: "string", description: "Spine clip (sp_XX) id.", required: true },
       { name: "preset", type: "string", description: "Preset ref 'ext:<extension>/<name>'." },
-      { name: "params", type: "object", description: "Preset parameter values as an object, e.g. {\"amount\": 1}." },
+      { name: "params", type: "object", description: "Preset parameter values as an object (CLI also takes file:path, e.g. file:params.json), e.g. {\"amount\": 1}." },
       { name: "beats", type: "string", description: "Music asset handle (aud_XX) whose beat grid paces 'every: beat' repeats." },
       { name: "fx", type: "string", description: "Effect id (fx_XX) for --reapply of one entry." },
       { name: "reapply", type: "boolean", description: "Regenerate from the record instead of applying (needs fx, or all)." },
@@ -462,7 +462,7 @@ export const TIMELINE_ACTION_SPECS: ActionSpec[] = [
       { name: "offset", type: "time", description: "Offset from the anchor clip's start." },
       { name: "duration", type: "time", description: "Overlay length (default 4000ms)." },
       { name: "z_index", type: "number", description: "Layer stacking order (higher renders on top; within the same lane, higher z_index or later cues render on top)." },
-      { name: "props", type: "object", description: "Scalar props exposed to the HTML as window.__cuthol.props and HyperFrames variables." },
+      { name: "props", type: "object", description: "Scalar props exposed to the HTML as window.__cuthol.props and HyperFrames variables (CLI also takes file:path, e.g. file:props.json)." },
       { name: "mode", type: "string", description: "overlay_alpha (default, true alpha) or scene_host (only for backdrop-filter / mix-blend-mode that must read the video).", enum: ["overlay_alpha", "scene_host"] },
       { name: "entry", type: "string", description: "Entry HTML file (default index.html)." },
       { name: "scaffold", type: "string", description: "Create the folder from this preset if it has no index.html yet.", enum: ["blank", "counter", "beat_cards", "audio_glow", "cut_phases", "lower_third", "title_card", "stat_callout", "badge_overlay"] },

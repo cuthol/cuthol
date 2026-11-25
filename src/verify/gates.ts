@@ -19,9 +19,12 @@ import {
   VerificationGateId,
 } from "../core/diagnostics.js";
 import { adoptExternalCompositionEdits } from "../core/external_changes.js";
+import { beginHashCommandScope, flushFileHashIndex } from "../core/file_hash_index.js";
+import { closeSharedCommandLedger } from "../compositor/bridge_export_cue.js";
 import { CutholSequence, LaneCue } from "../core/schema.js";
 import { commitSequenceMutation, loadSequence, WorkspacePaths } from "../core/workspace.js";
 import { syncAllCompositionBridges } from "../compositor/bridge_exporter.js";
+import { beginCompositionSweep, endCompositionSweep } from "../compositor/bridge_hash.js";
 import { wrapTypographyLines } from "../compositor/ass_generator.js";
 import {
   placementAnimatesAny,
@@ -386,7 +389,31 @@ export function verifySequence(
     "G4_STAGE",
     "G5_SIGNAL",
   ];
-  const gateSet = new Set<VerificationGateId>(gatesToRun);
+  // One fingerprint-sharing sweep for the whole run: every composition is
+  // stat-walked once no matter how many gates probe it. Nested sweeps
+  // (bridge sync inside a mutation) join this one; Cuthol's own writes evict
+  // per composition and synchronous execution admits no external interleave.
+  beginCompositionSweep();
+  try {
+    return verifySequenceUncached(seq, paths, gatesToRun);
+  } finally {
+    endCompositionSweep();
+  }
+}
+
+function verifySequenceUncached(
+  seq: CutholSequence,
+  paths?: WorkspacePaths,
+  gatesToRun?: VerificationGateId[]
+): VerificationReport {
+  const resolvedGates = gatesToRun ?? [
+    "G1_SCHEMA",
+    "G2_ASSETS",
+    "G3_TIMING",
+    "G4_STAGE",
+    "G5_SIGNAL",
+  ];
+  const gateSet = new Set<VerificationGateId>(resolvedGates);
   const diagnostics: CutholDiagnostic[] = [];
 
   const libMap = new Map(seq.library.map((item) => [item.handle, item]));
@@ -439,7 +466,7 @@ export function verifySequence(
   return {
     ok: errorCount === 0,
     revision: seq.meta.revision,
-    gates_run: gatesToRun,
+    gates_run: resolvedGates,
     error_count: errorCount,
     warning_count: warningCount,
     ...(infoCount > 0 ? { info_count: infoCount } : {}),
@@ -492,59 +519,81 @@ export function commitVerifiedMutation<T>(
   mutator: (seq: CutholSequence, paths: WorkspacePaths) => T
 ): { result: T; sequence: CutholSequence; revision: number; verification: VerificationReport } {
   let verificationReport!: VerificationReport;
-  const autoAdopted = adoptExternalCompositionEditsSafe(workspaceDir);
+  beginHashCommandScope();
+  // One outer fingerprint sweep for pre-check, bridge sync and full verify
+  // together: a single stat walk per composition per command. Bridge-sync
+  // writes evict per composition; the phases run synchronously back to back.
+  beginCompositionSweep();
+  try {
+    const autoAdopted = adoptExternalCompositionEditsSafe(workspaceDir);
 
-  const { result, sequence, revision } = commitSequenceMutation(
-    workspaceDir,
-    operation,
-    (seq, paths) => {
-      const out = mutator(seq, paths);
-      const preCheck = verifySequence(seq, paths, ["G1_SCHEMA", "G2_ASSETS", "G3_TIMING"]);
-      if (!preCheck.ok) {
-        const firstError = preCheck.diagnostics.find((d) => d.severity === "ERROR")!;
-        throw new CutholError(firstError, preCheck.diagnostics);
+    const { result, sequence, revision } = commitSequenceMutation(
+      workspaceDir,
+      operation,
+      (seq, paths) => {
+        const out = mutator(seq, paths);
+        // Fail-fast pre-check without the asset gate: G2 (physical file
+        // probing, per-composition extension sync + contract checks) runs
+        // once in the full verify below, which still blocks the commit on
+        // any ERROR. Sharing one in-command file-hash generation makes the
+        // pre-check re-read nothing the full verify will not reuse.
+        const preCheck = verifySequence(seq, paths, ["G1_SCHEMA", "G3_TIMING"]);
+        if (!preCheck.ok) {
+          const firstError = preCheck.diagnostics.find((d) => d.severity === "ERROR")!;
+          throw new CutholError(firstError, preCheck.diagnostics);
+        }
+        try {
+          syncAllCompositionBridges(seq, paths);
+        } catch {
+          // non-blocking bridge sync
+        }
+        verificationReport = verifySequence(seq, paths);
+        if (!verificationReport.ok) {
+          const firstError = verificationReport.diagnostics.find((d) => d.severity === "ERROR")!;
+          throw new CutholError(firstError, verificationReport.diagnostics);
+        }
+        return out;
       }
-      try {
-        syncAllCompositionBridges(seq, paths);
-      } catch {
-        // non-blocking bridge sync
-      }
-      verificationReport = verifySequence(seq, paths);
-      if (!verificationReport.ok) {
-        const firstError = verificationReport.diagnostics.find((d) => d.severity === "ERROR")!;
-        throw new CutholError(firstError, verificationReport.diagnostics);
-      }
-      return out;
-    }
-  );
-
-  collapseBackdropGapWarnings(verificationReport.diagnostics);
-  if (autoAdopted) {
-    verificationReport.diagnostics.push(
-      DIAGNOSTICS.EXTERNAL_COMPOSITION_EDITS_AUTO_ADOPTED(autoAdopted.adopted_comps)
     );
-  }
-  verificationReport.error_count = verificationReport.diagnostics.filter((d) => d.severity === "ERROR").length;
-  verificationReport.warning_count = verificationReport.diagnostics.filter((d) => d.severity === "WARN").length;
-  verificationReport.info_count = verificationReport.diagnostics.filter((d) => d.severity === "INFO").length;
 
-  return { result, sequence, revision, verification: verificationReport };
+    collapseBackdropGapWarnings(verificationReport.diagnostics);
+    if (autoAdopted) {
+      verificationReport.diagnostics.push(
+        DIAGNOSTICS.EXTERNAL_COMPOSITION_EDITS_AUTO_ADOPTED(autoAdopted.adopted_comps)
+      );
+    }
+    verificationReport.error_count = verificationReport.diagnostics.filter((d) => d.severity === "ERROR").length;
+    verificationReport.warning_count = verificationReport.diagnostics.filter((d) => d.severity === "WARN").length;
+    verificationReport.info_count = verificationReport.diagnostics.filter((d) => d.severity === "INFO").length;
+
+    return { result, sequence, revision, verification: verificationReport };
+  } finally {
+    endCompositionSweep();
+    closeSharedCommandLedger();
+    flushFileHashIndex();
+  }
 }
 
 export function runWorkspaceVerification(
   workspaceDir: string,
   gates?: VerificationGateId[]
 ): VerificationReport {
-  const auto = adoptExternalCompositionEditsSafe(workspaceDir);
-  const { paths, sequence } = loadSequence(workspaceDir);
-  // Compositions never opened in a browser get one shared probe run here, so
-  // a real script error surfaces in verify (G430–G432) instead of only at the
-  // first monitor call. Cached records make the second verify fast.
-  probeUncachedCompositionScripts(sequence, paths);
-  const report = verifySequence(sequence, paths, gates);
-  if (auto) {
-    report.diagnostics.push(DIAGNOSTICS.EXTERNAL_COMPOSITION_EDITS_AUTO_ADOPTED(auto.adopted_comps));
-    report.info_count = (report.info_count ?? 0) + 1;
+  beginHashCommandScope();
+  try {
+    const auto = adoptExternalCompositionEditsSafe(workspaceDir);
+    const { paths, sequence } = loadSequence(workspaceDir);
+    // Compositions never opened in a browser get one shared probe run here, so
+    // a real script error surfaces in verify (G430–G432) instead of only at the
+    // first monitor call. Cached records make the second verify fast.
+    probeUncachedCompositionScripts(sequence, paths);
+    const report = verifySequence(sequence, paths, gates);
+    if (auto) {
+      report.diagnostics.push(DIAGNOSTICS.EXTERNAL_COMPOSITION_EDITS_AUTO_ADOPTED(auto.adopted_comps));
+      report.info_count = (report.info_count ?? 0) + 1;
+    }
+    return report;
+  } finally {
+    closeSharedCommandLedger();
+    flushFileHashIndex();
   }
-  return report;
 }

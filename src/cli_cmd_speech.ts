@@ -1,13 +1,7 @@
 // CLI 'speech' command group handler (split out of cli.ts).
 import { CutholError, DIAGNOSTICS } from "./core/diagnostics.js";
 import { parseTimeMs } from "./core/time.js";
-import { formatCaptionsDigest, formatTranscribeDigest } from "./library/query.js";
-import { CaptionStylePreset, generateSequenceCaptions } from "./speech/captions.js";
-import { cleanupClipDialogue, cleanupLaneCueDialogue } from "./speech/cleanup.js";
-import { describeProviderResolution, setProjectProviderDefaults } from "./speech/provider_select.js";
-import { synthesizeVoiceover } from "./speech/synthesize.js";
-import { transcribeLibraryAsset } from "./speech/transcribe.js";
-import { verifyCleanup } from "./speech/verify_cleanup.js";
+import type { CaptionStylePreset } from "./speech/captions.js";
 import { boolFlag, numFlag, strFlag, strListFlag } from "./cli_args.js";
 import {
   CLI_NOT_HANDLED,
@@ -19,6 +13,8 @@ import {
 export async function runSpeechCommand(ctx: CliCommandContext): Promise<CliCommandResult> {
   const { action, rest, flags, workspaceDir } = ctx;
   if (action === "transcribe") {
+    const { transcribeLibraryAsset } = await import("./speech/transcribe.js");
+    const { formatTranscribeDigest } = await import("./library/query.js");
     const handle = strFlag(flags, "handle") ?? rest[0];
     if (!handle) throw new Error("Provide --handle <vid_XX|aud_XX>.");
     const res = await transcribeLibraryAsset({
@@ -37,6 +33,7 @@ export async function runSpeechCommand(ctx: CliCommandContext): Promise<CliComma
   }
 
   if (action === "synthesize") {
+    const { synthesizeVoiceover } = await import("./speech/synthesize.js");
     const text = strFlag(flags, "text") ?? rest[0];
     if (!text) throw new Error("Provide --text \"...\" to synthesize.");
     const atRaw = strFlag(flags, "at");
@@ -62,6 +59,7 @@ export async function runSpeechCommand(ctx: CliCommandContext): Promise<CliComma
   }
 
   if (action === "cleanup") {
+    const { cleanupClipDialogue, cleanupLaneCueDialogue } = await import("./speech/cleanup.js");
     const clipId = strFlag(flags, "clip") ?? rest[0];
     const clipsRaw = strFlag(flags, "clips");
     const clipIds = clipsRaw
@@ -131,6 +129,7 @@ export async function runSpeechCommand(ctx: CliCommandContext): Promise<CliComma
   }
 
   if (action === "verify-cleanup") {
+    const { verifyCleanup } = await import("./speech/verify_cleanup.js");
     const clipId = strFlag(flags, "clip") ?? rest[0];
     const clipsRaw = strFlag(flags, "clips");
     const clipIds = clipsRaw
@@ -160,6 +159,9 @@ export async function runSpeechCommand(ctx: CliCommandContext): Promise<CliComma
   }
 
   if (action === "providers") {
+    const { describeProviderResolution, setProjectProviderDefaults } = await import(
+      "./speech/provider_select.js"
+    );
     const asrRaw = strFlag(flags, "asr");
     const ttsRaw = strFlag(flags, "tts");
     if (asrRaw === undefined && ttsRaw === undefined) {
@@ -183,6 +185,8 @@ export async function runSpeechCommand(ctx: CliCommandContext): Promise<CliComma
   }
 
   if (action === "captions") {
+    const { generateSequenceCaptions } = await import("./speech/captions.js");
+    const { formatCaptionsDigest } = await import("./library/query.js");
     const style = (strFlag(flags, "style", "active_word") as CaptionStylePreset) ?? "active_word";
     const res = generateSequenceCaptions({
       workspaceDir,

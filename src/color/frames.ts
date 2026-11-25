@@ -3,7 +3,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnWatchedSync } from "../core/subprocess.js";
+import { runWatchedParallelFfmpegJobsSync, spawnWatchedSync, type ParallelFfmpegJob } from "../core/subprocess.js";
 import { loadSequence } from "../core/workspace.js";
 import { itemColorProgram, listColorItems } from "./blocks.js";
 import type { ColorFrameSet } from "./types.js";
@@ -34,14 +34,75 @@ interface ItemMedia {
   asset?: CutholSequence["library"][number];
 }
 
+interface FileProbe {
+  key: string;
+  durationMs: number;
+  srcW: number;
+  srcH: number;
+}
+
+/** Per-file probe cache for the command: one ffprobe per file, not one per frame. */
+const fileProbeCache = new Map<string, FileProbe>();
+
+function cacheKeyFor(file: string): string {
+  try {
+    const st = fs.statSync(file);
+    return `${path.resolve(file)}|${st.size}|${st.mtimeMs}`;
+  } catch {
+    return path.resolve(file);
+  }
+}
+
+function probeFileCached(file: string): FileProbe {
+  const key = cacheKeyFor(file);
+  const hit = fileProbeCache.get(key);
+  if (hit) return hit;
+  const probed = spawnWatchedSync(
+    "ffprobe",
+    ["-v", "error", "-select_streams", "v:0", "-show_entries", "format=duration:stream=width,height", "-of", "json", file],
+    { encoding: "utf8", windowsHide: true }
+  );
+  let durMs = NaN;
+  let srcW = 0;
+  let srcH = 0;
+  try {
+    const parsed = JSON.parse(String(probed.stdout ?? "{}")) as {
+      format?: { duration?: unknown };
+      streams?: Array<{ width?: unknown; height?: unknown }>;
+    };
+    durMs = Number(parsed.format?.duration) * 1000;
+    srcW = Number(parsed.streams?.[0]?.width);
+    srcH = Number(parsed.streams?.[0]?.height);
+  } catch { /* fall through to defaults */ }
+  const got: FileProbe = {
+    key,
+    durationMs: Number.isFinite(durMs) && durMs > 0 ? durMs : 10000,
+    srcW: srcW || 16,
+    srcH: srcH || 9,
+  };
+  fileProbeCache.set(key, got);
+  return got;
+}
+
 function probeDurationMs(file: string): number {
-  const r = spawnWatchedSync("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", file], {
-    encoding: "utf8",
-    windowsHide: true,
-  });
-  const s = String(r.stdout ?? "").trim();
-  const v = Number(s);
-  return Number.isFinite(v) && v > 0 ? v * 1000 : 10000;
+  return probeFileCached(file).durationMs;
+}
+
+const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".svg"]);
+
+/**
+ * True when the file is a still image (not a timed video): sampling any media time must decode the
+ * still frame at 0. A still has no time axis, so seeking past 0 decodes nothing and the old code
+ * failed with `short frame buffer 0 < ...` (seen on k2 `sp_01`, a PNG spine clip).
+ */
+function isStillImageFile(file: string, asset?: CutholSequence["library"][number]): boolean {
+  if (IMAGE_EXTS.has(path.extname(file).toLowerCase())) return true;
+  const probe = asset?.probe as { fps?: number; video_codec?: string | null; duration_ms?: number } | undefined;
+  if (!probe) return false;
+  if (probe.fps === 0) return true;
+  const codec = (probe.video_codec ?? "").toLowerCase();
+  if (["png", "mjpeg", "webp", "bmp", "gif"].includes(codec)) return true;
+  return false;
 }
 
 function resolveItemMedia(workspaceDir: string, itemId: string): ItemMedia {
@@ -74,7 +135,35 @@ function resolveItemMedia(workspaceDir: string, itemId: string): ItemMedia {
   if (!fs.existsSync(file)) throw new Error(`asset file missing '${file}'`);
   const dur = probeDurationMs(file);
   if (!(durationMs > 0)) durationMs = dur;
-  return { file, startMs, durationMs, fps: 30, asset: asset as CutholSequence["library"][number] | undefined };
+  const fpsRaw = (asset as { probe?: { fps?: unknown } } | undefined)?.probe?.fps;
+  const fps = typeof fpsRaw === "number" && Number.isFinite(fpsRaw) && fpsRaw > 0 ? fpsRaw : 30;
+  return { file, startMs, durationMs, fps, asset: asset as CutholSequence["library"][number] | undefined };
+}
+
+/** Clamp an absolute media time to the decodable range; stills always sample at 0. */
+function clampAtSec(file: string, atSec: number, asset?: CutholSequence["library"][number]): number {
+  if (isStillImageFile(file, asset)) return 0;
+  if (!(atSec > 0)) return 0;
+  const durSec = probeDurationMs(file) / 1000;
+  if (atSec >= durSec) return Math.max(0, durSec - 0.05);
+  return atSec;
+}
+
+/** The shared colour decode filter chain for one file (identical to the render's source path). */
+function decodeFilter(file: string, width: number, asset?: CutholSequence["library"][number]): string {
+  const colorProbe = asset?.probe ?? probeStandaloneVideoColorMetadata(file);
+  // No full-range pin (`fitPixFmt`) in measurement decodes: the render graph needs it so the range
+  // conversion does not move with later filters, but here a `yuvj*` frame is converted to RGB once,
+  // and splitting that into two default-precision steps moves the measured colours (measured on a
+  // full-range phone clip: Lab chroma median 1.42 → 2.39 against an exact decode at 1.04).
+  const spec = { ...resolveSourceColorSpec(colorProbe, file), fitPixFmt: undefined };
+  const pre = asset ? inputTransformFilters(asset) : [];
+  return [
+    ...pre,
+    spec.isRgb
+      ? `scale=${width}:-2`
+      : `${buildSourceScaleFilter(width, -2, spec)},scale=in_color_matrix=bt709:in_range=tv:out_range=full`,
+  ].join(",");
 }
 
 /**
@@ -88,40 +177,116 @@ export function decodeFrameRgb24(
   width: number,
   asset?: CutholSequence["library"][number]
 ): { width: number; height: number; data: Buffer } {
-  const tmp = path.join(os.tmpdir(), `cuthol-frame-${process.pid}-${Math.round(Math.random() * 1e9)}.raw`);
-  const colorProbe = asset?.probe ?? probeStandaloneVideoColorMetadata(file);
-  // No full-range pin (`fitPixFmt`) in measurement decodes: the render graph needs it so the range
-  // conversion does not move with later filters, but here a `yuvj*` frame is converted to RGB once,
-  // and splitting that into two default-precision steps moves the measured colours (measured on a
-  // full-range phone clip: Lab chroma median 1.42 → 2.39 against an exact decode at 1.04).
-  const spec = { ...resolveSourceColorSpec(colorProbe, file), fitPixFmt: undefined };
-  const pre = asset ? inputTransformFilters(asset) : [];
-  const vf = [
-    ...pre,
-    spec.isRgb
-      ? `scale=${width}:-2`
-      : `${buildSourceScaleFilter(width, -2, spec)},scale=in_color_matrix=bt709:in_range=tv:out_range=full`,
-  ].join(",");
-  const r = spawnWatchedSync(
-    "ffmpeg",
-    ["-v", "error", "-y", "-i", file, "-ss", String(Math.max(0, atSec)), "-frames:v", "1", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", tmp],
-    { encoding: "buffer", windowsHide: true }
-  );
-  if (r.status !== 0) throw new Error(`ffmpeg frame decode failed for '${file}'`);
-  const probe = spawnWatchedSync(
-    "ffprobe",
-    ["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", file],
-    { encoding: "utf8", windowsHide: true }
-  );
-  const m = String(probe.stdout ?? "").trim().split(/[,\s]+/).map(Number);
-  const srcW = m[0] || 16;
-  const srcH = m[1] || 9;
-  const h = Math.max(2, Math.round((srcH * width) / srcW / 2) * 2);
-  const buf = fs.readFileSync(tmp);
-  try { fs.unlinkSync(tmp); } catch { /* ignore */ }
-  const expect = width * h * 3;
-  if (buf.length < expect) throw new Error(`short frame buffer ${buf.length} < ${expect}`);
-  return { width, height: h, data: buf.subarray(0, expect) };
+  return decodeFramesBatch(file, [atSec], width, asset)[0];
+}
+
+/**
+ * Decode several frames of one file: one `-ss <t>` input seek per frame (input-side, so no
+ * decode-from-start scan) sharing the decode filter chain, chunked into small jobs that run in
+ * parallel. Input seeking is frame-accurate (ffmpeg seeks to the keyframe then decodes forward to
+ * `t`), so the decoded pixels are the same frames the old one-process-per-frame output seek chose.
+ */
+export function decodeFramesBatch(
+  file: string,
+  atSecs: number[],
+  width: number,
+  asset?: CutholSequence["library"][number]
+): Array<{ width: number; height: number; data: Buffer }> {
+  if (!atSecs.length) return [];
+  const m = decodeFramesBatchMany([{ key: "\0", file, atSecs, width, asset }]);
+  return m.get("\0")!;
+}
+
+interface BatchRequest {
+  key: string;
+  file: string;
+  atSecs: number[];
+  width: number;
+  asset?: CutholSequence["library"][number];
+}
+
+/**
+ * Decode frames of several files at once: one ffmpeg process per file (each with input-side seeks for
+ * all its frames), files in parallel bounded by the CPU count. Jobs that share a file share the decode.
+ */
+export function decodeFramesBatchMany(reqs: BatchRequest[]): Map<string, Array<{ width: number; height: number; data: Buffer }>> {
+  const out = new Map<string, Array<{ width: number; height: number; data: Buffer }>>();
+  if (!reqs.length) return out;
+  // Small jobs (few inputs each): one giant multi-input ffmpeg fans out to dozens of decoder
+  // threads, and several of those side by side thrash the CPUs. Chunks of 4 stay fast alone and
+  // schedule well across files through the CPU-bounded parallel runner.
+  const CHUNK = 4;
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-frames-"));
+  try {
+    const jobs: ParallelFfmpegJob[] = [];
+    const maxBuffers: number[] = [];
+    const outs: string[][] = [];
+    const heights: number[] = [];
+    const clocks: number[][] = [];
+    for (const r of reqs) {
+      const probed = probeFileCached(r.file);
+      const vf = decodeFilter(r.file, r.width, r.asset);
+      const h = Math.max(2, Math.round((probed.srcH * r.width) / probed.srcW / 2) * 2);
+      const clampedAll = r.atSecs.map((t) => clampAtSec(r.file, Math.max(0, t), r.asset));
+      (r as BatchRequest & { clamped?: number[] }).clamped = clampedAll;
+      for (let c = 0; c < clampedAll.length; c += CHUNK) {
+        const clamped = clampedAll.slice(c, c + CHUNK);
+        const dir = fs.mkdtempSync(path.join(tmpRoot, "job-"));
+        const files = clamped.map((_, i) => path.join(dir, `f${i}.raw`));
+        // Cap decoder threads per input: one multi-input process fans out to dozens of threads,
+        // and a dozen such processes side by side thrash the CPUs. Pixels are unaffected
+        // (verified byte-identical with and without the cap).
+        const args: string[] = ["-v", "error", "-y"];
+        for (const t of clamped) args.push("-threads", "2", "-ss", String(t), "-i", r.file);
+        clamped.forEach((_, i) => {
+          args.push("-map", `${i}:v`, "-frames:v", "1", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", files[i]);
+        });
+        heights.push(h);
+        outs.push(files);
+        clocks.push(clamped);
+        jobs.push({ args, cwd: process.cwd(), step: "ffmpeg frame sample" });
+        maxBuffers.push(256 * 1024 * 1024);
+      }
+    }
+    const results = runWatchedParallelFfmpegJobsSync(jobs, maxBuffers);
+    // Jobs were chunked per file; reassemble in request order.
+    const perReq: Array<{ r: BatchRequest; h: number; expect: number; frames: Array<{ width: number; height: number; data: Buffer }> }> =
+      reqs.map((r) => {
+        const h0 = Math.max(2, Math.round((probeFileCached(r.file).srcH * r.width) / probeFileCached(r.file).srcW / 2) * 2);
+        return { r, h: h0, expect: r.width * h0 * 3, frames: [] };
+      });
+    let ji = 0;
+    for (let ri = 0; ri < reqs.length; ri++) {
+      const slot = perReq[ri];
+      const clampedAll = (slot.r as BatchRequest & { clamped?: number[] }).clamped ?? slot.r.atSecs;
+      for (let c = 0; c < clampedAll.length; c += CHUNK) {
+        const res = results[ji];
+        const files = outs[ji];
+        const h = heights[ji];
+        const chunkTimes = clocks[ji];
+        if (res.status !== 0) {
+          const detail = String(res.stderr ?? res.error ?? "").trim().split(/\r?\n/).slice(-3).join(" | ").slice(0, 300);
+          throw new Error(
+            `ffmpeg frame decode failed for '${slot.r.file}' at [${chunkTimes.map((t) => t.toFixed(3)).join(", ")}]s (${detail || `exit ${res.status}`})`
+          );
+        }
+        files.forEach((f, i) => {
+          const buf = fs.readFileSync(f);
+          if (buf.length < slot.expect) {
+            throw new Error(
+              `short frame buffer ${buf.length} < ${slot.expect} for '${slot.r.file}' at ${chunkTimes[i].toFixed(3)}s (width ${slot.r.width}, height ${h}); the seek landed past the last frame`
+            );
+          }
+          slot.frames.push({ width: slot.r.width, height: h, data: buf.subarray(0, slot.expect) });
+        });
+        ji++;
+      }
+      out.set(slot.r.key, slot.frames);
+    }
+    return out;
+  } finally {
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+  }
 }
 
 function toFrameSet(frames: Array<{ width: number; height: number; data: Buffer }>, atMs: number[], stage: "source" | "graded"): ColorFrameSet {
@@ -170,27 +335,68 @@ function applyStageInPlace(set: ColorFrameSet, workspaceDir: string, itemId: str
   }
 }
 
+function localsFor(media: ItemMedia, count?: number, atMs?: number[]): number[] {
+  if (atMs && atMs.length > 0) return [...atMs];
+  const n = Math.max(5, Math.min(9, Math.round(count ?? 7)));
+  const locals: number[] = [];
+  for (let i = 0; i < n; i++) {
+    const f = 0.05 + (0.9 * i) / Math.max(1, n - 1);
+    locals.push(f * media.durationMs);
+  }
+  return locals;
+}
+
 export function sampleItemFrames(opts: SampleItemFramesOptions): ColorFrameSet {
-  const width = Math.max(32, Math.min(512, Math.round(opts.width ?? 256)));
-  const stage = opts.stage ?? "source";
-  const media = resolveItemMedia(opts.workspaceDir, opts.itemId);
-  let locals: number[];
-  if (opts.atMs && opts.atMs.length > 0) locals = [...opts.atMs];
-  else {
-    const count = Math.max(5, Math.min(9, Math.round(opts.count ?? 7)));
-    locals = [];
-    for (let i = 0; i < count; i++) {
-      const f = 0.05 + (0.9 * i) / Math.max(1, count - 1);
-      locals.push(f * media.durationMs);
+  return sampleItemFramesMany(opts.workspaceDir, [opts.itemId], opts)[0];
+}
+
+/**
+ * Sample several items at once, sharing one ffmpeg process per source file and decoding files in
+ * parallel. Returns one frame set per requested id, in order. Times and pixels match `sampleItemFrames`.
+ */
+export function sampleItemFramesMany(
+  workspaceDir: string,
+  itemIds: string[],
+  opts?: { count?: number; atMs?: number[]; width?: number; stage?: "source" | "graded" }
+): ColorFrameSet[] {
+  const width = Math.max(32, Math.min(512, Math.round(opts?.width ?? 256)));
+  const stage = opts?.stage ?? "source";
+  const medias = itemIds.map((id) => ({ id, media: resolveItemMedia(workspaceDir, id) }));
+  const localsById = new Map<string, number[]>();
+  for (const { id, media } of medias) localsById.set(id, localsFor(media, opts?.count, opts?.atMs));
+  // Group by file so items cut from the same source share one decode pass.
+  const byFile = new Map<string, { file: string; width: number; asset?: CutholSequence["library"][number]; atSecs: number[]; slots: Array<{ id: string; idx: number }> }>();
+  for (const { id, media } of medias) {
+    const locals = localsById.get(id)!;
+    const atSecs = locals.map((lm) => (media.startMs + lm) / 1000);
+    const key = `${path.resolve(media.file)}|${width}`;
+    let g = byFile.get(key);
+    if (!g) {
+      g = { file: media.file, width, asset: media.asset, atSecs: [], slots: [] };
+      byFile.set(key, g);
+    }
+    for (let i = 0; i < atSecs.length; i++) g.slots.push({ id, idx: g.atSecs.length + i });
+    g.atSecs.push(...atSecs);
+  }
+  const reqs: BatchRequest[] = [...byFile.entries()].map(([key, g]) => ({ key, file: g.file, atSecs: g.atSecs, width: g.width, asset: g.asset }));
+  const decoded = decodeFramesBatchMany(reqs);
+  const framesById = new Map<string, Array<{ width: number; height: number; data: Buffer }>>();
+  for (const [key, g] of byFile) {
+    const frames = decoded.get(key)!;
+    for (const s of g.slots) {
+      let arr = framesById.get(s.id);
+      if (!arr) { arr = []; framesById.set(s.id, arr); }
+      arr.push(frames[s.idx]);
     }
   }
-  const decoded = locals.map((lm) => decodeFrameRgb24(media.file, (media.startMs + lm) / 1000, width, media.asset));
-  const set = toFrameSet(decoded, locals, "source");
-  if (stage === "graded") {
-    applyStageInPlace(set, opts.workspaceDir, opts.itemId);
-    set.stage = "graded";
-  }
-  return set;
+  return itemIds.map((id) => {
+    const set = toFrameSet(framesById.get(id)!, localsById.get(id)!, "source");
+    if (stage === "graded") {
+      applyStageInPlace(set, workspaceDir, id);
+      set.stage = "graded";
+    }
+    return set;
+  });
 }
 
 /** Frames of a reference file outside the timeline: an image (one frame) or a video (`count` frames). */
@@ -206,6 +412,7 @@ export function loadReferenceFrames(file: string, opts?: { width?: number; count
   const count = Math.max(5, Math.min(9, Math.round(opts?.count ?? 7)));
   const atMs: number[] = [];
   for (let i = 0; i < count; i++) atMs.push(((0.05 + (0.9 * i) / Math.max(1, count - 1)) * dur));
-  const decoded = atMs.map((m) => decodeFrameRgb24(file, m / 1000, width));
+  const clamped = atMs.map((m) => clampAtSec(file, m / 1000));
+  const decoded = decodeFramesBatch(file, clamped, width);
   return toFrameSet(decoded, atMs, "source");
 }

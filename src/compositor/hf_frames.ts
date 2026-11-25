@@ -3,11 +3,14 @@ import fs from "node:fs";
 import path from "node:path";
 import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
 import {
+  type ParallelFfmpegJob,
+  type ParallelFfmpegJobResult,
+  runWatchedParallelFfmpegJobsSync,
   spawnWatchedSync
 } from "../core/subprocess.js";
 import { isPngSequenceBlobDir, resolveCachedCompositionVideoBlob, stageCompositionRenderDir, isValidVideoBlobOnDisk, inspectPngSequenceDir, readCompositionTimelineSec } from "./hf_blobs.js";
 import { syncScalarVarsAndComputeCompositionHash } from "./hf_cache_state.js";
-import { copyDirRecursiveSync, findLocalHyperFramesCliMjs, hyperFramesProcessEnv } from "./hf_common.js";
+import { copyDirRecursiveSync, ensureHyperFramesRenderLockDefault, findLocalHyperFramesCliMjs, hyperFramesProcessEnv } from "./hf_common.js";
 import { renderHyperFramesCompositionToMp4 } from "./hf_render.js";
 import { needsLegacyGreenSanitize, sanitizeLegacyGreenBackground, sanitizeStagedEntryHtml, stageSanitizedCopy } from "./hf_transparent.js";
 
@@ -541,11 +544,11 @@ function parseSnapshotFrameSecFromFilename(filePath: string): number | null {
 }
 
 /**
- * Captures multiple frame-grid-snapped RGBA PNGs from a HyperFrames composition in a single
- * `snapshot --at t1,t2,...` invocation and writes them into the shared `hf_frame_<hash>_f<idx>.png`
- * cache so `renderSingleCompositeFrameRgb24` hits the cache for every cell in `monitor sheet`.
+ * One composition's frame requests for the batched snapshot path: all frames of a
+ * single composition stay in one `snapshot --at t1,t2,...` invocation even when
+ * several compositions' snapshots run concurrently.
  */
-export function renderHyperFramesBatchFramesPng(options: {
+export interface CompositionBatchFramesOptions {
   compositionDir: string;
   entryHtml: string;
   blobsDir: string;
@@ -560,11 +563,256 @@ export function renderHyperFramesBatchFramesPng(options: {
   backdropVideoPath?: string;
   opaqueBackdropColor?: string;
   backdropImagePath?: string;
-}): Array<{ pngPath: string; snappedSec: number; frameIdx: number }> {
-  if (options.localSecs.length === 0) {
-    return [];
-  }
+}
 
+export interface BatchSnapshotItem {
+  pngPath: string;
+  snappedSec: number;
+  frameIdx: number;
+}
+
+interface StagedBatchSnapshotTarget {
+  targetSnapDir: string;
+  stagedDirs: string[];
+}
+
+function uniqueBatchSnapshotDir(blobsDir: string, hash: string): string {
+  return path.join(
+    blobsDir,
+    `hf_snap_batch_${hash}_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+  );
+}
+
+/**
+ * Stages the snapshot source directory for one composition (scene-host render
+ * dir, scalar-variable overrides, legacy-green sanitation) without spawning
+ * anything. The caller owns the returned directories until the snapshot ran.
+ */
+function stageBatchSnapshotTarget(args: {
+  options: CompositionBatchFramesOptions;
+  absCompDir: string;
+  htmlSource: string;
+  wantGreenStage: boolean;
+  durationSec: number;
+  nativeWidth: number;
+  nativeHeight: number;
+  targetWidth: number;
+  targetHeight: number;
+  isSceneHost: boolean;
+  scalarVars: Record<string, string | number | boolean>;
+  hash: string;
+}): StagedBatchSnapshotTarget {
+  const { options, absCompDir, htmlSource, wantGreenStage, durationSec } = args;
+  const stagedDirs: string[] = [];
+  const needsStage =
+    (args.isSceneHost && Boolean(options.backdropVideoPath)) ||
+    (!options.transparent && Boolean(options.opaqueBackdropColor || options.backdropImagePath)) ||
+    args.targetWidth !== args.nativeWidth ||
+    args.targetHeight !== args.nativeHeight;
+  let targetSnapDir = absCompDir;
+  if (needsStage) {
+    targetSnapDir = stageCompositionRenderDir({
+      absCompDir,
+      entryHtml: options.entryHtml,
+      blobsDir: options.blobsDir,
+      hash: args.hash,
+      durationSec,
+      nativeWidth: args.nativeWidth,
+      nativeHeight: args.nativeHeight,
+      targetWidth: args.targetWidth,
+      targetHeight: args.targetHeight,
+      isSceneHost: args.isSceneHost,
+      backdropVideoPath: options.backdropVideoPath,
+      transparent: options.transparent,
+      opaqueBackdropColor: options.opaqueBackdropColor,
+      backdropImagePath: options.backdropImagePath,
+    });
+    stagedDirs.push(targetSnapDir);
+  }
+  if (Object.keys(args.scalarVars).length > 0) {
+    if (targetSnapDir === absCompDir) {
+      const tempVarsDir = stageSnapshotDirWithScalarVars({
+        absCompDir,
+        entryHtml: options.entryHtml,
+        blobsDir: options.blobsDir,
+        hash: args.hash,
+        scalarVars: args.scalarVars,
+      });
+      if (tempVarsDir) {
+        targetSnapDir = tempVarsDir;
+        stagedDirs.push(tempVarsDir);
+      }
+    } else {
+      const stagedEntryPath = path.join(targetSnapDir, options.entryHtml);
+      if (fs.existsSync(stagedEntryPath)) {
+        const stagedHtml = fs.readFileSync(stagedEntryPath, "utf8");
+        const nextHtml = applyScalarVarsToStagedHtml(stagedHtml, args.scalarVars);
+        if (nextHtml !== stagedHtml) {
+          fs.writeFileSync(stagedEntryPath, nextHtml, "utf8");
+        }
+      }
+    }
+  }
+  if (wantGreenStage) {
+    if (targetSnapDir === absCompDir) {
+      const greenStageDir = stageSanitizedCopy({
+        absCompDir,
+        entryHtml: options.entryHtml,
+        blobsDir: options.blobsDir,
+        prefix: "hf_snap_green",
+        sanitizedHtml: htmlSource,
+      });
+      targetSnapDir = greenStageDir;
+      stagedDirs.push(greenStageDir);
+    } else {
+      sanitizeStagedEntryHtml(targetSnapDir, options.entryHtml);
+    }
+  }
+  return { targetSnapDir, stagedDirs };
+}
+
+/** One pending `hyperframes snapshot` child process. */
+export interface BatchSnapshotSpawnRequest {
+  args: string[];
+  cwd: string;
+  tmpSnapDir: string;
+}
+
+function removeBatchSnapshotDir(dirPath: string | null | undefined): void {
+  if (!dirPath || !fs.existsSync(dirPath)) return;
+  try {
+    fs.rmSync(dirPath, { recursive: true, force: true });
+  } catch {
+    // ignore cleanup error
+  }
+}
+
+function buildBatchSnapshotSpawnRequest(
+  hfBin: string,
+  targetSnapDir: string,
+  stillMissing: BatchSnapshotItem[],
+  tmpSnapDir: string
+): BatchSnapshotSpawnRequest {
+  return {
+    args: [
+      hfBin,
+      "snapshot",
+      targetSnapDir,
+      "--at",
+      stillMissing.map((t) => String(t.snappedSec)).join(","),
+      "--no-end",
+      "--describe",
+      "false",
+      "--output",
+      tmpSnapDir,
+    ],
+    cwd: process.cwd(),
+    tmpSnapDir,
+  };
+}
+
+/**
+ * Runs pending `hyperframes snapshot` spawns concurrently, bounded by
+ * `concurrency`. The watchdog worker inherits `process.env`, and the Cuthol
+ * render-lock default is ensured there first, so concurrent snapshots honor
+ * the same HyperFrames lock as the sequential path.
+ */
+export function runSnapshotSpawnsConcurrently(
+  requests: BatchSnapshotSpawnRequest[],
+  concurrency: number
+): ParallelFfmpegJobResult[] {
+  if (requests.length === 0) return [];
+  ensureHyperFramesRenderLockDefault();
+  const jobs: ParallelFfmpegJob[] = requests.map((request) => ({
+    executable: process.execPath,
+    args: request.args,
+    cwd: request.cwd,
+    step: "hyperframes snapshot",
+    watchedPaths: [request.tmpSnapDir],
+    cleanupPathsOnStall: [request.tmpSnapDir],
+  }));
+  const maxBuffers = requests.map(() => 4 * 1024 * 1024);
+  const bounded = Math.max(1, Math.min(32, Math.floor(concurrency) || 1));
+  return runWatchedParallelFfmpegJobsSync(jobs, maxBuffers, bounded);
+}
+
+/**
+ * Maps captured `frame-*.png` files in a finished snapshot output directory
+ * onto the requested frame targets (nearest-timestamp match, positional
+ * fallback), exactly as the sequential path does.
+ */
+function applyBatchSnapshotOutput(
+  stillMissing: BatchSnapshotItem[],
+  fps: number,
+  tmpSnapDir: string
+): void {
+  const capturedPngs = fs
+    .readdirSync(tmpSnapDir)
+    .filter((f) => f.startsWith("frame-") && f.endsWith(".png"))
+    .map((f) => path.join(tmpSnapDir, f))
+    .sort((a, b) => {
+      const sa = parseSnapshotFrameSecFromFilename(a);
+      const sb = parseSnapshotFrameSecFromFilename(b);
+      if (sa !== null && sb !== null) return sa - sb;
+      return a.localeCompare(b);
+    });
+
+  for (let i = 0; i < stillMissing.length; i++) {
+    const target = stillMissing[i];
+    let matchedPng: string | undefined;
+    let bestDiff = Infinity;
+    for (const candidate of capturedPngs) {
+      const cSec = parseSnapshotFrameSecFromFilename(candidate);
+      if (cSec !== null) {
+        const diff = Math.abs(cSec - target.snappedSec);
+        if (diff < bestDiff && diff <= Math.max(0.05, 1.5 / fps)) {
+          bestDiff = diff;
+          matchedPng = candidate;
+        }
+      }
+    }
+    if (!matchedPng && i < capturedPngs.length) {
+      matchedPng = capturedPngs[i];
+    }
+    if (matchedPng && fs.existsSync(matchedPng)) {
+      fs.copyFileSync(matchedPng, target.pngPath);
+    }
+  }
+}
+
+/**
+ * Everything a batched snapshot needs short of spawning `hyperframes
+ * snapshot`: content hash, requested items, cache/blob lookups and the
+ * frames still missing afterwards.
+ */
+export interface PreparedCompositionBatch {
+  options: CompositionBatchFramesOptions;
+  requestedItems: BatchSnapshotItem[];
+  stillMissing: BatchSnapshotItem[];
+  absCompDir: string;
+  htmlSource: string;
+  wantGreenStage: boolean;
+  durationSec: number;
+  hash: string;
+  scalarVars: Record<string, string | number | boolean>;
+  isSceneHost: boolean;
+  nativeWidth: number;
+  nativeHeight: number;
+  targetWidth: number;
+  targetHeight: number;
+  /** True when nothing needs a snapshot (cache/extracts covered everything). */
+  complete: boolean;
+}
+
+/**
+ * Shared preparation for the sequential and the concurrent batched snapshot
+ * paths: throws on a missing entry file exactly as before, resolves the
+ * content hash, maps local seconds to cache items, serves cache hits and
+ * video-blob extracts, and reports which frames still need a snapshot.
+ */
+export function prepareCompositionBatchSnapshot(
+  options: CompositionBatchFramesOptions
+): PreparedCompositionBatch {
   const absCompDir = path.resolve(options.compositionDir);
   const entryPath = path.join(absCompDir, options.entryHtml);
   if (!fs.existsSync(entryPath)) {
@@ -626,7 +874,23 @@ export function renderHyperFramesBatchFramesPng(options: {
     if (options.transparent && !isSceneHost && !fs.existsSync(bboxSidecarPath)) {
       recordCompositionAlphaBboxSidecar(absCompDir, requestedItems[0].pngPath);
     }
-    return requestedItems;
+    return {
+      options,
+      requestedItems,
+      stillMissing: [],
+      absCompDir,
+      htmlSource,
+      wantGreenStage,
+      durationSec,
+      hash,
+      scalarVars,
+      isSceneHost,
+      nativeWidth,
+      nativeHeight,
+      targetWidth,
+      targetHeight,
+      complete: true,
+    };
   }
 
   const findValidBlobForHash = (h: string): string | null => {
@@ -671,77 +935,163 @@ export function renderHyperFramesBatchFramesPng(options: {
     stillMissing.push(...missingTargets);
   }
 
+  return {
+    options,
+    requestedItems,
+    stillMissing,
+    absCompDir,
+    htmlSource,
+    wantGreenStage,
+    durationSec,
+    hash,
+    scalarVars,
+    isSceneHost,
+    nativeWidth,
+    nativeHeight,
+    targetWidth,
+    targetHeight,
+    complete: false,
+  };
+}
+
+/**
+ * Shared tail of the batched snapshot paths: frames a snapshot did not
+ * produce fall back to single-frame captures (throwing the same diagnostic
+ * as before on failure), then the alpha bounding-box sidecar is recorded.
+ */
+export function finalizePreparedBatchSnapshot(prep: PreparedCompositionBatch): BatchSnapshotItem[] {
+  const { options, requestedItems, stillMissing, absCompDir, isSceneHost } = prep;
+  for (const target of stillMissing) {
+    if (!fs.existsSync(target.pngPath) || fs.statSync(target.pngPath).size <= 200) {
+      renderHyperFramesSingleFramePng({
+        ...options,
+        localSec: target.snappedSec,
+      });
+    }
+  }
+
+  if (options.transparent && !isSceneHost && requestedItems.length > 0) {
+    const firstValid = requestedItems.find(
+      (r) => fs.existsSync(r.pngPath) && fs.statSync(r.pngPath).size > 200
+    );
+    if (firstValid) {
+      recordCompositionAlphaBboxSidecar(absCompDir, firstValid.pngPath);
+    }
+  }
+
+  return requestedItems;
+}
+
+/**
+ * Runs the pending snapshots of several prepared batches concurrently,
+ * bounded by `concurrency`. Each composition keeps its single batched
+ * `snapshot --at t1,t2,...` invocation; only different compositions overlap.
+ * Frames a snapshot does not produce keep the single-frame fallback, so a
+ * failing snapshot yields the same diagnostic as the sequential path.
+ */
+export function snapshotPreparedBatchesConcurrently(
+  preps: PreparedCompositionBatch[],
+  concurrency: number
+): void {
+  const hfBin = findLocalHyperFramesCliMjs();
+  if (!fs.existsSync(hfBin)) return;
+  const pending = preps.filter((prep) => !prep.complete && prep.stillMissing.length > 0);
+  if (pending.length === 0) return;
+  const staged = pending.map((prep) => ({
+    prep,
+    tmpSnapDir: uniqueBatchSnapshotDir(prep.options.blobsDir, prep.hash),
+    stagedTarget: stageBatchSnapshotTarget({
+      options: prep.options,
+      absCompDir: prep.absCompDir,
+      htmlSource: prep.htmlSource,
+      wantGreenStage: prep.wantGreenStage,
+      durationSec: prep.durationSec,
+      nativeWidth: prep.nativeWidth,
+      nativeHeight: prep.nativeHeight,
+      targetWidth: prep.targetWidth,
+      targetHeight: prep.targetHeight,
+      isSceneHost: prep.isSceneHost,
+      scalarVars: prep.scalarVars,
+      hash: prep.hash,
+    }),
+  }));
+  try {
+    const requests: BatchSnapshotSpawnRequest[] = staged.map((entry) =>
+      buildBatchSnapshotSpawnRequest(
+        hfBin,
+        entry.stagedTarget.targetSnapDir,
+        entry.prep.stillMissing,
+        entry.tmpSnapDir
+      )
+    );
+    const results = runSnapshotSpawnsConcurrently(requests, concurrency);
+    for (let i = 0; i < staged.length; i++) {
+      if (results[i]?.status === 0 && fs.existsSync(staged[i].tmpSnapDir)) {
+        applyBatchSnapshotOutput(staged[i].prep.stillMissing, staged[i].prep.options.fps, staged[i].tmpSnapDir);
+      }
+    }
+  } finally {
+    for (const entry of staged) {
+      removeBatchSnapshotDir(entry.tmpSnapDir);
+      for (const stagedDir of entry.stagedTarget.stagedDirs) {
+        removeBatchSnapshotDir(stagedDir);
+      }
+    }
+  }
+}
+
+/**
+ * Captures multiple frame-grid-snapped RGBA PNGs from a HyperFrames composition in a single
+ * `snapshot --at t1,t2,...` invocation and writes them into the shared `hf_frame_<hash>_f<idx>.png`
+ * cache so `renderSingleCompositeFrameRgb24` hits the cache for every cell in `monitor sheet`.
+ */
+export function renderHyperFramesBatchFramesPng(
+  options: CompositionBatchFramesOptions
+): Array<{ pngPath: string; snappedSec: number; frameIdx: number }> {
+  if (options.localSecs.length === 0) {
+    return [];
+  }
+
+  const prep = prepareCompositionBatchSnapshot(options);
+  if (prep.complete) {
+    return prep.requestedItems;
+  }
+  const {
+    requestedItems,
+    stillMissing,
+    absCompDir,
+    htmlSource,
+    wantGreenStage,
+    durationSec,
+    hash,
+    scalarVars,
+    isSceneHost,
+    nativeWidth,
+    nativeHeight,
+    targetWidth,
+    targetHeight,
+  } = prep;
+
   const hfBin = findLocalHyperFramesCliMjs();
   if (stillMissing.length > 0 && fs.existsSync(hfBin)) {
-    const tmpSnapDir = path.join(
-      options.blobsDir,
-      `hf_snap_batch_${hash}_${process.pid}_${Date.now()}`
-    );
-    const needsStage =
-      (isSceneHost && Boolean(options.backdropVideoPath)) ||
-      (!options.transparent && Boolean(options.opaqueBackdropColor || options.backdropImagePath)) ||
-      targetWidth !== nativeWidth ||
-      targetHeight !== nativeHeight;
-    let tempSceneHostDir: string | null = null;
-    let tempVarsDir: string | null = null;
-    let greenStageDir: string | null = null;
+    const tmpSnapDir = uniqueBatchSnapshotDir(options.blobsDir, hash);
+    const stagedTarget = stageBatchSnapshotTarget({
+      options,
+      absCompDir,
+      htmlSource,
+      wantGreenStage,
+      durationSec,
+      nativeWidth,
+      nativeHeight,
+      targetWidth,
+      targetHeight,
+      isSceneHost,
+      scalarVars,
+      hash,
+    });
+    const targetSnapDir = stagedTarget.targetSnapDir;
+    const stagedSnapshotDirs = stagedTarget.stagedDirs;
     try {
-      let targetSnapDir = absCompDir;
-      if (needsStage) {
-        tempSceneHostDir = stageCompositionRenderDir({
-          absCompDir,
-          entryHtml: options.entryHtml,
-          blobsDir: options.blobsDir,
-          hash,
-          durationSec,
-          nativeWidth,
-          nativeHeight,
-          targetWidth,
-          targetHeight,
-          isSceneHost,
-          backdropVideoPath: options.backdropVideoPath,
-          transparent: options.transparent,
-          opaqueBackdropColor: options.opaqueBackdropColor,
-          backdropImagePath: options.backdropImagePath,
-        });
-        targetSnapDir = tempSceneHostDir;
-      }
-      if (Object.keys(scalarVars).length > 0) {
-        if (targetSnapDir === absCompDir) {
-          tempVarsDir = stageSnapshotDirWithScalarVars({
-            absCompDir,
-            entryHtml: options.entryHtml,
-            blobsDir: options.blobsDir,
-            hash,
-            scalarVars,
-          });
-          if (tempVarsDir) targetSnapDir = tempVarsDir;
-        } else {
-          const stagedEntryPath = path.join(targetSnapDir, options.entryHtml);
-          if (fs.existsSync(stagedEntryPath)) {
-            const stagedHtml = fs.readFileSync(stagedEntryPath, "utf8");
-            const nextHtml = applyScalarVarsToStagedHtml(stagedHtml, scalarVars);
-            if (nextHtml !== stagedHtml) {
-              fs.writeFileSync(stagedEntryPath, nextHtml, "utf8");
-            }
-          }
-        }
-      }
-      if (wantGreenStage) {
-        if (targetSnapDir === absCompDir) {
-          greenStageDir = stageSanitizedCopy({
-            absCompDir,
-            entryHtml: options.entryHtml,
-            blobsDir: options.blobsDir,
-            prefix: "hf_snap_green",
-            sanitizedHtml: htmlSource,
-          });
-          targetSnapDir = greenStageDir;
-        } else {
-          sanitizeStagedEntryHtml(targetSnapDir, options.entryHtml);
-        }
-      }
-
       const snapProc = spawnWatchedSync(
         process.execPath,
         [
@@ -766,90 +1116,54 @@ export function renderHyperFramesBatchFramesPng(options: {
       );
 
       if (snapProc.status === 0 && fs.existsSync(tmpSnapDir)) {
-        const capturedPngs = fs
-          .readdirSync(tmpSnapDir)
-          .filter((f) => f.startsWith("frame-") && f.endsWith(".png"))
-          .map((f) => path.join(tmpSnapDir, f))
-          .sort((a, b) => {
-            const sa = parseSnapshotFrameSecFromFilename(a);
-            const sb = parseSnapshotFrameSecFromFilename(b);
-            if (sa !== null && sb !== null) return sa - sb;
-            return a.localeCompare(b);
-          });
-
-        for (let i = 0; i < stillMissing.length; i++) {
-          const target = stillMissing[i];
-          let matchedPng: string | undefined;
-          let bestDiff = Infinity;
-          for (const candidate of capturedPngs) {
-            const cSec = parseSnapshotFrameSecFromFilename(candidate);
-            if (cSec !== null) {
-              const diff = Math.abs(cSec - target.snappedSec);
-              if (diff < bestDiff && diff <= Math.max(0.05, 1.5 / options.fps)) {
-                bestDiff = diff;
-                matchedPng = candidate;
-              }
-            }
-          }
-          if (!matchedPng && i < capturedPngs.length) {
-            matchedPng = capturedPngs[i];
-          }
-          if (matchedPng && fs.existsSync(matchedPng)) {
-            fs.copyFileSync(matchedPng, target.pngPath);
-          }
-        }
+        applyBatchSnapshotOutput(stillMissing, options.fps, tmpSnapDir);
       }
     } finally {
-      if (fs.existsSync(tmpSnapDir)) {
-        try {
-          fs.rmSync(tmpSnapDir, { recursive: true, force: true });
-        } catch {
-          // ignore
-        }
-      }
-      if (tempSceneHostDir && fs.existsSync(tempSceneHostDir)) {
-        try {
-          fs.rmSync(tempSceneHostDir, { recursive: true, force: true });
-        } catch {
-          // ignore
-        }
-      }
-      if (tempVarsDir && fs.existsSync(tempVarsDir)) {
-        try {
-          fs.rmSync(tempVarsDir, { recursive: true, force: true });
-        } catch {
-          // ignore
-        }
-      }
-      if (greenStageDir && fs.existsSync(greenStageDir)) {
-        try {
-          fs.rmSync(greenStageDir, { recursive: true, force: true });
-        } catch {
-          // ignore
-        }
+      removeBatchSnapshotDir(tmpSnapDir);
+      for (const stagedDir of stagedSnapshotDirs) {
+        removeBatchSnapshotDir(stagedDir);
       }
     }
   }
 
-  for (const target of stillMissing) {
-    if (!fs.existsSync(target.pngPath) || fs.statSync(target.pngPath).size <= 200) {
-      renderHyperFramesSingleFramePng({
-        ...options,
-        localSec: target.snappedSec,
-      });
-    }
-  }
+  return finalizePreparedBatchSnapshot(prep);
+}
 
-  if (options.transparent && !isSceneHost && requestedItems.length > 0) {
-    const firstValid = requestedItems.find(
-      (r) => fs.existsSync(r.pngPath) && fs.statSync(r.pngPath).size > 200
-    );
-    if (firstValid) {
-      recordCompositionAlphaBboxSidecar(absCompDir, firstValid.pngPath);
+/**
+ * Batched snapshots for several compositions: prepares each composition
+ * (cache hits and blob extracts stay sequential and cheap), runs the pending
+ * `hyperframes snapshot` spawns concurrently bounded by `concurrency`, then
+ * applies the shared single-frame fallback per batch. Returns one item array
+ * per input batch, in input order.
+ */
+export function renderHyperFramesBatchSnapshotsConcurrently(
+  batches: CompositionBatchFramesOptions[],
+  concurrency: number
+): BatchSnapshotItem[][] {
+  const preps: PreparedCompositionBatch[] = batches.map((batchOptions) => {
+    if (batchOptions.localSecs.length === 0) {
+      return {
+        options: batchOptions,
+        requestedItems: [],
+        stillMissing: [],
+        absCompDir: path.resolve(batchOptions.compositionDir),
+        htmlSource: "",
+        wantGreenStage: false,
+        durationSec: 0,
+        hash: "",
+        scalarVars: {},
+        isSceneHost: false,
+        nativeWidth: 0,
+        nativeHeight: 0,
+        targetWidth: 0,
+        targetHeight: 0,
+        complete: true,
+      };
     }
-  }
-
-  return requestedItems;
+    return prepareCompositionBatchSnapshot(batchOptions);
+  });
+  snapshotPreparedBatchesConcurrently(preps, concurrency);
+  return preps.map((prep) => finalizePreparedBatchSnapshot(prep));
 }
 
 export interface MeasuredAlphaBboxPct {

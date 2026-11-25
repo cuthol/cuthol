@@ -1,6 +1,6 @@
 // CLI output state, command handler context, and envelope emission helpers (split out of cli.ts).
-import { buildWorkspaceEnvelopeHeader } from "./core/workspace.js";
-import { formatEnvelopeCompact } from "./mcp/server.js";
+import { buildWorkspaceEnvelopeHeader } from "./core/workspace_read.js";
+import { formatEnvelopeCompact } from "./mcp/mcp_format.js";
 import { drainLiveInbox } from "./live/live_inbox.js";
 
 export const CLI_NOT_HANDLED = Symbol("CLI_NOT_HANDLED");

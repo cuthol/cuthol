@@ -10,6 +10,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 // Types only: the browser library loads on the first launch, so a CLI start does not pay
@@ -270,16 +271,61 @@ export function readCompositionPixelSize(
 }
 
 let cachedChromePath: string | null = null;
+let cachedChromeHomeKey: string | null = null;
 
-/** Chrome executable via the renderer's public command (`browser path`, `ensure` when needed). */
+/** Home identity the cached Chrome path was resolved for (a redirected home has its own cache). */
+function chromeHomeKey(): string {
+  return `${process.env.USERPROFILE ?? ""}|${process.env.HOME ?? ""}|${
+    process.env.HYPERFRAMES_CACHE_DIR ?? ""
+  }`;
+}
+
+const BROWSER_LAUNCH_ERROR_MARK = "__cutholBrowserLaunchError";
+
+/** True when the path is the renderer's own headless shell (per-user cache install). */
+export function isHeadlessShellPath(exe: string): boolean {
+  return path.basename(exe).toLowerCase().includes("chrome-headless-shell");
+}
+
+/** True for errors raised by `launchCoordsBrowser` (message carries path, profile and fix). */
+export function isBrowserLaunchError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    (err as Error & { [BROWSER_LAUNCH_ERROR_MARK]?: boolean })[BROWSER_LAUNCH_ERROR_MARK] === true
+  );
+}
+
+function markBrowserLaunchError(err: Error): Error {
+  (err as Error & { [BROWSER_LAUNCH_ERROR_MARK]?: boolean })[BROWSER_LAUNCH_ERROR_MARK] = true;
+  return err;
+}
+
+/**
+ * Chrome executable via the renderer's public commands. A bare `browser path`
+ * call answers with the system Chrome when the current home directory has no
+ * cached headless shell yet (fresh CI homes, containers, sandboxes), and that
+ * system Chrome cannot start there — so a non-shell answer counts as a miss:
+ * `browser ensure` downloads the shell into the current home and the path is
+ * read again. Only the headless shell is ever returned; when just the system
+ * Chrome remains, the error says so with the fitting next step.
+ */
 export function resolveCoordsChromePath(): string {
-  if (cachedChromePath && fs.existsSync(cachedChromePath)) return cachedChromePath;
+  const homeKey = chromeHomeKey();
+  if (cachedChromePath && cachedChromeHomeKey === homeKey && fs.existsSync(cachedChromePath))
+    return cachedChromePath;
+  cachedChromePath = null;
+  cachedChromeHomeKey = null;
   const hfBin = findLocalHyperFramesCliMjs();
+  // The watched-spawn watchdog reuses one worker whose environment is fixed at
+  // creation, so child lookups would otherwise keep seeing the home directory
+  // from the first call. Pass the live environment explicitly.
+  const liveEnv = (): Record<string, string | undefined> => ({ ...process.env });
   const readPath = (): string | null => {
     try {
       const proc = spawnWatchedSync(process.execPath, [hfBin, "browser", "path"], {
         encoding: "utf8",
         step: "hyperframes browser path",
+        env: liveEnv(),
       });
       const line = String(proc.stdout || "")
         .split(/\r?\n/)
@@ -292,16 +338,53 @@ export function resolveCoordsChromePath(): string {
     return null;
   };
   let exe = readPath();
-  if (!exe) {
+  if (exe && !isHeadlessShellPath(exe)) {
+    // System Chrome answer under a home without the cached shell: install it,
+    // then read again instead of handing out a binary that cannot start here.
     spawnWatchedSync(process.execPath, [hfBin, "browser", "ensure"], {
       encoding: "utf8",
       step: "hyperframes browser ensure",
+      env: liveEnv(),
+    });
+    // The install landed in this home; re-read rather than trusting the old answer.
+    exe = readPath();
+  } else if (!exe) {
+    spawnWatchedSync(process.execPath, [hfBin, "browser", "ensure"], {
+      encoding: "utf8",
+      step: "hyperframes browser ensure",
+      env: liveEnv(),
     });
     exe = readPath();
   }
-  if (!exe) throw new Error("Chrome executable not found via 'hyperframes browser path'.");
+  if (exe && !isHeadlessShellPath(exe)) {
+    throw markBrowserLaunchError(
+      new Error(
+        `Only a system Chrome was found at '${exe}' (no HyperFrames headless shell for this home directory); ` +
+          `the system Chrome cannot start here. Run 'hyperframes browser ensure' to download the headless shell, ` +
+          `then retry; rule: 'cuthol explain G781'.`
+      )
+    );
+  }
+  if (!exe)
+    throw markBrowserLaunchError(
+      new Error(
+        `Chrome executable not found via 'hyperframes browser path' (even after 'browser ensure'). ` +
+          `Run 'hyperframes browser ensure' and check that USERPROFILE/HOME is writable, then retry; ` +
+          `rule: 'cuthol explain G781'.`
+      )
+    );
   cachedChromePath = exe;
+  cachedChromeHomeKey = homeKey;
   return exe;
+}
+
+/** Removes a leftover browser profile directory (best effort, synchronous). */
+export function removeBrowserProfileDirSync(dir: string): void {
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+  } catch {
+    // already gone or locked by a dying browser process
+  }
 }
 
 type FontBundlerFn = (compDir: string) => Promise<string>;
@@ -348,24 +431,53 @@ export async function launchScriptProbeBrowser(): Promise<Browser> {
 async function launchCoordsBrowser(): Promise<Browser> {
   coordsBrowserLaunchCount++;
   const { default: puppeteer } = await import("puppeteer-core");
-  return puppeteer.launch({
-    executablePath: resolveCoordsChromePath(),
-    headless: true,
-    args: [
-      "--no-sandbox",
-      "--disable-dev-shm-usage",
-      "--force-color-profile=srgb",
-      "--font-render-hinting=none",
-      "--force-device-scale-factor=1",
-      "--mute-audio",
-      "--use-gl=angle",
-      "--use-angle=swiftshader",
-      "--enable-unsafe-swiftshader",
-      "--disable-gpu-compositing",
-      "--disable-background-timer-throttling",
-      "--disable-renderer-backgrounding",
-    ],
-  });
+  const exe = resolveCoordsChromePath();
+  // Explicit profile under the shared temp root (never the default location):
+  // the default profile fails under a redirected home, and an explicit folder
+  // is removed after close, so no `puppeteer_dev_chrome_profile-*` survives.
+  const profileDir = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol_browser_profile-"));
+  let browser: Browser;
+  try {
+    browser = await puppeteer.launch({
+      executablePath: exe,
+      headless: true,
+      userDataDir: profileDir,
+      args: [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--force-color-profile=srgb",
+        "--font-render-hinting=none",
+        "--force-device-scale-factor=1",
+        "--mute-audio",
+        "--use-gl=angle",
+        "--use-angle=swiftshader",
+        "--enable-unsafe-swiftshader",
+        "--disable-gpu-compositing",
+        "--disable-background-timer-throttling",
+        "--disable-renderer-backgrounding",
+      ],
+    });
+  } catch (err) {
+    removeBrowserProfileDirSync(profileDir);
+    const detail = err instanceof Error ? err.message : String(err);
+    throw markBrowserLaunchError(
+      new Error(
+        `Browser launch failed (browser '${exe}', profile '${profileDir}'): ${detail} ` +
+          `Fix: run 'hyperframes browser ensure' so the headless shell is installed for this home directory ` +
+          `(USERPROFILE/HOME='${process.env.USERPROFILE ?? process.env.HOME ?? "?"}'), then retry; ` +
+          `rule: 'cuthol explain G780'.`
+      )
+    );
+  }
+  const innerClose = browser.close.bind(browser);
+  browser.close = (async () => {
+    try {
+      await innerClose();
+    } finally {
+      removeBrowserProfileDirSync(profileDir);
+    }
+  }) as typeof browser.close;
+  return browser;
 }
 
 const COORDS_MIME: Record<string, string> = {
@@ -1731,14 +1843,22 @@ export async function measureCompositionCues(
     try {
       browser = await launchCoordsBrowser();
     } catch (err) {
+      // A dead browser is an ERROR, never a silent skip: G780 names the
+      // browser path, the profile folder and the browser's own error. The
+      // launch message already carries all three plus the fitting fix, so it
+      // passes through whole instead of the 200-char summary.
+      const launchDetail =
+        err instanceof Error ? err.message.replace(/\s+/g, " ").trim() : String(err);
       for (const m of misses) {
-        const reason = `browser launch failed: ${shortReason(err)}`;
+        const reason = isBrowserLaunchError(err)
+          ? `browser launch failed: ${launchDetail.slice(0, 600)}`
+          : `browser launch failed: ${shortReason(err)}`;
         pushRepeatDiagnostic(
           warnings,
-          `CUTHOL-G417:${reason}`,
+          `CUTHOL-G780:${reason}`,
           { subjectId: m.cue.id },
-          (e) => DIAGNOSTICS.COORDS_MEASUREMENT_FAILED(e.subjectId, reason),
-          (es) => DIAGNOSTICS.COORDS_MEASUREMENT_FAILED_MANY(reason, es.map((e) => e.subjectId))
+          (e) => DIAGNOSTICS.BROWSER_LAUNCH_FAILED(e.subjectId, reason),
+          (es) => DIAGNOSTICS.BROWSER_LAUNCH_FAILED_MANY(reason, es.map((e) => e.subjectId))
         );
         skipped.push({ cue: m.cue.id, reason });
       }

@@ -1,7 +1,4 @@
 // CLI 'library' command group handler (split out of cli.ts).
-import { analyzeAssetBeats } from "./library/beats.js";
-import { analyzeAssetLoudness } from "./library/loudness.js";
-import { detachAudioFromLibraryAsset, ingestAssetsIntoWorkspace } from "./library/probe.js";
 import {
   formatBeatsDigest,
   formatScenesDigest,
@@ -9,13 +6,9 @@ import {
   QueryableMediaKind,
   queryLibraryAnalysis,
 } from "./library/query.js";
-import { analyzeAssetScenes } from "./library/scenes.js";
-import { analyzeAssetSubjectTrack, formatSubjectTrackDigest } from "./library/subject.js";
-import { analyzeAssetWaveform } from "./library/waveform.js";
 import { DIAGNOSTICS } from "./core/diagnostics.js";
 import { parseTimeMs } from "./core/time.js";
-import { loadSequence } from "./core/workspace.js";
-import { fetchMediaSource, searchMediaSource } from "./library/media_source.js";
+import { loadSequence } from "./core/workspace_read.js";
 import { numFlag, strFlag } from "./cli_args.js";
 import {
   CLI_NOT_HANDLED,
@@ -37,9 +30,10 @@ function readQueryAssetSource(workspaceDir: string, handle: string): Record<stri
   return {};
 }
 
-export function runLibraryCommand(ctx: CliCommandContext): CliCommandResult {
+export async function runLibraryCommand(ctx: CliCommandContext): Promise<CliCommandResult> {
   const { action, rest, flags, workspaceDir, formatFlag } = ctx;
   if (action === "ingest") {
+    const { ingestAssetsIntoWorkspace } = await import("./library/probe.js");
     const files = rest.length > 0 ? rest : strFlag(flags, "file") ? [strFlag(flags, "file")!] : [];
     if (files.length === 0) {
       throw new Error("Provide at least one file path to 'cuthol library ingest <path...>'.");
@@ -58,6 +52,7 @@ export function runLibraryCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "loudness") {
+    const { analyzeAssetLoudness } = await import("./library/loudness.js");
     const handle = strFlag(flags, "handle") ?? rest[0];
     if (!handle) throw new Error("Provide --handle <vid_XX|aud_XX>.");
     const targetLufs = numFlag(flags, "target-lufs");
@@ -70,6 +65,7 @@ export function runLibraryCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "waveform") {
+    const { analyzeAssetWaveform } = await import("./library/waveform.js");
     const handle = strFlag(flags, "handle") ?? rest[0];
     if (!handle) throw new Error("Provide --handle <vid_XX|aud_XX>.");
     const bins = numFlag(flags, "bins", 160);
@@ -84,6 +80,7 @@ export function runLibraryCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "beats") {
+    const { analyzeAssetBeats } = await import("./library/beats.js");
     const handle = strFlag(flags, "handle") ?? rest[0];
     if (!handle) throw new Error("Provide --handle <aud_XX|vid_XX>.");
     const sensitivity = numFlag(flags, "sensitivity", 1.35);
@@ -96,6 +93,7 @@ export function runLibraryCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "scenes") {
+    const { analyzeAssetScenes } = await import("./library/scenes.js");
     const handle = strFlag(flags, "handle") ?? rest[0];
     if (!handle) throw new Error("Provide --handle <vid_XX>.");
     const threshold = numFlag(flags, "threshold");
@@ -108,6 +106,7 @@ export function runLibraryCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "detach-audio") {
+    const { detachAudioFromLibraryAsset } = await import("./library/probe.js");
     const sourceHandle = strFlag(flags, "handle") ?? rest[0];
     if (!sourceHandle) throw new Error("Provide --handle <vid_XX>.");
     const targetHandle = strFlag(flags, "target-handle");
@@ -159,6 +158,7 @@ export function runLibraryCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "search") {
+    const { searchMediaSource } = await import("./library/media_source.js");
     const provider = strFlag(flags, "provider");
     if (!provider) throw new Error("Provide --provider ext:<name>.");
     const kind = strFlag(flags, "kind");
@@ -184,6 +184,7 @@ export function runLibraryCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "fetch") {
+    const { fetchMediaSource } = await import("./library/media_source.js");
     const provider = strFlag(flags, "provider");
     if (!provider) throw new Error("Provide --provider ext:<name>.");
     const id = strFlag(flags, "id");
@@ -197,6 +198,7 @@ export function runLibraryCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "subject") {
+    const { analyzeAssetSubjectTrack, formatSubjectTrackDigest } = await import("./library/subject.js");
     const handle = strFlag(flags, "handle") ?? rest[0];
     if (!handle) throw new Error("Provide --handle <vid_XX>.");
     const res = analyzeAssetSubjectTrack({

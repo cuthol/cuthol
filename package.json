@@ -49,7 +49,7 @@
     "test:tiers": "node scripts/test-tiers.mjs"
   },
   "engines": {
-    "node": ">=22.5.0"
+    "node": ">=22.12.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.0",

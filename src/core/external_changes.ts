@@ -253,7 +253,12 @@ export function listMountedCompositions(seq: CutholSequence, rootDir: string): M
   return [...byAbs.values()].sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
 }
 
-/** Tracked relative paths (slash-separated, sorted) of one composition folder. */
+/**
+ * Tracked relative paths (slash-separated, sorted) of one composition folder.
+ * Deliberately walked fresh on every snapshot: this module exists to detect
+ * out-of-band file additions and deletions, so even a per-command memo could
+ * hide a file created between two snapshots of one process.
+ */
 export function walkTrackedCompositionFiles(absDir: string): string[] {
   const out: string[] = [];
   const absRoot = path.resolve(absDir);
@@ -284,8 +289,17 @@ export function walkTrackedCompositionFiles(absDir: string): string[] {
       }
       if (isDir) {
         if (IGNORED_COMPOSITION_SUBDIRS.has(entry.name)) continue;
-        const real = safeRealpath(full);
-        if (visited.has(real)) continue;
+        // Plain directories use their absolute path (a cycle is impossible
+        // without a link); only links pay for realpathSync.
+        let real: string | null = full;
+        if (entry.isSymbolicLink()) {
+          try {
+            real = fs.realpathSync(full);
+          } catch {
+            real = null;
+          }
+        }
+        if (real === null || visited.has(real)) continue;
         visited.add(real);
         walk(full, rel);
       } else if (isFile) {

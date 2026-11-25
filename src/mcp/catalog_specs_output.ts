@@ -286,7 +286,7 @@ export const OUTPUT_ACTION_SPECS: ActionSpec[] = [
       {
         name: "params",
         type: "object",
-        description: "Parameters JSON object passed to the processor or recipe (e.g. { rate: 1.3 }).",
+        description: "Parameters JSON object passed to the processor or recipe (e.g. { rate: 1.3 }; CLI also takes file:path, e.g. file:params.json).",
       },
       {
         name: "scope",

@@ -297,7 +297,7 @@ test("spine transform --edge: mirror sets, transparent clears, invalid rejects",
   }
 });
 
-test("spine transform handler reads the --edge flag", () => {
+test("spine transform handler reads the --edge flag", async () => {
   const wsDir = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-edge-cmd-"));
   try {
     initWorkspace({ dir: wsDir, title: "edge cmd", aspect: "16:9", fps: 30 });
@@ -310,7 +310,7 @@ test("spine transform handler reads the --edge flag", () => {
     const origLog = console.log;
     console.log = (msg: string) => { logs.push(String(msg)); };
     try {
-      runSpineCommand({ group: "spine", action: "transform", rest: [], flags: { clip: "sp_01", edge: "clamp" }, workspaceDir: wsDir, formatFlag: "" });
+      await runSpineCommand({ group: "spine", action: "transform", rest: [], flags: { clip: "sp_01", edge: "clamp" }, workspaceDir: wsDir, formatFlag: "" });
     } finally {
       console.log = origLog;
     }

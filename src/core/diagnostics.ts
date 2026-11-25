@@ -1890,6 +1890,26 @@ export const DIAGNOSTICS = {
       "explain needs a diagnostic code or topic.",
       "Use this command: cuthol explain <code|topic> (e.g. cuthol explain CUTHOL-G110)."
     ),
+  // [kz1 G778–G779] JSON flag file references and quote-stripped JSON
+  JSON_FLAG_FAILED: (flag: string, command: string, received: string, expected: string, fixCommand: string) => {
+    const stripped = received.trim().length > 0 && /[{,[]\s*[A-Za-z_][A-Za-z0-9_]*\s*:/.test(received);
+    const preview = received.length > 60 ? `${received.slice(0, 60)}…` : received;
+    return createDiagnostic(
+      "CUTHOL-G778",
+      "G1_SCHEMA",
+      "ERROR",
+      `Flag '--${flag}' of '${command}' got text that is not JSON (got '${preview}'; expected ${expected}).${stripped ? " The shell stripped the double quotes (typical: Windows PowerShell to cuthol.cmd turns quoted keys into bare words)." : ""}`,
+      `Retry as '${fixCommand}' (write the JSON into the file first)${stripped ? ", or pass one '--param k=v' pair per value where the command takes '--param'" : ""}; rule: 'cuthol explain G778'.`
+    );
+  },
+  JSON_FLAG_FILE_FAILED: (flag: string, command: string, ref: string, resolved: string, detail: string, fixCommand: string) =>
+    createDiagnostic(
+      "CUTHOL-G779",
+      "G1_SCHEMA",
+      "ERROR",
+      `Flag '--${flag}' of '${command}' points at a file that cannot be read ('${ref}' resolved to '${resolved}': ${detail}).`,
+      `Write the JSON into that file and retry as '${fixCommand}'; rule: 'cuthol explain G779'.`
+    ),
   UNKNOWN_FLAG: (flag: string, command: string, suggestionFix: string) =>
     createDiagnostic(
       "CUTHOL-G110",
@@ -2552,6 +2572,35 @@ export const DIAGNOSTICS = {
       `Re-run the failed cues with 'cuthol composition coords --cue <cue_XX> --refresh'; if they still fail, open a page with 'cuthol composition preview --cue <cue_XX>' to see the error; rule: 'cuthol explain G417'.`,
       cueIds[0],
       cueIds
+    ),
+  // [kz2 G780–G781] browser launch failures (non-default home): launch names
+  // browser path, profile folder and the browser's own error with a fitting fix.
+  BROWSER_LAUNCH_FAILED: (cueId: string, reason: string) =>
+    createDiagnostic(
+      "CUTHOL-G780",
+      "G4_STAGE",
+      "ERROR",
+      `Browser launch failed for cue '${cueId}' (${reason}); the cue was skipped and no measurement covers it.`,
+      `Run 'hyperframes browser ensure' so the headless shell is installed for this home directory, then re-run the failed cue with 'cuthol composition coords --cue ${cueId} --refresh'; rule: 'cuthol explain G780'.`,
+      cueId
+    ),
+  BROWSER_LAUNCH_FAILED_MANY: (reason: string, cueIds: string[]) =>
+    createDiagnostic(
+      "CUTHOL-G780",
+      "G4_STAGE",
+      "ERROR",
+      `Browser launch failed for ${cueIds.length} cues (${repeatIdRange(cueIds)}): ${reason}; the cues were skipped and no measurement covers them.`,
+      `Run 'hyperframes browser ensure' so the headless shell is installed for this home directory, then re-run with 'cuthol composition coords --all --refresh'; rule: 'cuthol explain G780'.`,
+      cueIds[0],
+      cueIds
+    ),
+  BROWSER_SYSTEM_CHROME_ONLY: (foundPath: string) =>
+    createDiagnostic(
+      "CUTHOL-G781",
+      "G4_STAGE",
+      "ERROR",
+      `Only a system Chrome was found at '${foundPath}': no HyperFrames headless shell exists for this home directory, so no browser step (coordinates, script probe, shader pre-pass) can run.`,
+      `Run 'hyperframes browser ensure' to download the headless shell for this home directory, then retry; rule: 'cuthol explain G781'.`
     ),
   COORDS_FONTS_NOT_BUNDLED: (cueId: string, reason: string) =>
     createDiagnostic(

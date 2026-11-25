@@ -7,11 +7,20 @@ import {
 } from "../core/subprocess.js";
 import {
   analyzeCompositionDataUsage,
+  analyzeCompositionDataUsageCached,
   computeUsedBridgePayloadHashes,
   extractScalarHyperFramesVariables,
+  getCompositionDirHashes,
   hashCompositionFilesExcludingBridgeData,
   hashDirectoryRecursive,
+  invalidateCompositionDirHashes,
 } from "./bridge_exporter.js";
+import {
+  currentHashGeneration,
+  hashFileContentShort,
+  readTextIfExists,
+  writeFileCached,
+} from "../core/file_hash_index.js";
 import {
   CutholBridgeV1
 } from "./cuthol_runtime.js";
@@ -32,21 +41,13 @@ export function rendererVersionOfFilesHash(filesHash: string | null | undefined)
   return version.length > 0 ? version : null;
 }
 
-const fileSha256Memo = new Map<string, string>();
-
 function hashFileContentSha256(filePath: string): string {
-  try {
-    const abs = path.resolve(filePath);
-    const st = fs.statSync(abs);
-    const memoKey = `${abs}:${st.size}:${st.mtimeMs}`;
-    const hit = fileSha256Memo.get(memoKey);
-    if (hit) return hit;
-    const digest = crypto.createHash("sha256").update(fs.readFileSync(abs)).digest("hex").slice(0, 16);
-    fileSha256Memo.set(memoKey, digest);
-    return digest;
-  } catch {
-    return "missing";
-  }
+  // Shared content cache (exact size + full-precision mtime match; files
+  // seen before in this process are re-read on a new command generation,
+  // only first touches reuse the persisted index). Replaces the old
+  // process-lifetime memo, which could hide an edit that preserved size and
+  // mtime within one long-lived process.
+  return hashFileContentShort(path.resolve(filePath));
 }
 
 const stillThumb16x9Memo = new Map<string, Buffer | null>();
@@ -56,7 +57,7 @@ function getStillImageThumb16x9Rgb24(pngPath: string): Buffer | null {
     const abs = path.resolve(pngPath);
     if (!fs.existsSync(abs)) return null;
     const st = fs.statSync(abs);
-    const memoKey = `${abs}:${st.size}`;
+    const memoKey = `${abs}:${st.size}:${st.mtimeMs}`;
     if (stillThumb16x9Memo.has(memoKey)) {
       return stillThumb16x9Memo.get(memoKey) ?? null;
     }
@@ -203,21 +204,7 @@ function compositionOccludesHtmlBackdrop(absCompDir: string, htmlSource: string)
   return true;
 }
 
-export function syncScalarVarsAndComputeCompositionHash(options: {
-  absCompDir: string;
-  entryHtml: string;
-  htmlSource: string;
-  width: number;
-  height: number;
-  fps: number;
-  durationMs: number;
-  props: Record<string, unknown>;
-  transparent: boolean;
-  mode: "overlay_alpha" | "scene_host";
-  backdropVideoPath?: string;
-  opaqueBackdropColor?: string;
-  backdropImagePath?: string;
-}): {
+type ScalarVarsHashResult = {
   hash: string;
   nativeHash: string;
   legacyHash: string;
@@ -238,7 +225,103 @@ export function syncScalarVarsAndComputeCompositionHash(options: {
   targetWidth: number;
   targetHeight: number;
   computeCandidateKey: (dirH: string, w: number, h: number, bd: string) => string;
-} {
+};
+
+const scalarVarsMemo = new Map<string, { fp: string | null; result: ScalarVarsHashResult }>();
+
+function backdropStatKey(absCompDir: string, backdropVideoPath?: string, backdropImagePath?: string): string {
+  const parts: string[] = [];
+  for (const p of [backdropVideoPath, backdropImagePath]) {
+    if (!p) {
+      parts.push("-");
+      continue;
+    }
+    try {
+      const abs = path.isAbsolute(p) ? p : path.resolve(absCompDir, p);
+      const st = fs.statSync(abs);
+      parts.push(st.isFile() ? `${st.size}:${st.mtimeMs}` : "missing");
+    } catch {
+      parts.push("missing");
+    }
+  }
+  return parts.join("|");
+}
+
+export function syncScalarVarsAndComputeCompositionHash(options: {
+  absCompDir: string;
+  entryHtml: string;
+  htmlSource: string;
+  width: number;
+  height: number;
+  fps: number;
+  durationMs: number;
+  props: Record<string, unknown>;
+  transparent: boolean;
+  mode: "overlay_alpha" | "scene_host";
+  backdropVideoPath?: string;
+  opaqueBackdropColor?: string;
+  backdropImagePath?: string;
+}): ScalarVarsHashResult {
+  // One composition is hashed up to four times per verify (two dimension
+  // sets, two backdrop variants). The inputs beyond the composition's own
+  // files are all in this key; the fingerprint (memoized, no walk on hit)
+  // covers the files. A hit skips all reads and recomputation, including the
+  // vars.json write, which would be a byte-identical no-op under a matching
+  // fingerprint.
+  const absDir = path.resolve(options.absCompDir);
+  const paramKey = [
+    absDir,
+    options.entryHtml,
+    options.width,
+    options.height,
+    options.fps,
+    options.durationMs,
+    JSON.stringify(options.props ?? {}),
+    options.transparent,
+    options.mode,
+    options.backdropVideoPath ?? "",
+    options.opaqueBackdropColor ?? "",
+    options.backdropImagePath ?? "",
+    options.htmlSource.length,
+    // The result embeds the invoked HyperFrames version (files hash tag,
+    // effective dir hash), so a version change must not reuse it.
+    readInvokedHyperFramesVersion(),
+  ].join("\n");
+  const key = `${currentHashGeneration()}\n${paramKey}\n${backdropStatKey(absDir, options.backdropVideoPath, options.backdropImagePath)}`;
+  // The fingerprint is memoized per command generation (one stat-only
+  // walk per composition per command); a new generation always walks again,
+  // so an external edit between two calls of one process is always observed
+  // here. The bundle is seeded with the renderer version because the raw
+  // hashes embed it.
+  const dirHashes = getCompositionDirHashes(absDir, readInvokedHyperFramesVersion());
+  const hit = scalarVarsMemo.get(key);
+  if (hit && dirHashes.fp !== null && hit.fp === dirHashes.fp) return hit.result;
+  const result = syncScalarVarsAndComputeCompositionHashUncached(options, dirHashes);
+  if (dirHashes.fp !== null) {
+    if (scalarVarsMemo.size > 2000) scalarVarsMemo.clear();
+    scalarVarsMemo.set(key, { fp: dirHashes.fp, result });
+  }
+  return result;
+}
+
+function syncScalarVarsAndComputeCompositionHashUncached(
+  options: {
+    absCompDir: string;
+    entryHtml: string;
+    htmlSource: string;
+    width: number;
+    height: number;
+    fps: number;
+    durationMs: number;
+    props: Record<string, unknown>;
+    transparent: boolean;
+    mode: "overlay_alpha" | "scene_host";
+    backdropVideoPath?: string;
+    opaqueBackdropColor?: string;
+    backdropImagePath?: string;
+  },
+  dirHashes: { fp: string | null; filesHash: string; legacyHash: string }
+): ScalarVarsHashResult {
   // Synchronize `assets/cuthol-vars.json` BEFORE hashing so the cache key is never computed against stale variables.
   const varsFile = path.join(options.absCompDir, "assets/cuthol-vars.json");
   const scalarVars = extractScalarHyperFramesVariables(options.props);
@@ -246,14 +329,14 @@ export function syncScalarVarsAndComputeCompositionHash(options: {
   let currentVarsJson = "";
   if (fs.existsSync(varsFile)) {
     try {
-      currentVarsJson = fs.readFileSync(varsFile, "utf8");
+      currentVarsJson = readTextIfExists(varsFile) ?? "";
     } catch {
       currentVarsJson = "";
     }
   }
   if (currentVarsJson !== nextVarsJson && (Object.keys(scalarVars).length > 0 || fs.existsSync(varsFile))) {
-    fs.mkdirSync(path.dirname(varsFile), { recursive: true });
-    fs.writeFileSync(varsFile, nextVarsJson, "utf8");
+    writeFileCached(varsFile, nextVarsJson);
+    invalidateCompositionDirHashes(options.absCompDir);
   }
 
   const wMatch = /\bdata-width\s*=\s*(["'])(\d+)\1/i.exec(options.htmlSource);
@@ -268,16 +351,20 @@ export function syncScalarVarsAndComputeCompositionHash(options: {
     Boolean(options.backdropVideoPath && fs.existsSync(options.backdropVideoPath));
 
   const rendererVersion = readInvokedHyperFramesVersion();
-  const filesHash = filesHashWithRendererVersion(
-    hashCompositionFilesExcludingBridgeData(options.absCompDir),
-    rendererVersion
+  // Directory hashes ride along from the wrapper's single fingerprint walk.
+  const filesHash = filesHashWithRendererVersion(dirHashes.filesHash, rendererVersion);
+  const usage = analyzeCompositionDataUsageCached(
+    options.absCompDir,
+    options.entryHtml,
+    options.props,
+    dirHashes.filesHash
   );
-  const usage = analyzeCompositionDataUsage(options.absCompDir, options.entryHtml, options.props);
   const dataJsonPath = path.join(options.absCompDir, "assets/cuthol-data.json");
   let parsedBridge: Partial<CutholBridgeV1> | null = null;
   if (fs.existsSync(dataJsonPath)) {
     try {
-      parsedBridge = JSON.parse(fs.readFileSync(dataJsonPath, "utf8")) as Partial<CutholBridgeV1>;
+      const dataRaw = readTextIfExists(dataJsonPath) ?? fs.readFileSync(dataJsonPath, "utf8");
+      parsedBridge = JSON.parse(dataRaw) as Partial<CutholBridgeV1>;
     } catch {
       parsedBridge = null;
     }
@@ -296,14 +383,15 @@ export function syncScalarVarsAndComputeCompositionHash(options: {
     )
     .digest("hex");
 
-  const legacyDirHash = hashDirectoryRecursive(options.absCompDir);
+  const legacyDirHash = dirHashes.legacyHash;
 
   let validLegacyDirHashes: string[] = [];
   let lastDataChangeReason: "slice_changed" | "global_used_changed" | null = null;
   const metaSidecarPath = path.join(options.absCompDir, "assets/.cuthol-bridge-meta.json");
   if (fs.existsSync(metaSidecarPath)) {
     try {
-      const meta = JSON.parse(fs.readFileSync(metaSidecarPath, "utf8"));
+      const metaRaw = readTextIfExists(metaSidecarPath) ?? fs.readFileSync(metaSidecarPath, "utf8");
+      const meta = JSON.parse(metaRaw);
       if (Array.isArray(meta.validLegacyDirHashes)) {
         validLegacyDirHashes = meta.validLegacyDirHashes;
       }

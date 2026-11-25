@@ -85,14 +85,14 @@ test("try renders a grid with the layout JSON on a tiny sweep", () => {
   });
 });
 
-test("fx try --out resolves a relative path against the project folder, not the cwd", () => {
+test("fx try --out resolves a relative path against the project folder, not the cwd", async () => {
   const proj = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-fxtry-proj-"));
   const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-fxtry-cwd-"));
   const prevCwd = process.cwd();
   try {
     initWorkspace({ dir: proj, title: "fxtry-out", aspect: "16:9", fps: 30 });
     process.chdir(elsewhere);
-    runSpineFxTry(proj, { filter: "gblur=sigma=2", at: "0.5,1.5", out: "try-grid.png" });
+    await runSpineFxTry(proj, { filter: "gblur=sigma=2", at: "0.5,1.5", out: "try-grid.png" });
     assert.ok(fs.statSync(path.join(proj, "try-grid.png")).isFile(), "relative --out lands in the project folder");
     assert.ok(!fs.existsSync(path.join(elsewhere, "try-grid.png")), "relative --out must not land in the cwd");
     assert.ok(!fs.existsSync(path.join(elsewhere, "fxtry-proj-grid.png")));

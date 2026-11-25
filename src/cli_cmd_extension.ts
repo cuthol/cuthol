@@ -1,22 +1,7 @@
 // CLI 'extension' command group handler (split out of cli.ts).
 import { CutholError, DIAGNOSTICS } from "./core/diagnostics.js";
-import {
-  createExtension,
-  disableExtensionInWorkspace,
-  enableExtensionInWorkspace,
-  ExtensionScope,
-  ExtensionTemplateKind,
-  listExtensions,
-  promoteExtension,
-  removeExtension,
-  resolveExtension,
-  runExtensionPlanner,
-  runExtensionProcessor,
-  runExtensionRecipe,
-  showExtension,
-} from "./extensions/manager.js";
-import { boolFlag, parsePropsJsonFlag, strFlag } from "./cli_args.js";
-import { addFxSkeleton } from "./extensions/fx_new.js";
+import type { ExtensionScope, ExtensionTemplateKind } from "./extensions/manager.js";
+import { boolFlag, jsonFixCommand, parseJsonFlag, strFlag } from "./cli_args.js";
 import {
   CLI_NOT_HANDLED,
   CliCommandContext,
@@ -24,11 +9,12 @@ import {
   emitEnvelopeJson,
 } from "./cli_output.js";
 
-export function runExtensionCommand(ctx: CliCommandContext): CliCommandResult {
+export async function runExtensionCommand(ctx: CliCommandContext): Promise<CliCommandResult> {
   const { action, rest, flags, workspaceDir } = ctx;
   const extAction = action ?? "list";
   const scopeRaw = strFlag(flags, "scope") as ExtensionScope | undefined;
   if (extAction === "list") {
+    const { listExtensions } = await import("./extensions/manager.js");
     const res = listExtensions(workspaceDir);
     const filtered = scopeRaw
       ? res.extensions.filter((e) => e.scope === scopeRaw)
@@ -41,6 +27,7 @@ export function runExtensionCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (extAction === "create") {
+    const { createExtension } = await import("./extensions/manager.js");
     const name = strFlag(flags, "name") ?? rest[0];
     if (!name) {
       throw new CutholError(
@@ -62,6 +49,7 @@ export function runExtensionCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (extAction === "show") {
+    const { showExtension } = await import("./extensions/manager.js");
     const name = strFlag(flags, "name") ?? rest[0];
     if (!name) {
       throw new CutholError(
@@ -78,6 +66,7 @@ export function runExtensionCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (extAction === "enable") {
+    const { enableExtensionInWorkspace } = await import("./extensions/manager.js");
     const name = strFlag(flags, "name") ?? rest[0];
     if (!name) {
       throw new CutholError(
@@ -95,6 +84,7 @@ export function runExtensionCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (extAction === "disable") {
+    const { disableExtensionInWorkspace } = await import("./extensions/manager.js");
     const name = strFlag(flags, "name") ?? rest[0];
     if (!name) {
       throw new CutholError(
@@ -111,6 +101,7 @@ export function runExtensionCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (extAction === "promote") {
+    const { promoteExtension } = await import("./extensions/manager.js");
     const name = strFlag(flags, "name") ?? rest[0];
     if (!name) {
       throw new CutholError(
@@ -127,6 +118,7 @@ export function runExtensionCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (extAction === "remove") {
+    const { removeExtension } = await import("./extensions/manager.js");
     const name = strFlag(flags, "name") ?? rest[0];
     if (!name) {
       throw new CutholError(
@@ -143,6 +135,8 @@ export function runExtensionCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (extAction === "run") {
+    const { resolveExtension, runExtensionPlanner, runExtensionProcessor, runExtensionRecipe } =
+      await import("./extensions/manager.js");
     const name = strFlag(flags, "name") ?? rest[0];
     if (!name) {
       throw new CutholError(
@@ -154,7 +148,14 @@ export function runExtensionCommand(ctx: CliCommandContext): CliCommandResult {
     const recipeName = strFlag(flags, "recipe");
     const inputVal = strFlag(flags, "input") ?? strFlag(flags, "handle");
     const rawParams = strFlag(flags, "params");
-    const paramsObj = rawParams ? parsePropsJsonFlag(rawParams, "extension.run") : {};
+    const paramsObj = rawParams
+      ? (parseJsonFlag(rawParams, {
+          command: "extension run",
+          flag: "params",
+          kind: "object",
+          fixCommand: jsonFixCommand("extension run", "params", `--name ${name}`),
+        }) as Record<string, unknown>)
+      : {};
     const dryRun = boolFlag(flags, "dry-run", false);
 
     const ext = resolveExtension(name, workspaceDir, scopeRaw);
@@ -241,6 +242,7 @@ export function runExtensionCommand(ctx: CliCommandContext): CliCommandResult {
     if (!role) {
       throw new CutholError(DIAGNOSTICS.FX_NEW_UNKNOWN_ROLE("(missing --role)"));
     }
+    const { addFxSkeleton } = await import("./extensions/fx_new.js");
     const res = addFxSkeleton({ workspaceDir, extName, fxName, role });
     const wrote = DIAGNOSTICS.FX_NEW_WROTE_SKELETON(extName, fxName);
     emitEnvelopeJson(workspaceDir, "extension.fx-new", { ...res, role, note: wrote.what });

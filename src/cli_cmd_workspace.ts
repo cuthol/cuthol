@@ -1,21 +1,6 @@
 // CLI 'workspace' command group handler (split out of cli.ts).
 import { CutholError, DIAGNOSTICS } from "./core/diagnostics.js";
-import {
-  adoptExternalChanges,
-  buildChangesShow,
-  revertExternalChanges,
-} from "./core/external_changes.js";
 import { AspectPreset, parseStageSize } from "./core/schema.js";
-import {
-  initWorkspace,
-  loadJournalManifest,
-  loadSequence,
-  openWorkspaceSummary,
-  stepJournal,
-  tagCurrentRevision,
-} from "./core/workspace.js";
-import { setStageAudioJoinFadeMs, setStageBackdropColor, setStageTempo } from "./sequence/stage.js";
-import { resizeStage } from "./sequence/stage_resize.js";
 import { boolFlag, numFlag, strFlag } from "./cli_args.js";
 import {
   CLI_NOT_HANDLED,
@@ -25,9 +10,10 @@ import {
   emitEnvelopeObject,
 } from "./cli_output.js";
 
-export function runWorkspaceCommand(ctx: CliCommandContext): CliCommandResult {
+export async function runWorkspaceCommand(ctx: CliCommandContext): Promise<CliCommandResult> {
   const { action, rest, flags, workspaceDir } = ctx;
   if (action === "init") {
+    const { initWorkspace } = await import("./core/workspace.js");
     const targetDir = rest[0] ?? workspaceDir;
     const sizeRaw = strFlag(flags, "size");
     const aspectRaw = strFlag(flags, "aspect");
@@ -63,6 +49,7 @@ export function runWorkspaceCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "open") {
+    const { openWorkspaceSummary } = await import("./core/workspace.js");
     const targetDir = rest[0] ?? workspaceDir;
     const res = openWorkspaceSummary(targetDir, {
       verbose: boolFlag(flags, "verbose", false),
@@ -75,6 +62,8 @@ export function runWorkspaceCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "stage") {
+    const { loadSequence } = await import("./core/workspace.js");
+    const { resizeStage } = await import("./sequence/stage_resize.js");
     const sizeRaw = strFlag(flags, "size");
     const stageAspectRaw = strFlag(flags, "aspect");
     const fromRaw = strFlag(flags, "from");
@@ -107,6 +96,7 @@ export function runWorkspaceCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "backdrop") {
+    const { setStageBackdropColor } = await import("./sequence/stage.js");
     const color = strFlag(flags, "color") ?? rest[0];
     if (!color) throw new CutholError(DIAGNOSTICS.INVALID_COLOR("(empty / missing --color)"));
     const res = setStageBackdropColor({ workspaceDir, color });
@@ -118,6 +108,7 @@ export function runWorkspaceCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "tempo") {
+    const { setStageTempo } = await import("./sequence/stage.js");
     const raw = strFlag(flags, "rate") ?? rest[0];
     if (raw == null || String(raw).trim() === "") {
       throw new CutholError(DIAGNOSTICS.INVALID_TEMPO("(empty / missing --rate)"));
@@ -136,6 +127,7 @@ export function runWorkspaceCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "audio-fade") {
+    const { setStageAudioJoinFadeMs } = await import("./sequence/stage.js");
     const raw = strFlag(flags, "ms") ?? rest[0];
     if (raw == null || String(raw).trim() === "") {
       throw new CutholError(DIAGNOSTICS.INVALID_AUDIO_JOIN_FADE("(empty / missing --ms)"));
@@ -153,6 +145,9 @@ export function runWorkspaceCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "journal") {
+    const { loadJournalManifest, loadSequence, stepJournal, tagCurrentRevision } = await import(
+      "./core/workspace.js"
+    );
     const sub = rest[0] ?? "list";
     if (sub === "list") {
       const { paths } = loadSequence(workspaceDir);
@@ -204,6 +199,9 @@ export function runWorkspaceCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "changes") {
+    const { adoptExternalChanges, buildChangesShow, revertExternalChanges } = await import(
+      "./core/external_changes.js"
+    );
     const sub = rest[0] ?? "show";
     const comp = strFlag(flags, "comp");
     if (sub === "show") {

@@ -14,7 +14,7 @@ export const MEDIA_ACTION_SPECS: ActionSpec[] = [
       { name: "comp_dir", type: "string", description: "Folder to create (relative to the project), e.g. 'compositions/intro'.", required: true },
       { name: "preset", type: "string", description: "Starting point (default counter).", enum: ["blank", "counter", "beat_cards", "audio_glow", "cut_phases", "lower_third", "title_card", "stat_callout", "badge_overlay"] },
       { name: "duration", type: "time", description: "Composition length (default 3000ms); keep it equal to the cue duration." },
-      { name: "props", type: "object", description: "Preset props, e.g. {headline, subline, value, accent}." },
+      { name: "props", type: "object", description: "Preset props, e.g. {headline, subline, value, accent} (CLI also takes file:path, e.g. file:props.json)." },
       { name: "transparent", type: "boolean", description: "Transparent background (default true)." },
       { name: "force", type: "boolean", description: "Overwrite files edited after Cuthol wrote them (otherwise G215 stops the scaffold). Undoable with workspace.journal undo." },
     ],

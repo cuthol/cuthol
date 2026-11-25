@@ -27,7 +27,7 @@ export const TREATMENT_ACTION_SPECS: ActionSpec[] = [
   },
   {
     tool: "spine",
-    action: "motion-blur",
+    action: "motion_blur",
     argv: ["spine", "motion-blur"],
     summary: "Set a spine clip's motion blur (shutter over source frames; temporal blend). Does not blur placement-envelope pans of stills.",
     mutates: true,

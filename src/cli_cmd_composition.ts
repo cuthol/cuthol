@@ -1,10 +1,7 @@
 // CLI 'composition' and 'cue' command group handlers (split out of cli.ts).
 import fs from "node:fs";
 import path from "node:path";
-import { syncAllCompositionBridges } from "./compositor/bridge_exporter.js";
-import { previewAndCheckComposition } from "./compositor/composition_preview.js";
-import { HyperFramesPresetKind } from "./compositor/hyperframes_bridge.js";
-import { scaffoldCompositionGuarded } from "./compositor/scaffold_guard.js";
+import type { HyperFramesPresetKind } from "./compositor/hyperframes_bridge.js";
 import { CutholDiagnostic, CutholError, DIAGNOSTICS } from "./core/diagnostics.js";
 import { parseTimeMs } from "./core/time.js";
 
@@ -19,18 +16,8 @@ export function bareDurationWarning(durRaw: string | undefined): CutholDiagnosti
   if (!Number.isFinite(value) || value >= 100) return null;
   return DIAGNOSTICS.BARE_DURATION_AS_MS(raw);
 }
-import { measureCompositionCues, parseCoordsFrameSelector } from "./compositor/coords_extract.js";
-import { geometryMisuseError, isGeometryAtValue, runGeometryQuery } from "./compositor/coords_query.js";
-import { formatEnvelopeCompact, resolveActionSpecForCommand } from "./mcp/server.js";
-import { loadSequence } from "./core/workspace.js";
-import {
-  applyCueSheet,
-  CutholCueSheet,
-  exportSequenceToCueSheet,
-  mergeCueSheetIntoSequence,
-  planCueSheet,
-} from "./sequence/cuesheet.js";
-import { boolFlag, parsePropsJsonFlag, strFlag } from "./cli_args.js";
+import type { CutholCueSheet } from "./sequence/cuesheet.js";
+import { boolFlag, jsonFixCommand, parseJsonFlag, strFlag } from "./cli_args.js";
 import {
   activeCliAction,
   activeCliCompactMode,
@@ -45,7 +32,7 @@ import {
   emitEnvelopeJson,
 } from "./cli_output.js";
 
-function emitCoordsAsyncError(err: unknown): void {
+async function emitCoordsAsyncError(err: unknown): Promise<void> {
   const errEnvelope: Record<string, unknown> =
     err instanceof CutholError
       ? {
@@ -59,6 +46,9 @@ function emitCoordsAsyncError(err: unknown): void {
           error: err instanceof Error ? err.message : String(err),
         };
   if (activeCliCompactMode) {
+    const { formatEnvelopeCompact, resolveActionSpecForCommand } = await import(
+      "./mcp/mcp_format.js"
+    );
     const spec = resolveActionSpecForCommand(activeCliGroup, activeCliAction, activeCliSub);
     const { text } = formatEnvelopeCompact({
       envelope: errEnvelope,
@@ -76,9 +66,11 @@ function emitCoordsAsyncError(err: unknown): void {
   process.exitCode = 1;
 }
 
-export function runCompositionCommand(ctx: CliCommandContext): CliCommandResult {
+export async function runCompositionCommand(ctx: CliCommandContext): Promise<CliCommandResult> {
   const { action, rest, flags, workspaceDir } = ctx;
   if (action === "scaffold") {
+    const { loadSequence } = await import("./core/workspace.js");
+    const { scaffoldCompositionGuarded } = await import("./compositor/scaffold_guard.js");
     const { sequence } = loadSequence(workspaceDir);
     const compDir =
       strFlag(flags, "comp-dir") ??
@@ -91,7 +83,18 @@ export function runCompositionCommand(ctx: CliCommandContext): CliCommandResult 
     const durRaw = strFlag(flags, "duration", "3000ms")!;
     const durationMs = parseTimeMs(durRaw);
     const preset = (strFlag(flags, "preset", "counter") as HyperFramesPresetKind) ?? "counter";
-    const props = parsePropsJsonFlag(strFlag(flags, "props", "{}")!, "composition.scaffold");
+    const compDirFlag =
+      strFlag(flags, "comp-dir") !== undefined
+        ? `--comp-dir ${compDir}`
+        : strFlag(flags, "composition-dir") !== undefined
+          ? `--composition-dir ${compDir}`
+          : `--comp-dir ${compDir}`;
+    const props = parseJsonFlag(strFlag(flags, "props", "{}")!, {
+      command: "composition scaffold",
+      flag: "props",
+      kind: "object",
+      fixCommand: jsonFixCommand("composition scaffold", "props", compDirFlag),
+    }) as Record<string, unknown>;
     const transparent = boolFlag(flags, "transparent", true) ?? true;
     const res = scaffoldCompositionGuarded({
       workspaceDir,
@@ -117,6 +120,8 @@ export function runCompositionCommand(ctx: CliCommandContext): CliCommandResult 
   }
 
   if (action === "sync") {
+    const { loadSequence } = await import("./core/workspace.js");
+    const { syncAllCompositionBridges } = await import("./compositor/bridge_exporter.js");
     const { paths, sequence } = loadSequence(workspaceDir);
     const synced = syncAllCompositionBridges(sequence, paths, { explicit: true });
     const updatedCount = synced.filter((s) => s.updated).length;
@@ -133,6 +138,12 @@ export function runCompositionCommand(ctx: CliCommandContext): CliCommandResult 
   }
 
   if (action === "coords") {
+    const { measureCompositionCues, parseCoordsFrameSelector } = await import(
+      "./compositor/coords_extract.js"
+    );
+    const { geometryMisuseError, isGeometryAtValue, runGeometryQuery } = await import(
+      "./compositor/coords_query.js"
+    );
     const cueId = strFlag(flags, "cue") ?? strFlag(flags, "id");
     const all = boolFlag(flags, "all", false) === true;
     const atRaw = strFlag(flags, "at");
@@ -217,6 +228,7 @@ export function runCompositionCommand(ctx: CliCommandContext): CliCommandResult 
   }
 
   if (action === "preview" || action === "check") {
+    const { previewAndCheckComposition } = await import("./compositor/composition_preview.js");
     const atRaw = strFlag(flags, "at");
     const atSeconds = atRaw
       ? atRaw
@@ -259,10 +271,12 @@ export function resolveCueSheetReadPath(sheetFile: string, workspaceDir: string)
   throw new CutholError(DIAGNOSTICS.CUE_SHEET_FILE_NOT_FOUND([cwdPath, dirPath]));
 }
 
-export function runCueCommand(ctx: CliCommandContext): CliCommandResult {
+export async function runCueCommand(ctx: CliCommandContext): Promise<CliCommandResult> {
   const { action, rest, flags, workspaceDir } = ctx;
   const sheetFile = strFlag(flags, "file") ?? rest[0];
   if (action === "export") {
+    const { loadSequence } = await import("./core/workspace.js");
+    const { exportSequenceToCueSheet } = await import("./sequence/cuesheet.js");
     const { sequence } = loadSequence(workspaceDir);
     const exported = exportSequenceToCueSheet(sequence);
     if (sheetFile) {
@@ -282,17 +296,21 @@ export function runCueCommand(ctx: CliCommandContext): CliCommandResult {
   ) as CutholCueSheet;
 
   if (action === "diff") {
+    const { loadSequence } = await import("./core/workspace.js");
+    const { mergeCueSheetIntoSequence } = await import("./sequence/cuesheet.js");
     const { sequence } = loadSequence(workspaceDir);
     const { diff } = mergeCueSheetIntoSequence(sequence, sheet);
     emitEnvelopeJson(workspaceDir, "cue.diff", { action: "cue.diff", diff });
     return;
   }
   if (action === "plan") {
+    const { planCueSheet } = await import("./sequence/cuesheet.js");
     const res = planCueSheet(workspaceDir, sheet);
     emitEnvelopeJson(workspaceDir, "cue.plan", { action: "cue.plan", ...res });
     return;
   }
   if (action === "apply") {
+    const { applyCueSheet } = await import("./sequence/cuesheet.js");
     const res = applyCueSheet(workspaceDir, sheet);
     emitEnvelopeJson(workspaceDir, "cue.apply", { action: "cue.apply", ...res });
     return;

@@ -15,7 +15,6 @@ import { parseTimeMs } from "./core/time.js";
 import {
   appendSpineClip,
   exciseSpineRanges,
-  reframeSpineClips,
   removeSpineClips,
   reorderSpineClip,
   setItemEnvelope,
@@ -25,8 +24,7 @@ import {
   splitSpineClip,
   transformSpineClip,
   trimSpineClip,
-} from "./sequence/spine.js";
-import { setSpineGrade } from "./sequence/spine_grade.js";
+} from "./sequence/spine_edit.js";
 import { addSpineFx, listSpineFx, removeSpineFx, setSpineFx } from "./sequence/spine_fx.js";
 import { applyPresetSpineFx, reapplyPresetEntries } from "./effects/preset_apply.js";
 import type { VerificationReport } from "./verify/gates.js";
@@ -43,16 +41,11 @@ import {
   removeEnvelopePoint,
   sequenceTimeToLocalMs,
 } from "./sequence/envelope_points.js";
-import { boolFlag, numFlag, parseExciseRanges, parsePropsJsonFlag, strFlag } from "./cli_args.js";
-import { measureAssetAcousticWindows } from "./library/waveform.js";
-import { snapRangesToQuietEdges } from "./speech/cleanup_acoustic.js";
-import { loadCachedTranscriptForAsset } from "./speech/transcribe.js";
+import { boolFlag, jsonFixCommand, numFlag, parseExciseRanges, parseJsonFlag, strFlag } from "./cli_args.js";
 import type { RawTranscriptWord } from "./speech/providers.js";
 import fs from "node:fs";
 import path from "node:path";
 import { checkEffectDefinition, checkFxChain } from "./effects/fx_check.js";
-import { fxFullVerdict, runFxCheckFull } from "./effects/fx_check_full.js";
-import { parseSweep, runFxTry } from "./effects/fx_try.js";
 
 function parseSpeedRampFlag(raw: string): SpeedRampPoint[] {
   const fail = (detail: string): never => {
@@ -88,7 +81,7 @@ import {
   CliCommandResult,
   emitEnvelopeJson,
 } from "./cli_output.js";
-import { runSpineTreatmentCommand } from "./cli_cmd_spine_treatments.js";
+
 
 function parseFxScalar(raw: string): number | string | boolean {
   const t = raw.trim();
@@ -115,11 +108,20 @@ function addFxPair(target: Record<string, unknown>, token: string): void {
  * `parseArgv` keeps only the last `--param`, so repeats are re-scanned from the raw argv; a single `--param`
  * may also carry comma-separated pairs.
  */
-function collectSpineFxParams(flags: Record<string, string | boolean>): Record<string, unknown> {
+function collectSpineFxParams(flags: Record<string, string | boolean>, command = "spine fx add"): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   const rawJson = strFlag(flags, "params");
   if (rawJson !== undefined) {
-    Object.assign(out, parsePropsJsonFlag(rawJson, "spine.fx"));
+    const item = strFlag(flags, "item") ?? strFlag(flags, "clip");
+    Object.assign(
+      out,
+      parseJsonFlag(rawJson, {
+        command,
+        flag: "params",
+        kind: "object",
+        fixCommand: jsonFixCommand(command, "params", item ? `--item ${item}` : "--item sp_01"),
+      }) as Record<string, unknown>
+    );
   }
   const argv = process.argv.slice(2);
   let sawArgvParam = false;
@@ -357,7 +359,7 @@ export function runSpineFxPreset(
     workspaceDir,
     item,
     preset,
-    params: collectSpineFxParams(flags),
+    params: collectSpineFxParams(flags, "spine fx preset"),
     ...(beats ? { beats } : {}),
   });
   emitEnvelopeJson(workspaceDir, "spine.fx.preset", {
@@ -429,12 +431,13 @@ export function addEnvelopePointsFromFile(options: {
  * `spine fx check --kind <k> --full`: quick check plus sandbox delivery check
  * (card variants, alpha, neutral, stacked, Bezier envelopes, cost class).
  */
-export function runSpineFxCheckFull(
+export async function runSpineFxCheckFull(
   workspaceDir: string,
   args: { kind?: string; filter?: string }
-): void {
+): Promise<void> {
   const kind = args.kind;
   if (!kind) throw new Error("Provide --kind <kind>.");
+  const { fxFullVerdict, runFxCheckFull } = await import("./effects/fx_check_full.js");
   const fail = (payload: Record<string, unknown>, code = 1): void => {
     const findings = (payload.findings as Array<{ severity?: string }> | undefined) ?? [];
     const rows = (payload.rows as Array<{ ok?: boolean }> | undefined) ?? [];
@@ -504,10 +507,10 @@ export function runSpineFxCheckFull(
  * a project for `card`; `--on <sp_XX>` needs one and copies only that item's source
  * into the sandbox (the user's project is never written).
  */
-export function runSpineFxTry(
+export async function runSpineFxTry(
   workspaceDir: string,
   args: { kind?: string; filter?: string; params?: Record<string, unknown>; sweep?: string; at?: string; on?: string; out?: string }
-): void {
+): Promise<void> {
   const kind = args.kind;
   const filter = args.filter;
   if (!kind && !filter) throw new Error("Provide --kind <kind> or --filter \"<chain>\".");
@@ -527,6 +530,7 @@ export function runSpineFxTry(
     });
     return;
   }
+  const { parseSweep, runFxTry } = await import("./effects/fx_try.js");
   const sweep = args.sweep !== undefined ? parseSweep(args.sweep) : undefined;
   const at = args.at !== undefined
     ? args.at.split(",").map((s) => {
@@ -623,7 +627,7 @@ export function runSpineFxTry(
   }
 }
 
-export function runSpineCommand(ctx: CliCommandContext): CliCommandResult {
+export async function runSpineCommand(ctx: CliCommandContext): Promise<CliCommandResult> {
   const { action, rest, flags, workspaceDir } = ctx;
   if (action === "append") {
     const assetHandle = strFlag(flags, "asset") ?? rest[0];
@@ -683,6 +687,9 @@ export function runSpineCommand(ctx: CliCommandContext): CliCommandResult {
       // Opt-in: move each range edge to the nearest quiet point (±100 ms),
       // same placement as automatic filler/repetition cuts. Off by default:
       // raw ranges are excised exactly as given.
+      const { loadCachedTranscriptForAsset } = await import("./speech/transcribe.js");
+      const { measureAssetAcousticWindows } = await import("./library/waveform.js");
+      const { snapRangesToQuietEdges } = await import("./speech/cleanup_acoustic.js");
       const { sequence } = loadSequence(workspaceDir);
       const target = sequence.spine.clips.find((c) => c.id === clipId);
       if (!target) throw new CutholError(DIAGNOSTICS.UNKNOWN_HANDLE(clipId));
@@ -808,7 +815,12 @@ export function runSpineCommand(ctx: CliCommandContext): CliCommandResult {
     const rawSingleParam = strFlag(flags, "param");
     let transitionParams: Record<string, string> | undefined;
     if (rawParamsJson) {
-      const parsed = parsePropsJsonFlag(rawParamsJson, "spine.transition");
+      const parsed = parseJsonFlag(rawParamsJson, {
+        command: "spine transition",
+        flag: "params",
+        kind: "object",
+        fixCommand: jsonFixCommand("spine transition", "params", `--clip ${clipId}`),
+      }) as Record<string, unknown>;
       transitionParams = {};
       for (const [k, v] of Object.entries(parsed)) {
         if (typeof v === "number" || typeof v === "string" || typeof v === "boolean") transitionParams[k] = String(v);
@@ -859,6 +871,7 @@ export function runSpineCommand(ctx: CliCommandContext): CliCommandResult {
         "Provide at least one of --brightness, --contrast, --saturation, --temperature, --lut (use --lut none to clear)."
       );
     }
+    const { setSpineGrade } = await import("./sequence/spine_grade.js");
     const res = setSpineGrade({
       workspaceDir,
       clipId,
@@ -1084,6 +1097,7 @@ export function runSpineCommand(ctx: CliCommandContext): CliCommandResult {
     const fixedXRaw = strFlag(flags, "x");
     const fixedCenterXPct =
       fixedXRaw !== undefined ? Number(fixedXRaw.replace(/%$/, "")) : undefined;
+    const { reframeSpineClips } = await import("./sequence/spine_reframe.js");
     const res = reframeSpineClips({
       workspaceDir,
       clipIds,
@@ -1123,6 +1137,7 @@ export function runSpineCommand(ctx: CliCommandContext): CliCommandResult {
     return;
   }
   if (action === "mask" || action === "motion-blur") {
+    const { runSpineTreatmentCommand } = await import("./cli_cmd_spine_treatments.js");
     return runSpineTreatmentCommand(ctx);
   }
   if (action === "fx") {
@@ -1151,7 +1166,7 @@ export function runSpineCommand(ctx: CliCommandContext): CliCommandResult {
     }
     if (sub === "check") {
       if (boolFlag(flags, "full", false) === true) {
-        runSpineFxCheckFull(workspaceDir, {
+        await runSpineFxCheckFull(workspaceDir, {
           kind: strFlag(flags, "kind"),
           filter: strFlag(flags, "filter"),
         });
@@ -1165,10 +1180,10 @@ export function runSpineCommand(ctx: CliCommandContext): CliCommandResult {
       return;
     }
     if (sub === "try") {
-      runSpineFxTry(workspaceDir, {
+      await runSpineFxTry(workspaceDir, {
         kind: strFlag(flags, "kind"),
         filter: strFlag(flags, "filter"),
-        params: collectSpineFxParams(flags),
+        params: collectSpineFxParams(flags, "spine fx try"),
         sweep: strFlag(flags, "sweep"),
         at: strFlag(flags, "at"),
         on: strFlag(flags, "on"),
@@ -1188,7 +1203,7 @@ export function runSpineCommand(ctx: CliCommandContext): CliCommandResult {
     if (sub === "add") {
       const kind = strFlag(flags, "kind");
       const filter = strFlag(flags, "filter");
-      const res = addSpineFx({ workspaceDir, item, kind, filter, params: collectSpineFxParams(flags) });
+      const res = addSpineFx({ workspaceDir, item, kind, filter, params: collectSpineFxParams(flags, "spine fx add") });
       emitEnvelopeJson(workspaceDir, "spine.fx.add", { action: "spine.fx.add", ...res });
       return;
     }
@@ -1196,7 +1211,7 @@ export function runSpineCommand(ctx: CliCommandContext): CliCommandResult {
       const fxId = strFlag(flags, "fx") ?? strFlag(flags, "id");
       if (!fxId) throw new Error("Provide --fx <fx_XX>.");
       const filter = strFlag(flags, "filter");
-      const params = collectSpineFxParams(flags);
+      const params = collectSpineFxParams(flags, "spine fx set");
       const enabled = boolFlag(flags, "enabled");
       if (filter === undefined && Object.keys(params).length === 0 && enabled === undefined) {
         throw new Error("Provide --param <name=value>, --filter \"<chain>\" or --enabled <true|false>.");

@@ -1,4 +1,6 @@
 // CLI argument parsing: known/boolean flag lexicon, typo suggestions, typed flag readers (split out of cli.ts).
+import fs from "node:fs";
+import path from "node:path";
 import { CutholError, DIAGNOSTICS } from "./core/diagnostics.js";
 import { parseTimeMs } from "./core/time.js";
 
@@ -380,23 +382,82 @@ export function suggestFlagFix(unknownFlag: string, group: string, action?: stri
   return `cuthol ${group}${action ? ` ${action}` : ""} --${best ?? "help"}`;
 }
 
-export function parsePropsJsonFlag(raw: string, commandName: string): Record<string, unknown> {
+export interface JsonFlagOptions {
+  /** CLI command text for messages, e.g. "spine fx add". */
+  command: string;
+  /** Flag name without dashes, e.g. "params". */
+  flag: string;
+  /** Expected JSON shape. */
+  kind: "object" | "array";
+  /** Runnable example command for the fix line, e.g. "cuthol spine fx add --item sp_01 --params file:params.json". */
+  fixCommand: string;
+}
+
+function stripSurroundingQuotes(s: string): string {
+  const t = s.trim();
+  if (t.length >= 2 && ((t.startsWith("'") && t.endsWith("'")) || (t.startsWith('"') && t.endsWith('"')))) {
+    return t.slice(1, -1);
+  }
+  return s;
+}
+
+/** Loads a `file:<path>` / `@<path>` JSON flag reference; null when `raw` is inline JSON. */
+function loadJsonFlagFile(raw: string, opts: JsonFlagOptions): string | null {
+  const text = stripSurroundingQuotes(raw).trim();
+  let ref: string | null = null;
+  if (text.startsWith("file:")) ref = text.slice("file:".length);
+  else if (text.startsWith("@")) ref = text.slice(1);
+  if (ref === null) return null;
+  if (!ref.trim()) {
+    throw new CutholError(
+      DIAGNOSTICS.JSON_FLAG_FILE_FAILED(opts.flag, opts.command, text, "(empty path)", "no path after the prefix", opts.fixCommand)
+    );
+  }
+  const resolved = path.resolve(process.cwd(), ref.trim());
   try {
-    const cleaned = raw.replace(/\bNaN\b|\bInfinity\b|-Infinity\b/g, "null");
+    return fs.readFileSync(resolved, "utf8");
+  } catch (err) {
+    const detail = err instanceof Error ? err.message.split("\n")[0] : String(err);
+    throw new CutholError(
+      DIAGNOSTICS.JSON_FLAG_FILE_FAILED(opts.flag, opts.command, text, resolved, detail, opts.fixCommand)
+    );
+  }
+}
+
+/**
+ * Parses a JSON-valued CLI flag shared by every command (`--props`, `--params`,
+ * `--patch`, `--blocks`, `--variants`, …). Accepts inline JSON plus `file:<path>`
+ * (shell-safe everywhere) and `@<path>` (quote it in PowerShell: `'@x.json'`).
+ * Relative paths resolve against the working directory. Failures name the actual
+ * flag and command and say when the shell stripped the double quotes.
+ */
+/** Builds the retry suggestion naming the real id flag(s), e.g. `--item sp_03`. */
+export function jsonFixCommand(command: string, flag: string, idPart?: string): string {
+  return `cuthol ${command}${idPart ? ` ${idPart}` : ""} --${flag} file:${flag}.json`;
+}
+
+export function parseJsonFlag(raw: string, opts: JsonFlagOptions): unknown {
+  const fileText = loadJsonFlagFile(raw, opts);
+  const text = (fileText ?? raw).trim();
+  const expected = opts.kind === "array" ? "a JSON array" : "a JSON object";
+  try {
+    const cleaned = text.replace(/\bNaN\b|\bInfinity\b|-Infinity\b/g, "null");
     const parsed = JSON.parse(cleaned);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-      return parsed as Record<string, unknown>;
+    if (opts.kind === "array" ? Array.isArray(parsed) : parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed;
     }
   } catch {
     // fall through to diagnostic error
   }
   throw new CutholError(
-    DIAGNOSTICS.UNKNOWN_FLAG(
-      `--props ${raw}`,
-      commandName,
-      `cuthol ${commandName.replace(".", " ")} --props '{"headline":"Headline"}'`
-    )
+    DIAGNOSTICS.JSON_FLAG_FAILED(opts.flag, opts.command, text, expected, opts.fixCommand)
   );
+}
+
+export function parsePropsJsonFlag(raw: string, commandName: string, flag = "props"): Record<string, unknown> {
+  const command = commandName.replace(".", " ");
+  const fixCommand = `cuthol ${command} --${flag} file:${flag}.json`;
+  return parseJsonFlag(raw, { command, flag, kind: "object", fixCommand }) as Record<string, unknown>;
 }
 
 // Value flags that accumulate across repeats (`--keyterm a --keyterm b` ===

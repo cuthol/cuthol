@@ -8,6 +8,27 @@ import {
 import { WorkspacePaths } from "../core/workspace.js";
 import { resolveExtension } from "../extensions/manager.js";
 import { findBundledGsapMinJs } from "./bridge_hash.js";
+import {
+  currentHashGeneration,
+  findProjectRoot,
+  getPersistedContentMemo,
+  hashFileContent,
+  readTextFileCached,
+  setPersistedContentMemo,
+  writeFileCached,
+} from "../core/file_hash_index.js";
+import { fingerprintCompositionDir, getCompositionDirHashes, invalidateCompositionDirHashes } from "./bridge_hash.js";
+
+/**
+ * Content hash of an already-synced copy. Copies live inside composition
+ * folders, so they are shared in-process only and always re-read by the next
+ * command (never trusted across processes on stat alone).
+ */
+function syncedCopyHash(absPath: string): string {
+  const cached = hashFileContent(absPath);
+  if (cached !== null) return cached;
+  return sha256Hex(fs.readFileSync(absPath));
+}
 
 /**
  * First line prepended to every Cuthol-written helper copy. A helper copy starting
@@ -43,7 +64,7 @@ function readExtSyncSidecar(assetsDir: string): ExtSyncSidecar {
 
 function writeExtSyncSidecar(assetsDir: string, sidecar: ExtSyncSidecar): void {
   try {
-    fs.writeFileSync(path.join(assetsDir, EXT_SYNC_SIDECAR), JSON.stringify(sidecar), "utf8");
+    writeFileCached(path.join(assetsDir, EXT_SYNC_SIDECAR), JSON.stringify(sidecar));
   } catch {
     // sidecar is best-effort bookkeeping; the copies themselves are authoritative
   }
@@ -61,6 +82,46 @@ function writeExtSyncSidecar(assetsDir: string, sidecar: ExtSyncSidecar): void {
  * inside the composition never matches those proofs, so it is left alone and
  * `detectCompositionExtensionCopyDrift` keeps reporting it (G205).
  */
+export const SHARED_PROJECT_DIR_NAME = "shared";
+const SHARED_SIDECAR_KEY = "__shared__";
+
+/**
+ * Sync results keyed by everything the sync reads (never by command
+ * generation alone): the entry HTML content hash, the pinned extension refs
+ * plus each enabled extension's content hash, and the shared folder's stat
+ * fingerprint. All key parts are re-stated on every call, so an edit between
+ * two calls of one process misses and re-syncs; identical inputs reuse the
+ * recorded answer without re-walking. (A forged size+mtime that also fools
+ * the stat checks is caught across commands instead: every command opens a
+ * new hash generation, which re-reads all files on first touch.)
+ */
+const extSyncMemo = new Map<string, { updated: boolean; updatedFiles: string[] }>();
+
+function extSyncMemoKey(
+  seq: CutholSequence,
+  absCompDir: string,
+  entryHtml: string,
+  rootDir: string | null
+): string {
+  const entryHash = hashFileContent(path.join(absCompDir, entryHtml || "index.html")) ?? "missing";
+  const extParts: string[] = [];
+  for (const ref of seq.extensions ?? []) {
+    const name = (ref as { name?: unknown }).name;
+    if (typeof name !== "string" || !name) continue;
+    try {
+      extParts.push(`${name}=${resolveExtension(name, rootDir).contentHash}`);
+    } catch {
+      extParts.push(`${name}=unresolvable`);
+    }
+  }
+  let sharedFp = "noshared";
+  if (rootDir) {
+    const sharedDir = path.join(rootDir, SHARED_PROJECT_DIR_NAME);
+    if (fs.existsSync(sharedDir)) sharedFp = fingerprintCompositionDir(sharedDir) ?? "unwalkable";
+  }
+  return `${absCompDir}\n${entryHtml}\n${entryHash}\n${JSON.stringify(seq.extensions ?? [])}\n${extParts.join(",")}\n${sharedFp}`;
+}
+
 export function syncEnabledExtensionAssetsToComposition(
   seq: CutholSequence,
   compDir: string,
@@ -70,6 +131,10 @@ export function syncEnabledExtensionAssetsToComposition(
   const absCompDir =
     paths && !path.isAbsolute(compDir) ? path.resolve(paths.rootDir, compDir) : path.resolve(compDir);
   if (!fs.existsSync(absCompDir)) return { updated: false, updatedFiles: [] };
+  const rootDir = paths ? path.resolve(paths.rootDir) : findProjectRoot(absCompDir);
+  const memoKey = extSyncMemoKey(seq, absCompDir, entryHtml, rootDir);
+  const memoHit = extSyncMemo.get(memoKey);
+  if (memoHit !== undefined) return { updated: memoHit.updated, updatedFiles: [...memoHit.updatedFiles] };
 
   const assetsDir = path.join(absCompDir, "assets");
   fs.mkdirSync(assetsDir, { recursive: true });
@@ -109,20 +174,21 @@ export function syncEnabledExtensionAssetsToComposition(
               if (ent.isDirectory()) {
                 syncDirConditionally(sFull, dFull, relFile);
               } else if (ent.isFile()) {
-                const sBuf = fs.readFileSync(sFull);
-                const sHash = sha256Hex(sBuf);
+                // Hash first (shared cache: each source read once per command);
+                // bytes are read lazily only when a copy must be written.
+                const sHash = hashFileContent(sFull) ?? sha256Hex(fs.readFileSync(sFull));
                 if (!fs.existsSync(dFull)) {
-                  fs.writeFileSync(dFull, sBuf);
+                  writeFileCached(dFull, fs.readFileSync(sFull));
                   updated = true;
                   updatedFiles.push(relFile);
                   recordSyncedFile(ext.name, ext.contentHash, relFile, sHash);
                 } else {
-                  const dHash = sha256Hex(fs.readFileSync(dFull));
+                  const dHash = syncedCopyHash(dFull);
                   if (dHash === sHash) {
                     recordSyncedFile(ext.name, ext.contentHash, relFile, sHash);
                   } else if (sidecar.extensions[ext.name]?.files[relFile] === dHash) {
                     // Cuthol-written copy from an older pinned hash: refresh in place.
-                    fs.writeFileSync(dFull, sBuf);
+                    writeFileCached(dFull, fs.readFileSync(sFull));
                     updated = true;
                     updatedFiles.push(relFile);
                     recordSyncedFile(ext.name, ext.contentHash, relFile, sHash);
@@ -141,16 +207,18 @@ export function syncEnabledExtensionAssetsToComposition(
           const srcHelperPath = path.join(ext.dir, ext.helperRelPath);
           if (fs.existsSync(srcHelperPath)) {
             activeHelperNames.push(ext.name);
-            const rawHelper = fs.readFileSync(srcHelperPath, "utf8");
+            // Shared in-process text cache: one read per source per command.
+            const rawHelper =
+              readTextFileCached(srcHelperPath) ?? fs.readFileSync(srcHelperPath, "utf8");
             const wrappedHelper = CUTHOL_EXT_HELPER_MARKER + "\n" + rawHelper;
             const relHelper = `assets/cuthol-ext-${ext.name}.js`;
             const destHelperPath = path.join(assetsDir, `cuthol-ext-${ext.name}.js`);
             const existingHelper = fs.existsSync(destHelperPath)
-              ? fs.readFileSync(destHelperPath, "utf8")
+              ? (readTextFileCached(destHelperPath) ?? fs.readFileSync(destHelperPath, "utf8"))
               : null;
             const wrappedHash = sha256Hex(wrappedHelper);
             if (existingHelper === null) {
-              fs.writeFileSync(destHelperPath, wrappedHelper, "utf8");
+              writeFileCached(destHelperPath, wrappedHelper);
               updated = true;
               updatedFiles.push(relHelper);
               recordSyncedFile(ext.name, ext.contentHash, relHelper, wrappedHash);
@@ -169,7 +237,7 @@ export function syncEnabledExtensionAssetsToComposition(
               })()
             ) {
               // Cuthol-written copy from an older pinned hash: refresh in place.
-              fs.writeFileSync(destHelperPath, wrappedHelper, "utf8");
+              writeFileCached(destHelperPath, wrappedHelper);
               updated = true;
               updatedFiles.push(relHelper);
               recordSyncedFile(ext.name, ext.contentHash, relHelper, wrappedHash);
@@ -204,12 +272,21 @@ export function syncEnabledExtensionAssetsToComposition(
   }
 
   if (sidecarDirty) writeExtSyncSidecar(assetsDir, sidecar);
+  if (updated || sidecarDirty) invalidateCompositionDirHashes(absCompDir);
 
+  // Memoize only clean no-ops: a recorded `updated: true` would keep
+  // reporting work on every repeat call although the bytes were already
+  // written, and a dirty sidecar means the next call still has bookkeeping
+  // to do. A no-op for identical inputs stays a no-op (any state the key
+  // does not cover, such as a user-edited copy, still yields `updated:
+  // false` because the sync leaves it alone), so the next identical call
+  // can skip the walk.
+  if (!updated && !sidecarDirty) {
+    if (extSyncMemo.size > 2000) extSyncMemo.clear();
+    extSyncMemo.set(memoKey, { updated, updatedFiles: [] });
+  }
   return { updated, updatedFiles };
 }
-
-export const SHARED_PROJECT_DIR_NAME = "shared";
-const SHARED_SIDECAR_KEY = "__shared__";
 
 /**
  * Returns true when a composition references project shared assets
@@ -221,10 +298,39 @@ export function compositionReferencesSharedAssets(
   entryHtml = "index.html"
 ): boolean {
   const absCompDir = path.resolve(compDir);
+  // Deliberately no in-process memo: the reference scan reads source files
+  // that can change between two calls of one process without starting a new
+  // command generation. Only the content-derived persisted answer (keyed by
+  // the files hash, which provably describes identical bytes) is reused: an
+  // edit always misses and re-scans.
+  try {
+    const filesHash = getCompositionDirHashes(absCompDir).filesHash;
+    const rootDir = findProjectRoot(absCompDir);
+    if (rootDir) {
+      const persisted = getPersistedContentMemo(rootDir, `shared-ref\n${entryHtml}\n${filesHash}`);
+      if (typeof persisted === "boolean") return persisted;
+    }
+  } catch {
+    // fall through to the scan
+  }
+  const remember = (value: boolean): boolean => {
+    try {
+      const rootDir = findProjectRoot(absCompDir);
+      const filesHash = getCompositionDirHashes(absCompDir).filesHash;
+      if (rootDir) setPersistedContentMemo(rootDir, `shared-ref\n${entryHtml}\n${filesHash}`, value);
+    } catch {
+      // persistence is best-effort
+    }
+    return value;
+  };
   const entryPath = path.join(absCompDir, entryHtml || "index.html");
   const probe = (source: string): boolean => /assets\/shared\//.test(source);
   try {
-    if (fs.existsSync(entryPath) && probe(fs.readFileSync(entryPath, "utf8"))) return true;
+    // Cached reads: within one command repeats hit the shared content cache
+    // (exact size + full-precision mtime match), so the scan costs one walk.
+    // Reads always go through the cache's stat check, hence an edited file
+    // is never masked by a stale memo (there is none here to mask it).
+    if (probe(readTextFileCached(entryPath) ?? "")) return remember(true);
   } catch {
     // fall through to script scan
   }
@@ -243,7 +349,7 @@ export function compositionReferencesSharedAssets(
         if (scanDir(full, depth + 1)) return true;
       } else if (ent.isFile() && /\.(?:html|js|mjs|css)$/i.test(ent.name)) {
         try {
-          if (probe(fs.readFileSync(full, "utf8"))) return true;
+          if (probe(readTextFileCached(full) ?? "")) return true;
         } catch {
           // ignore unreadable file
         }
@@ -251,7 +357,7 @@ export function compositionReferencesSharedAssets(
     }
     return false;
   };
-  return scanDir(absCompDir, 0);
+  return remember(scanDir(absCompDir, 0));
 }
 
 /**
@@ -283,6 +389,7 @@ export function syncSharedProjectAssetsToComposition(
   const assetsDir = path.join(absCompDir, "assets");
   fs.mkdirSync(assetsDir, { recursive: true });
   const sidecar = readExtSyncSidecar(assetsDir);
+  const sidecarBefore = JSON.stringify(sidecar);
   let updated = false;
   const updatedFiles: string[] = [];
 
@@ -296,10 +403,9 @@ export function syncSharedProjectAssetsToComposition(
       if (ent.isDirectory()) {
         syncDir(sFull, dFull, relFile);
       } else if (ent.isFile()) {
-        const sBuf = fs.readFileSync(sFull);
-        const sHash = sha256Hex(sBuf);
+        const sHash = hashFileContent(sFull) ?? sha256Hex(fs.readFileSync(sFull));
         if (!fs.existsSync(dFull)) {
-          fs.writeFileSync(dFull, sBuf);
+          writeFileCached(dFull, fs.readFileSync(sFull));
           updated = true;
           updatedFiles.push(relFile);
           const prev = sidecar.extensions[SHARED_SIDECAR_KEY];
@@ -308,7 +414,7 @@ export function syncSharedProjectAssetsToComposition(
             files: { ...(prev?.files ?? {}), [relFile]: sHash },
           };
         } else {
-          const dHash = sha256Hex(fs.readFileSync(dFull));
+          const dHash = syncedCopyHash(dFull);
           if (dHash === sHash) {
             const prev = sidecar.extensions[SHARED_SIDECAR_KEY];
             if (!prev || prev.files[relFile] !== sHash) {
@@ -318,7 +424,7 @@ export function syncSharedProjectAssetsToComposition(
               };
             }
           } else if (sidecar.extensions[SHARED_SIDECAR_KEY]?.files[relFile] === dHash) {
-            fs.writeFileSync(dFull, sBuf);
+            writeFileCached(dFull, fs.readFileSync(sFull));
             updated = true;
             updatedFiles.push(relFile);
             const prev = sidecar.extensions[SHARED_SIDECAR_KEY];
@@ -333,10 +439,15 @@ export function syncSharedProjectAssetsToComposition(
     }
   };
   syncDir(srcSharedDir, path.join(assetsDir, "shared"), "assets/shared");
-  try {
-    writeExtSyncSidecar(assetsDir, sidecar);
-  } catch {
-    // sidecar is best-effort bookkeeping
+  if (JSON.stringify(sidecar) !== sidecarBefore) {
+    try {
+      writeExtSyncSidecar(assetsDir, sidecar);
+    } catch {
+      // sidecar is best-effort bookkeeping
+    }
+  }
+  if (updated || JSON.stringify(sidecar) !== sidecarBefore) {
+    invalidateCompositionDirHashes(absCompDir);
   }
   return { updated, updatedFiles };
 }
@@ -362,12 +473,22 @@ export function detectCompositionExtensionCopyDrift(
     if (!ext.helperRelPath) return null;
     const srcHelperPath = path.join(ext.dir, ext.helperRelPath);
     if (!fs.existsSync(srcHelperPath)) return null;
-    const rawHelper = fs.readFileSync(srcHelperPath, "utf8");
+    const rawHelper = readTextFileCached(srcHelperPath) ?? fs.readFileSync(srcHelperPath, "utf8");
     return (
       `if (typeof window !== "undefined") { window.__cuthol = window.__cuthol || {}; window.__cuthol.ext = window.__cuthol.ext || {}; }\n` +
       rawHelper
     );
   })();
+
+  // Byte equality via the shared content-hash cache: each source is read once
+  // per command; copies are stat-checked per composition. Hash equality and
+  // byte equality agree up to SHA-256 collision resistance.
+  const filesEqual = (sFull: string, dFull: string): boolean => {
+    if (!fs.existsSync(dFull)) return false;
+    const sHash = hashFileContent(sFull);
+    if (sHash === null) return Buffer.compare(fs.readFileSync(sFull), fs.readFileSync(dFull)) === 0;
+    return syncedCopyHash(dFull) === sHash;
+  };
 
   const checkDirEqual = (sDir: string, dDir: string): boolean => {
     if (!fs.existsSync(sDir)) return true;
@@ -379,8 +500,7 @@ export function detectCompositionExtensionCopyDrift(
       if (ent.isDirectory()) {
         if (!checkDirEqual(sFull, dFull)) return false;
       } else if (ent.isFile()) {
-        if (!fs.existsSync(dFull)) return false;
-        if (Buffer.compare(fs.readFileSync(sFull), fs.readFileSync(dFull)) !== 0) return false;
+        if (!filesEqual(sFull, dFull)) return false;
       }
     }
     return true;
@@ -398,7 +518,10 @@ export function detectCompositionExtensionCopyDrift(
       let compDrifted = false;
       if (wrappedHelper !== null) {
         const destHelperPath = path.join(assetsDir, `cuthol-ext-${ext.name}.js`);
-        if (!fs.existsSync(destHelperPath) || fs.readFileSync(destHelperPath, "utf8") !== wrappedHelper) {
+        const destHelper =
+          readTextFileCached(destHelperPath) ??
+          (fs.existsSync(destHelperPath) ? fs.readFileSync(destHelperPath, "utf8") : null);
+        if (destHelper === null || destHelper !== wrappedHelper) {
           compDrifted = true;
         }
       }

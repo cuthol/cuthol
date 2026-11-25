@@ -5,6 +5,8 @@ import path from "node:path";
 import {
   spawnWatchedSync
 } from "../core/subprocess.js";
+import { hashFileContent, readTextIfExists } from "../core/file_hash_index.js";
+import { memoizedCompositionDirHash } from "./bridge_hash.js";
 import { HyperFramesLintResult, HyperFramesLintFinding, findLocalHyperFramesCliMjs, hyperFramesProcessEnv } from "./hf_common.js";
 
 const SIZE_AND_SPLIT_LINT_CODES = new Set([
@@ -26,7 +28,33 @@ const LINT_IGNORED_BRIDGE_FILES = new Set([
 const lintMemoryCache = new Map<string, Omit<HyperFramesLintResult, "cached">>();
 
 function computeCompositionLintHash(absCompDir: string, entryHtml: string): string {
-  const hash = crypto.createHash("sha256").update(`hf-lint-v1:${entryHtml}\n`);
+  return memoizedCompositionDirHash(`lint:${entryHtml}`, absCompDir, () =>
+    computeCompositionLintHashUncached(absCompDir, entryHtml)
+  );
+}
+
+/**
+ * Script tags Cuthol itself injects into the entry HTML (`assets/cuthol-data.js`,
+ * `assets/cuthol-runtime.js`, `assets/cuthol-ext-*.js`). They carry no authored
+ * content, so the lint key ignores them: otherwise the first edit after a fresh
+ * copy re-lints every composition just because the bridge sync placed its tags.
+ * An author line that literally references the same asset names is equally
+ * non-authored for lint purposes (the files are Cuthol-owned).
+ */
+export function stripInjectedBridgeScriptTags(html: string): string {
+  return html
+    .replace(/[ \t]*<script\s+src=(["'])assets\/cuthol-data\.js\1\s*><\/script>\r?\n?/gi, "")
+    .replace(/[ \t]*<script\s+src=(["'])assets\/cuthol-runtime\.js\1\s*><\/script>\r?\n?/gi, "")
+    .replace(/[ \t]*<script\s+src=(["'])assets\/cuthol-ext-[a-z0-9_-]+\.js\1\s*><\/script>\r?\n?/gi, "");
+}
+
+function hashLintWalk(
+  absCompDir: string,
+  entryHtml: string,
+  seed: string,
+  stripEntryTags: boolean
+): string {
+  const hash = crypto.createHash("sha256").update(seed);
   const visitedDirs = new Set<string>();
   const walk = (currentDir: string, relPrefix: string): void => {
     let entries: fs.Dirent[];
@@ -59,28 +87,66 @@ function computeCompositionLintHash(absCompDir: string, entryHtml: string): stri
         ) {
           continue;
         }
-        let realDir = fullPath;
-        try {
-          realDir = fs.realpathSync(fullPath);
-        } catch {
-          realDir = path.resolve(fullPath);
+        // Plain directories use their absolute path (a cycle is impossible
+        // without a link); only links pay for realpathSync.
+        let realDir: string | null = fullPath;
+        if (entry.isSymbolicLink()) {
+          try {
+            realDir = fs.realpathSync(fullPath);
+          } catch {
+            realDir = null;
+          }
         }
-        if (visitedDirs.has(realDir)) continue;
+        if (realDir === null || visitedDirs.has(realDir)) continue;
         visitedDirs.add(realDir);
         walk(fullPath, relPath);
       } else if (entry.isFile()) {
-        try {
-          const buf = fs.readFileSync(fullPath);
-          const digest = crypto.createHash("sha256").update(buf).digest("hex");
-          hash.update(`file:${relPath}:${buf.length}:${digest}\n`);
-        } catch {
-          // ignore unreadable transient file
+        // Shared per-command content cache: each file is read once no matter
+        // how many verify passes lint this composition.
+        if (relPath === entryHtml && stripEntryTags) {
+          // The entry HTML carries Cuthol-injected bridge tags; hash the
+          // authored bytes only (see `stripInjectedBridgeScriptTags`), so tag
+          // placement alone never re-lints an untouched composition.
+          const raw = hashFileContent(fullPath);
+          if (raw !== null) {
+            const stripped = stripInjectedBridgeScriptTags(
+              readTextIfExists(fullPath) ?? ""
+            );
+            const digest = crypto.createHash("sha256").update(stripped).digest("hex");
+            hash.update(`file:${relPath}:${stripped.length}:${digest}\n`);
+          }
+        } else {
+          const digest = hashFileContent(fullPath);
+          if (digest !== null) {
+            let size = 0;
+            try {
+              size = fs.statSync(fullPath).size;
+            } catch {
+              size = 0;
+            }
+            hash.update(`file:${relPath}:${size}:${digest}\n`);
+          }
         }
+        // ignore unreadable transient file
       }
     }
   };
   walk(absCompDir, "");
   return hash.digest("hex");
+}
+
+function computeCompositionLintHashUncached(absCompDir: string, entryHtml: string): string {
+  return hashLintWalk(absCompDir, entryHtml, `hf-lint-v1:${entryHtml}\n`, true);
+}
+
+/**
+ * Pre-normalization lint key: identical walk, but the entry HTML is hashed
+ * verbatim (injected bridge tags included). Only used as a one-sided fallback
+ * so cache files written by older builds still satisfy a lookup; the winning
+ * result is adopted under the new key, never re-linted.
+ */
+export function computeCompositionLintHashLegacy(absCompDir: string, entryHtml: string): string {
+  return hashLintWalk(absCompDir, entryHtml, `hf-lint-v1:${entryHtml}\n`, false);
 }
 
 export function isDuplicateImgMediaDiscoveryFinding(
@@ -340,6 +406,43 @@ export function lintHyperFramesComposition(
       }
     } catch {
       // ignore corrupt cache file
+    }
+  }
+  // One-sided fallback to the pre-normalization key: cache files written by
+  // older builds hash the entry HTML verbatim (injected tags included). A hit
+  // is adopted under the new key without re-linting; both the memory cache
+  // and the new disk file are populated so the legacy walk runs once.
+  if (diskCachePath && cacheDir) {
+    const legacyHash = computeCompositionLintHashLegacy(absCompDir, entryHtml);
+    const legacyMemHit = lintMemoryCache.get(legacyHash);
+    if (legacyMemHit) {
+      lintMemoryCache.set(contentHash, legacyMemHit);
+      return { ...legacyMemHit, cached: true };
+    }
+    const legacyPath = path.join(cacheDir, `hf_lint_${legacyHash.slice(0, 24)}.json`);
+    if (legacyPath !== diskCachePath && fs.existsSync(legacyPath)) {
+      try {
+        const parsed = JSON.parse(fs.readFileSync(legacyPath, "utf8")) as Omit<
+          HyperFramesLintResult,
+          "cached"
+        >;
+        if (parsed && Array.isArray(parsed.findings) && parsed.content_hash === legacyHash) {
+          const normalized = {
+            ...normalizeLintEntryForCuthol(parsed, absCompDir, entryHtml),
+            content_hash: contentHash,
+          };
+          lintMemoryCache.set(contentHash, normalized);
+          lintMemoryCache.set(legacyHash, normalized);
+          try {
+            fs.writeFileSync(diskCachePath, JSON.stringify(normalized, null, 2), "utf8");
+          } catch {
+            // adoption write is best-effort
+          }
+          return { ...normalized, cached: true };
+        }
+      } catch {
+        // ignore corrupt cache file
+      }
     }
   }
 

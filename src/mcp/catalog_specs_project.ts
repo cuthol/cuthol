@@ -55,7 +55,7 @@ export const PROJECT_ACTION_SPECS: ActionSpec[] = [
   },
   {
     tool: "workspace",
-    action: "audio-fade",
+    action: "audio_fade",
     argv: ["workspace", "audio-fade"],
     summary: "Set the spine-join audio fade (stage.audio_join_fade_ms): default afade length at each discontinuous spine join. Journaled; --ms 10 (default) clears, --ms 0 turns the join fades off.",
     mutates: true,

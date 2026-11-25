@@ -14,7 +14,7 @@ description: >
 
 - `library.loudness(handle)` measures integrated LUFS, loudness range and true
   peak of one asset.
-- **Join fades:** where the spine jumps in the source (cuts, excised pauses) Cuthol fades the audio over 10 ms on each side so the join does not click. `workspace(action="audio-fade", ms=0..100)` (CLI `cuthol workspace audio-fade --ms 20`) changes it; `--ms 0` turns it off. The project summary shows it when it is not 10.
+- **Join fades:** where the spine jumps in the source (cuts, excised pauses) Cuthol fades the audio over 10 ms on each side so the join does not click. `workspace(action="audio_fade", ms=0..100)` (CLI `cuthol workspace audio-fade --ms 20`) changes it; `--ms 0` turns it off. The project summary shows it when it is not 10.
 - `mix.normalize(target_lufs=-14, true_peak=-1, clips?)` first assigns per-item
   pre-gain (`applied_gain_db`) to unmuted spine clips and `ln_vo` voiceovers
   within each item's true-peak headroom (`TRUE_PEAK_CLAMPED` vs `APPLIED`), then

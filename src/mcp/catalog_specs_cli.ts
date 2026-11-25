@@ -346,7 +346,7 @@ export const CLI_ACTION_SPECS: ActionSpec[] = [
   },
   {
     tool: "spine",
-    action: "motion-blur",
+    action: "motion_blur",
     argv: ["spine", "motion-blur"],
     summary: "Motion blur.",
     mutates: false,

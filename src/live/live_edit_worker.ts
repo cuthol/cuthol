@@ -66,11 +66,11 @@ async function runJob(job: LiveEditJob): Promise<LiveEditJobResult> {
     const ctx: CliCommandContext = { group: group ?? "", action, rest, flags, workspaceDir: job.projectDir, formatFlag: "" };
     const handled =
       group === "spine"
-        ? runSpineCommand(ctx)
+        ? await runSpineCommand(ctx)
         : group === "lane"
-          ? runLaneCommand(ctx)
+          ? await runLaneCommand(ctx)
           : group === "workspace"
-            ? runWorkspaceCommand(ctx)
+            ? await runWorkspaceCommand(ctx)
             : group === "color" && action === "set"
               ? await runColorCommand(ctx)
               : CLI_NOT_HANDLED;

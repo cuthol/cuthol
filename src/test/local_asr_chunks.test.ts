@@ -34,13 +34,13 @@ function withEnv(key: string, value: string | undefined, fn: () => void): void {
 }
 
 test("localAsrJobs parses CUTHOL_LOCAL_ASR_JOBS with a safe default and clamp", () => {
-  withEnv("CUTHOL_LOCAL_ASR_JOBS", undefined, () => assert.equal(localAsrJobs(), 2));
-  withEnv("CUTHOL_LOCAL_ASR_JOBS", "", () => assert.equal(localAsrJobs(), 2));
+  withEnv("CUTHOL_LOCAL_ASR_JOBS", undefined, () => assert.equal(localAsrJobs(), 4));
+  withEnv("CUTHOL_LOCAL_ASR_JOBS", "", () => assert.equal(localAsrJobs(), 4));
   withEnv("CUTHOL_LOCAL_ASR_JOBS", "3", () => assert.equal(localAsrJobs(), 3));
   withEnv("CUTHOL_LOCAL_ASR_JOBS", "0", () => assert.equal(localAsrJobs(), 1));
   withEnv("CUTHOL_LOCAL_ASR_JOBS", "-4", () => assert.equal(localAsrJobs(), 1));
   withEnv("CUTHOL_LOCAL_ASR_JOBS", "64", () => assert.equal(localAsrJobs(), 8));
-  withEnv("CUTHOL_LOCAL_ASR_JOBS", "lots", () => assert.equal(localAsrJobs(), 2));
+  withEnv("CUTHOL_LOCAL_ASR_JOBS", "lots", () => assert.equal(localAsrJobs(), 4));
 });
 
 test("localAsrCpuThreads parses CUTHOL_LOCAL_ASR_THREADS with a safe default and clamp", () => {

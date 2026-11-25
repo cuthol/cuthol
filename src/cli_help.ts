@@ -1,7 +1,6 @@
 // Plain-text `cuthol help` output (split out of cli.ts).
 import { CutholError, DIAGNOSTICS } from "./core/diagnostics.js";
 import { cliParamFlagName, strFlag } from "./cli_args.js";
-import { getGuideText } from "./mcp/server.js";
 import { ACTION_SPECS, cliActionSpecs, findCliActionSpec } from "./mcp/catalog.js";
 import type { ActionSpec, ParamSpec } from "./mcp/catalog_types.js";
 
@@ -29,11 +28,11 @@ const HELP_LINES: string[] = [
       "  cuthol spine excise --clip <sp_XX> --ranges <a..b,c..d> [--snap] (snap moves ASR-derived range edges to quiet points; omit it to excise ranges exactly as given)",
       "  cuthol spine transform --clip <sp_XX> [--x N] [--y N] [--scale N] [--rotation N] [--opacity N] [--fit cover|contain|fill] [--edge transparent|mirror|clamp]",
       "  cuthol spine speed --clip <sp_XX> [--rate <1.5>] [--ramp \"0s:1,2s:4\"|none] [--preserve-pitch true|false]",
-      "  cuthol spine transition --clip <sp_01> --kind <dissolve|fade|wipe_left|wipe_right|slide_up|zoom_in|ext:<ext>/<name>|none> [--duration 400ms] [--easing linear|ease_in|ease_out|ease_in_out|\"cubic-bezier(x1,y1,x2,y2)\"] [--param name=value,...] [--params '{\"name\":\"value\"}']",
+      "  cuthol spine transition --clip <sp_01> --kind <dissolve|fade|wipe_left|wipe_right|slide_up|zoom_in|ext:<ext>/<name>|none> [--duration 400ms] [--easing linear|ease_in|ease_out|ease_in_out|\"cubic-bezier(x1,y1,x2,y2)\"] [--param name=value,...] [--params <json>|file:params.json]",
       "  cuthol spine envelope --clip <sp_XX|cue_XX> --param <name> --points <0ms:1.0,4s:1.15> [--easing linear|ease_in|ease_out|ease_in_out|\"cubic-bezier(x1,y1,x2,y2)\"]",
       "  cuthol spine envelope point [add|move|remove] --clip <sp_XX|cue_XX> --param <name> --at <t> [--value <n>] [--to <t>] [--sequence-time] [--beat <n> --beats-of <aud_XX>]",
       "  cuthol spine value --item <sp_XX|cue_XX> --param <name> --at <t> [--sequence-time]",
-      "  cuthol spine fx [catalog|add|set|remove|list] --item <sp_XX|cue_XX> [--kind ext:<ext>/<name>|--filter \"<chain>\"] [--param k=v] [--fx <fx_XX>]",
+      "  cuthol spine fx [catalog|add|set|remove|list] --item <sp_XX|cue_XX> [--kind ext:<ext>/<name>|--filter \"<chain>\"] [--param k=v] [--fx <fx_XX>] [--params <json>|file:params.json]",
       "  cuthol spine mask --clip <sp_XX> [--shape rect|ellipse|split] [--center-x <pct>] [--center-y <pct>] [--width <pct>] [--height <pct>] [--feather <px>] [--invert] [--clear]",
       "  cuthol spine motion-blur --clip <sp_XX> [--shutter <deg>] [--subframes <n>] [--off]",
       "  cuthol lane [add-cue|add-composition|update-cue|remove-cue|lock|unlock|mute|unmute] ...",
@@ -58,14 +57,14 @@ const HELP_LINES: string[] = [
       "  cuthol color map --item <sp_XX|cue_XX> [--frames N] [--at 1s,4s] [--graded] | --image <file>",
       "  cuthol color diff --a <item|file> --b <item|file>",
       "  cuthol color solve --item <id> --to <item|file> | --mode technical [--targets exposure,white_balance,legal_range] | --mode pair --before <file> --after <file> [--name <n>]",
-      "  cuthol color set --item <id>|--items <a,b>|--cluster <cN> [--wb <mired>[,<tint>]] [--exposure <stops>] [--tone contrast=0.2,shadows=-0.1] [--curve \"master=0:0,0.25:0.2,1:1\"] [--wheel \"lift=200,0.15\"] [--hsl \"hsl_01=center:25,width:30,shift:-6,sat:1.15\"] [--sat <x>] [--vibrance <x>] [--look <id>[:amount]] [--amount <block>=<0..1>] [--remove <block|hsl:id>] [--patch <json>] [--reason match|technical|taste]",
-      "  cuthol color compare --item <id> --variants '[{\"label\":\"warm\",\"white_balance\":{\"temp_mired\":20,\"tint\":0}}]' [--out <png>]",
-      "  cuthol color look [list | create --name <n> (--from-item <id>|--lut <file.cube>|--blocks <json>) [--apply-to all|<ids>] [--kinds camera,screen,graphic] [--amount x] | from-pair --name <n> --before <f> --after <f> | bind --look <id> --items <ids>|all | remove --look <id>]",
+      "  cuthol color set --item <id>|--items <a,b>|--cluster <cN> [--wb <mired>[,<tint>]] [--exposure <stops>] [--tone contrast=0.2,shadows=-0.1] [--curve \"master=0:0,0.25:0.2,1:1\"] [--wheel \"lift=200,0.15\"] [--hsl \"hsl_01=center:25,width:30,shift:-6,sat:1.15\"] [--sat <x>] [--vibrance <x>] [--look <id>[:amount]] [--amount <block>=<0..1>] [--remove <block|hsl:id>] [--patch <json>|file:patch.json] [--reason match|technical|taste]",
+      "  cuthol color compare --item <id> --variants <json>|file:variants.json [--out <png>]",
+      "  cuthol color look [list | create --name <n> (--from-item <id>|--lut <file.cube>|--blocks <json>|file:blocks.json) [--apply-to all|<ids>] [--kinds camera,screen,graphic] [--amount x] | from-pair --name <n> --before <f> --after <f> | bind --look <id> --items <ids>|all | remove --look <id>]",
       "  cuthol color kind --handle <vid_XX> [--set camera|screen|graphic] [--input auto|none|hlg_to_sdr|pq_to_sdr]",
       "  cuthol color clusters",
       "  cuthol color migrate --item <sp_XX> | --all",
       "  cuthol brief [--lens overview|flow|canvas|detail] [--id <id1,id2>] [--window 0s..10s] [--json] [--dir <dir>]",
-      "  cuthol extension [list|create|show|enable|disable|promote|remove|run] --name <ext> ...",
+      "  cuthol extension [list|create|show|enable|disable|promote|remove|run] --name <ext> [--params <json>|file:params.json] ...",
       "  cuthol skills list [--agent <id>[,<id>]] [--dir <skills-dir>]",
       "  cuthol skills install [--agent <id>[,<id>]] [--dir <skills-dir>] [--force]",
       "  cuthol skills check [--agent <id>[,<id>]] [--dir <skills-dir>]",
@@ -95,13 +94,15 @@ function displaySummary(spec: ActionSpec): string {
   return real ? real.summary : spec.summary;
 }
 
+const JSON_FILE_FLAGS = new Set(["params", "props", "patch", "variants", "blocks"]);
+
 function flagKind(prm: ParamSpec): string {
+  if (JSON_FILE_FLAGS.has(cliParamFlagName(prm))) return ` <json>|file:${cliParamFlagName(prm)}.json`;
   switch (prm.type) {
     case "boolean": return "";
     case "time": return " <time>";
-    case "number": return " <number>";
     case "string_list": return " <a,b>";
-    case "object": return " <json>";
+    case "object": return " <json>|file:x.json";
     default: return " <text>";
   }
 }
@@ -204,11 +205,12 @@ export function printHelp(group?: string, action?: string, rest: string[] = []):
  * `cuthol guide [--topic <name>]`: the same content as the MCP `guide` tool
  * (same resolution function), printed as text. Unknown topics are an error.
  */
-export function runGuideCommand(
+export async function runGuideCommand(
   workspaceDir: string,
   flags: Record<string, string | boolean>
-): void {
+): Promise<void> {
   const topic = strFlag(flags, "topic") ?? "cuthol";
+  const { getGuideText } = await import("./mcp/server.js");
   const shared = getGuideText(topic, workspaceDir);
   if (!shared.ok) throw new CutholError(DIAGNOSTICS.GUIDE_TOPIC_UNKNOWN(topic));
   console.log(shared.text);

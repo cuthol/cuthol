@@ -10,6 +10,17 @@ import {
 import {
   loadSequence
 } from "../core/workspace.js";
+import { currentHashGeneration, hashFileContent } from "../core/file_hash_index.js";
+
+interface ResolveMemoEntry {
+  gen: number;
+  manifestSize: number;
+  manifestMtimeMs: number;
+  contentHash: string;
+  resolved: ResolvedExtension;
+}
+
+const resolveMemo = new Map<string, ResolveMemoEntry>();
 import { ExtensionScope, ResolvedExtension, EXTENSION_MANIFEST_FILENAME, validateExtensionManifest, assertStayInsideDir, EXTENSION_NAME_RE, ExtensionListItem, ExtensionManifest } from "./ext_manifest.js";
 
 /**
@@ -34,9 +45,18 @@ export function hashExtensionDirectory(extDir: string): string {
       if (entry.isDirectory()) {
         walk(full, rel);
       } else if (entry.isFile()) {
-        const buf = fs.readFileSync(full);
-        const fileHash = crypto.createHash("sha256").update(buf).digest("hex");
-        hash.update(`file:${rel}:${buf.length}:${fileHash}\n`);
+        // Shared per-command content cache; extension sources are safe for
+        // cross-process persisted reuse (exact size + mtime match required).
+        const fileHash = hashFileContent(full);
+        if (fileHash !== null) {
+          let size = 0;
+          try {
+            size = fs.statSync(full).size;
+          } catch {
+            size = 0;
+          }
+          hash.update(`file:${rel}:${size}:${fileHash}\n`);
+        }
       }
     }
   };
@@ -177,6 +197,44 @@ export function loadExtensionFromDir(
 }
 
 /**
+ * Memoized extension load, validated per command generation: a hit requires
+ * the manifest's stat to match AND a freshly recomputed content hash (shared
+ * cache, cheap) to equal the memoized one, so an asset or manifest edit in
+ * the same command is always reloaded while repeats share one load.
+ */
+function loadExtensionMemoized(
+  absDir: string,
+  scope: ExtensionScope,
+  expectedName: string,
+  shadowedPersistentDir: string | null
+): ResolvedExtension {
+  const gen = currentHashGeneration();
+  const key = `${path.resolve(absDir)}\n${scope}\n${expectedName}\n${shadowedPersistentDir ?? ""}`;
+  let st: fs.Stats | null = null;
+  try {
+    st = fs.statSync(path.join(path.resolve(absDir), EXTENSION_MANIFEST_FILENAME));
+  } catch {
+    st = null;
+  }
+  const hit = resolveMemo.get(key);
+  if (hit && hit.gen === gen && st && hit.manifestSize === st.size && hit.manifestMtimeMs === st.mtimeMs) {
+    if (hashExtensionDirectory(absDir) === hit.contentHash) return hit.resolved;
+  }
+  const resolved = loadExtensionFromDir(absDir, scope, expectedName, shadowedPersistentDir);
+  if (st) {
+    if (resolveMemo.size > 200) resolveMemo.clear();
+    resolveMemo.set(key, {
+      gen,
+      manifestSize: st.size,
+      manifestMtimeMs: st.mtimeMs,
+      contentHash: resolved.contentHash,
+      resolved,
+    });
+  }
+  return resolved;
+}
+
+/**
  * Resolves an extension by name. Project-local (`.cuthol/extensions/<name>`) wins over
  * persistent (`~/.cuthol/extensions/<name>`) unless `explicitScope` is specified.
  */
@@ -204,7 +262,7 @@ export function resolveExtension(
   if (explicitScope === "project") {
     if (projCandidate) searched.push(projCandidate);
     if (projCandidate && fs.existsSync(projCandidate)) {
-      return loadExtensionFromDir(
+      return loadExtensionMemoized(
         projCandidate,
         "project",
         cleanName,
@@ -217,7 +275,7 @@ export function resolveExtension(
   if (explicitScope === "persistent") {
     if (persCandidate) searched.push(persCandidate);
     if (persCandidate && fs.existsSync(persCandidate)) {
-      return loadExtensionFromDir(persCandidate, "persistent", cleanName, null);
+      return loadExtensionMemoized(persCandidate, "persistent", cleanName, null);
     }
     throw new CutholError(DIAGNOSTICS.EXTENSION_NOT_FOUND(cleanName, searched));
   }
@@ -225,7 +283,7 @@ export function resolveExtension(
   if (projCandidate) {
     searched.push(projCandidate);
     if (fs.existsSync(projCandidate)) {
-      return loadExtensionFromDir(
+      return loadExtensionMemoized(
         projCandidate,
         "project",
         cleanName,
@@ -237,7 +295,7 @@ export function resolveExtension(
   if (persCandidate) {
     searched.push(persCandidate);
     if (fs.existsSync(persCandidate)) {
-      return loadExtensionFromDir(persCandidate, "persistent", cleanName, null);
+      return loadExtensionMemoized(persCandidate, "persistent", cleanName, null);
     }
   }
 

@@ -13,6 +13,7 @@ import { DIAGNOSTICS, CutholDiagnostic, pushRepeatDiagnostic } from "../core/dia
 import { CutholSequence, LaneCue } from "../core/schema.js";
 import { WorkspacePaths } from "../core/workspace.js";
 import { syncScalarVarsAndComputeCompositionHash } from "../compositor/hf_cache_state.js";
+import { currentHashGeneration, hashFileContent, readTextIfExists } from "../core/file_hash_index.js";
 import { resolveFramePngInPngSequenceDir } from "../compositor/hf_frames.js";
 import { isKnownEnvelopeParameter, suggestEnvelopeParameter } from "../sequence/envelope_params.js";
 
@@ -26,21 +27,74 @@ function resolveCompDir(rootDir: string, compDir: string): string {
   return path.isAbsolute(compDir) ? compDir : path.resolve(rootDir, compDir);
 }
 
+/**
+ * Names present in the blob directory, listed fresh on every call. Boundary
+ * checks probe dozens of `hf_comp_<hash>.<ext>` candidates per cue, and a
+ * render between two calls of one process (tests, Live, pipelines) adds new
+ * blobs without starting a new command generation, so a memoized listing
+ * would miss them. One `readdirSync` per lookup is cheap next to the ffmpeg
+ * samples it gates.
+ */
+function blobNameSet(blobsDir: string): Set<string> {
+  try {
+    return new Set(fs.readdirSync(blobsDir));
+  } catch {
+    return new Set();
+  }
+}
+
 /** First cached video blob (or pngseq dir) matching any known hash, else null. */
 function findCachedCompBlob(blobsDir: string, hashes: string[]): string | null {
+  const names = blobNameSet(blobsDir);
   const exts = ["pngseq", "ffv1.mov", "mov", "mp4"];
   for (const hash of hashes) {
     if (!hash) continue;
     for (const ext of exts) {
-      const candidate = path.join(blobsDir, `hf_comp_${hash}.${ext}`);
-      try {
-        if (fs.existsSync(candidate)) return candidate;
-      } catch {
-        // ignore
-      }
+      const file = `hf_comp_${hash}.${ext}`;
+      if (names.has(file)) return path.join(blobsDir, file);
     }
   }
   return null;
+}
+
+const rgbMemoryCache = new Map<string, Buffer>();
+const MAX_RGB_MEMORY_ENTRIES = 32;
+const MAX_RGB_PERSISTED_FILES = 200;
+
+function rgbCacheDir(rootDir: string): string {
+  return path.join(rootDir, ".cuthol", "boundary-rgb");
+}
+
+function rgbMemoryKey(absInput: string, frameIdx: number): string | null {
+  try {
+    const st = fs.statSync(absInput);
+    if (!st.isFile()) return null;
+    return `${absInput}\n${st.size}\n${st.mtimeMs}\n${frameIdx}`;
+  } catch {
+    return null;
+  }
+}
+
+function readPersistedRgbSample(rootDir: string, inputSha: string, frameIdx: number): Buffer | null {
+  try {
+    const file = path.join(rgbCacheDir(rootDir), `${inputSha}_${frameIdx}.bin`);
+    const buf = fs.readFileSync(file);
+    return buf.length > 0 ? buf : null;
+  } catch {
+    return null;
+  }
+}
+
+function writePersistedRgbSample(rootDir: string, inputSha: string, frameIdx: number, buf: Buffer): void {
+  try {
+    const dir = rgbCacheDir(rootDir);
+    fs.mkdirSync(dir, { recursive: true });
+    const existing = fs.readdirSync(dir);
+    if (existing.length > MAX_RGB_PERSISTED_FILES) return;
+    fs.writeFileSync(path.join(dir, `${inputSha}_${frameIdx}.bin`), buf);
+  } catch {
+    // boundary samples are best-effort cache; a miss just re-runs ffmpeg
+  }
 }
 
 function extractSmallRgb(
@@ -60,6 +114,28 @@ function extractSmallRgb(
     }
   } catch {
     return null;
+  }
+  // Reuse the already-extracted sample when the rendered input did not
+  // change: the sample is keyed by the input file's content hash (cheap via
+  // the shared per-command/persisted file-hash cache) plus the frame index,
+  // so an unchanged boundary costs no ffmpeg call. Stored bytes are the raw
+  // ffmpeg output, hence bit-identical to a fresh extraction.
+  const absInput = path.resolve(input);
+  const memKey = rgbMemoryKey(absInput, frameIdx);
+  if (memKey) {
+    const memHit = rgbMemoryCache.get(memKey);
+    if (memHit) return Buffer.from(memHit);
+  }
+  const inputSha = hashFileContent(absInput);
+  if (inputSha) {
+    const persisted = readPersistedRgbSample(rootDir, inputSha, frameIdx);
+    if (persisted) {
+      if (memKey) {
+        if (rgbMemoryCache.size > MAX_RGB_MEMORY_ENTRIES) rgbMemoryCache.clear();
+        rgbMemoryCache.set(memKey, persisted);
+      }
+      return Buffer.from(persisted);
+    }
   }
   const isDir = input !== blobPath;
   const proc = spawnWatchedSync(
@@ -85,7 +161,13 @@ function extractSmallRgb(
   );
   if (proc.status !== 0 || proc.error) return null;
   const buf = proc.stdout as Buffer;
-  return buf.length > 0 ? buf : null;
+  if (buf.length === 0) return null;
+  if (memKey) {
+    if (rgbMemoryCache.size > MAX_RGB_MEMORY_ENTRIES) rgbMemoryCache.clear();
+    rgbMemoryCache.set(memKey, buf);
+  }
+  if (inputSha) writePersistedRgbSample(rootDir, inputSha, frameIdx, buf);
+  return buf;
 }
 
 function meanAbsDiff(a: Buffer, b: Buffer): number | null {
@@ -116,8 +198,8 @@ function compHashesForCue(
     const comp = cue.composition!;
     const absCompDir = resolveCompDir(rootDir, comp.composition_dir);
     const entryPath = path.join(absCompDir, comp.entry_html);
-    if (!fs.existsSync(entryPath)) return [];
-    const htmlSource = fs.readFileSync(entryPath, "utf8");
+    const htmlSource = readTextIfExists(entryPath);
+    if (htmlSource === null) return [];
     const mode = comp.mode ?? "overlay_alpha";
     const out: string[] = [];
     // The compiler bakes the stage backdrop into fullscreen opaque blobs and

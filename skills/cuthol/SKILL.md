@@ -28,7 +28,10 @@ You can drive it two ways. They are the same commands:
 MCP names use `_` where the CLI uses `-` (`add_cue` ↔ `add-cue`,
 `comp_dir` ↔ `--comp-dir`); list parameters such as `files` become
 positional arguments or comma lists on the CLI — `cuthol <group> <action>
---help` prints the exact flags. Error suggestions match your interface. Requirements: Node.js ≥ 22.5, `ffmpeg`/`ffprobe` 8.x (`cuthol setup --ffmpeg --apply` installs a pinned 8.1). If a tool seems missing (no ffmpeg, no browser, no speech key), run `cuthol doctor` first: one line per check, each with its fix.
+--help` prints the exact flags. JSON-valued flags (`--patch`, `--params`,
+`--variants`, `--blocks`, `--props`) also take a file: write the JSON to a
+file and pass `--patch file:patch.json`. Use that from PowerShell, which
+strips the inner double quotes of inline JSON. Error suggestions match your interface. Requirements: Node.js ≥ 22.12, `ffmpeg`/`ffprobe` 8.x (`cuthol setup --ffmpeg --apply` installs a pinned 8.1). If a tool seems missing (no ffmpeg, no browser, no speech key), run `cuthol doctor` first: one line per check, each with its fix.
 
 ## MCP or CLI
 

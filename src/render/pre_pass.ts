@@ -427,7 +427,13 @@ function runShaderPrePassJobs(jobs: PrePassJob[], opts: PrePassRunOptions): Arra
         }
         throw new CutholError(DIAGNOSTICS.SHADER_WORKER_FAILED(pending[0].job.id, "stalled (no output progress)"));
       }
-      const detail = (stderr || String(proc.stdout ?? "") || `exit ${proc.status}`).trim().slice(-240);
+      const rawDetail = (stderr || String(proc.stdout ?? "") || `exit ${proc.status}`).trim();
+      // Browser launch failures carry path, profile, cause and fix; keep the
+      // whole line so G707 names them instead of slicing them away.
+      const detail =
+        /browser launch failed|Only a system Chrome was found|G78[01]/.test(rawDetail) && rawDetail.length <= 1200
+          ? rawDetail
+          : rawDetail.slice(-240);
       for (const p of pending) {
         try {
           fs.unlinkSync(p.tmpOut);

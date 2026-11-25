@@ -3,7 +3,7 @@
 // write exactly what the agent asked for, then return the render-free prediction of the result.
 import fs from "node:fs";
 import path from "node:path";
-import { boolFlag, numFlag, strFlag } from "./cli_args.js";
+import { boolFlag, jsonFixCommand, numFlag, parseJsonFlag, strFlag } from "./cli_args.js";
 import { CLI_NOT_HANDLED, CliCommandContext, CliCommandResult, emitEnvelopeJson } from "./cli_output.js";
 import { CutholError, DIAGNOSTICS } from "./core/diagnostics.js";
 import { loadSequence } from "./core/workspace.js";
@@ -12,7 +12,7 @@ import { ColorItemRef, itemColorProgram, listColorItems, sourceKindOf } from "./
 import { ColorFlagError, describeStage, parseColorFlags } from "./color/cli_parse.js";
 import { clusterItems } from "./color/cluster.js";
 import { colorDiff } from "./color/diff.js";
-import { loadReferenceFrames, sampleItemFrames } from "./color/frames.js";
+import { loadReferenceFrames, sampleItemFrames, sampleItemFramesMany } from "./color/frames.js";
 import { colorMap } from "./color/map.js";
 import { predictStage } from "./color/predict.js";
 import { colorSolve } from "./color/solve.js";
@@ -67,7 +67,9 @@ function targetsOf(workspaceDir: string, seq: CutholSequence, flags: Record<stri
   const cluster = strFlag(flags, "cluster");
   const ids = [...(one ? [one] : []), ...(many ? many.split(",").map((s) => s.trim()).filter(Boolean) : [])];
   if (cluster) {
-    const maps = listColorItems(seq).map((i) => ({ itemId: i.id, assetHandle: i.asset_handle, map: colorMap(sampleItemFrames({ workspaceDir, itemId: i.id })) }));
+    const colorItems = listColorItems(seq);
+    const sets = sampleItemFramesMany(workspaceDir, colorItems.map((i) => i.id));
+    const maps = colorItems.map((i, idx) => ({ itemId: i.id, assetHandle: i.asset_handle, map: colorMap(sets[idx]) }));
     const c = clusterItems(maps).find((x) => x.id === cluster);
     if (!c) fail("set", `no cluster '${cluster}' (run 'cuthol color clusters')`);
     ids.push(...c!.items);
@@ -146,6 +148,16 @@ export async function runColorCommand(ctx: CliCommandContext): Promise<CliComman
         for (const id of ids) {
           const { sequence: seq } = loadSequence(workspaceDir);
           const cur = findItem(seq, id).stage;
+          const targetPart =
+            strFlag(flags, "item") !== undefined
+              ? `--item ${strFlag(flags, "item")}`
+              : strFlag(flags, "clip") !== undefined
+                ? `--clip ${strFlag(flags, "clip")}`
+                : strFlag(flags, "items") !== undefined
+                  ? `--items ${strFlag(flags, "items")}`
+                  : strFlag(flags, "cluster") !== undefined
+                    ? `--cluster ${strFlag(flags, "cluster")}`
+                    : `--item ${id}`;
           const parsed = parseColorFlags(
             {
               wb: strFlag(flags, "wb"),
@@ -161,7 +173,10 @@ export async function runColorCommand(ctx: CliCommandContext): Promise<CliComman
               remove: strFlag(flags, "remove"),
               patch: strFlag(flags, "patch"),
             },
-            cur
+            cur,
+            "--patch",
+            "color set",
+            jsonFixCommand("color set", "patch", targetPart)
           );
           if (!Object.keys(parsed.patch).length && !parsed.remove.length) fail("set", "nothing to set: give block flags (--wb, --exposure, --tone, --curve, --wheel, --hsl, --sat, --vibrance, --look, --amount), --remove or --patch");
           const res = setItemColor({ workspaceDir, itemId: id, patch: parsed.patch, remove: parsed.remove, replace: boolFlag(flags, "replace", false), reason });
@@ -198,12 +213,18 @@ export async function runColorCommand(ctx: CliCommandContext): Promise<CliComman
         const raw = strFlag(flags, "variants");
         let variants: Array<Record<string, unknown>> = [];
         if (raw) {
-          try {
-            variants = JSON.parse(raw);
-          } catch {
-            fail("compare", "--variants must be a JSON array of stage patches");
-          }
-          if (!Array.isArray(variants)) fail("compare", "--variants must be a JSON array");
+          const idPart =
+            strFlag(flags, "item") !== undefined
+              ? `--item ${strFlag(flags, "item")}`
+              : strFlag(flags, "clip") !== undefined
+                ? `--clip ${strFlag(flags, "clip")}`
+                : `--item ${id}`;
+          variants = parseJsonFlag(raw, {
+            command: "color compare",
+            flag: "variants",
+            kind: "array",
+            fixCommand: jsonFixCommand("color compare", "variants", idPart),
+          }) as Array<Record<string, unknown>>;
         }
         const { sequence, paths } = loadSequence(workspaceDir);
         const item = findItem(sequence, id!);
@@ -249,7 +270,8 @@ export async function runColorCommand(ctx: CliCommandContext): Promise<CliComman
       case "clusters": {
         const { sequence } = loadSequence(workspaceDir);
         const items = listColorItems(sequence);
-        const maps = items.map((i) => ({ itemId: i.id, assetHandle: i.asset_handle, map: colorMap(sampleItemFrames({ workspaceDir, itemId: i.id })) }));
+        const sets = sampleItemFramesMany(workspaceDir, items.map((i) => i.id));
+        const maps = items.map((i, idx) => ({ itemId: i.id, assetHandle: i.asset_handle, map: colorMap(sets[idx]) }));
         const clusters = clusterItems(maps);
         const graded = new Set(items.filter((i) => i.stage && Object.keys(i.stage).length).map((i) => i.id));
         const lines = clusters.map((c) => {
@@ -349,7 +371,7 @@ function runLook(ctx: CliCommandContext, out: (sub: string, p: Record<string, un
         look.lut_uri = uri.split(path.sep).join("/");
         look.origin = { kind: "file" };
       } else {
-        look.blocks = parseColorFlags({ patch: blocks }).patch;
+        look.blocks = parseColorFlags({ patch: blocks }, undefined, "--blocks", "color look create", jsonFixCommand("color look create", "blocks", `--name ${name}`)).patch;
         look.origin = { kind: "blocks" };
       }
     }

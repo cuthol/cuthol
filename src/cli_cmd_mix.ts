@@ -1,11 +1,5 @@
 // CLI 'mix' command group handler (split out of cli.ts).
 import { parseTimeMs } from "./core/time.js";
-import {
-  alignClipsToBeats,
-  duckMusicUnderDialogue,
-  normalizeSequenceAudio,
-  polishVoiceAudio,
-} from "./mix/audio_mix.js";
 import { boolFlag, numFlag, strFlag } from "./cli_args.js";
 import {
   CLI_NOT_HANDLED,
@@ -14,9 +8,10 @@ import {
   emitEnvelopeJson,
 } from "./cli_output.js";
 
-export function runMixCommand(ctx: CliCommandContext): CliCommandResult {
+export async function runMixCommand(ctx: CliCommandContext): Promise<CliCommandResult> {
   const { action, rest, flags, workspaceDir } = ctx;
   if (action === "normalize") {
+    const { normalizeSequenceAudio } = await import("./mix/audio_mix.js");
     const clipsRaw = strFlag(flags, "clips") ?? strFlag(flags, "clip");
     const clipIds = clipsRaw ? clipsRaw.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
     const res = normalizeSequenceAudio({
@@ -31,6 +26,7 @@ export function runMixCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "polish-voice") {
+    const { polishVoiceAudio } = await import("./mix/audio_mix.js");
     const clipsRaw = strFlag(flags, "clips") ?? strFlag(flags, "clip") ?? rest[0];
     const clipIds = clipsRaw ? clipsRaw.split(",").map((s) => s.trim()).filter(Boolean) : undefined;
     const res = polishVoiceAudio({
@@ -47,6 +43,7 @@ export function runMixCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "duck") {
+    const { duckMusicUnderDialogue } = await import("./mix/audio_mix.js");
     const attackRaw = strFlag(flags, "attack");
     const releaseRaw = strFlag(flags, "release");
     const res = duckMusicUnderDialogue({
@@ -62,6 +59,7 @@ export function runMixCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (action === "beat-align") {
+    const { alignClipsToBeats } = await import("./mix/audio_mix.js");
     const bgmHandle = strFlag(flags, "bgm-handle") ?? rest[0];
     if (!bgmHandle) throw new Error("Provide --bgm-handle <aud_XX>.");
     const clipsRaw = strFlag(flags, "clips");

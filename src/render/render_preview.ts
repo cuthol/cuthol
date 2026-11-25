@@ -17,9 +17,14 @@ import { requirePlanPrePasses } from "./pre_pass.js";
 import {
   beginOverlayCollect, isPngSequenceBlobDir,
   isValidVideoBlobOnDisk,
-  renderHyperFramesBatchFramesPng, resolveFramePngInPngSequenceDir,
+  renderHyperFramesBatchFramesPng,
+  resolveFramePngInPngSequenceDir,
   runCollectedOverlays
 } from "../compositor/hyperframes_bridge.js";
+import {
+  renderHyperFramesBatchSnapshotsConcurrently,
+  type CompositionBatchFramesOptions
+} from "../compositor/hf_frames.js";
 import {
   BT709_COLOR_OUTPUT_ARGS
 } from "./encoder.js";
@@ -260,6 +265,7 @@ export function prefetchCompositeFramesForTimestamps(
     return (frameIdx * 1000) / fps;
   });
 
+  const pendingSnapshotBatches: CompositionBatchFramesOptions[] = [];
   const sortedLanes = [...seq.lanes].sort((a, b) => a.z_index - b.z_index);
   for (const lane of sortedLanes) {
     if (lane.muted) continue;
@@ -494,7 +500,7 @@ export function prefetchCompositeFramesForTimestamps(
       }
 
       if (!allFramesAlreadyCached) {
-        renderHyperFramesBatchFramesPng({
+        pendingSnapshotBatches.push({
           compositionDir: compDir,
           entryHtml: cue.composition.entry_html,
           blobsDir: paths.blobsDir,
@@ -509,5 +515,19 @@ export function prefetchCompositeFramesForTimestamps(
         });
       }
     }
+  }
+
+  // Snapshots of different compositions run concurrently, bounded by the
+  // overlay concurrency setting; frames of one composition keep the single
+  // batched `snapshot --at t1,t2,...` call.
+  if (pendingSnapshotBatches.length === 1) {
+    renderHyperFramesBatchFramesPng(pendingSnapshotBatches[0]);
+  } else if (pendingSnapshotBatches.length > 1) {
+    const snapshotWorkers = resolveHyperFramesWorkers();
+    const snapshotConcurrency = resolveOverlayConcurrency({
+      workersPerOverlay: snapshotWorkers,
+      coldOverlayCount: pendingSnapshotBatches.length,
+    });
+    renderHyperFramesBatchSnapshotsConcurrently(pendingSnapshotBatches, snapshotConcurrency);
   }
 }

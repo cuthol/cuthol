@@ -16,11 +16,19 @@ import {
   SharedCacheConfig,
   suppressSqliteExperimentalWarning,
 } from "../core/env.js";
+import { currentHashGeneration } from "../core/file_hash_index.js";
 
 suppressSqliteExperimentalWarning();
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as {
   DatabaseSync: typeof DatabaseSyncType;
 };
+
+/**
+ * Process-wide analysis write counter. Every `setWaveform/setBeats/setScenes/
+ * setTranscript` call on any instance bumps it, so command-scoped read memos
+ * held by other instances are dropped on their next read.
+ */
+let ledgerWriteSeq = 0;
 
 export interface MediaLedgerOptions {
   /** Override user-level shared cache directory, or pass `false` to disable shared cache for this instance. */
@@ -33,6 +41,18 @@ export class MediaLedger {
   private readonly sharedConfig: SharedCacheConfig;
   private sharedDb: DatabaseSyncType | null = null;
   private sharedDbFailed = false;
+  /**
+   * Command-scoped memo for the `getLatest*` reads: bridge export asks for
+   * the same digests once per composition cue (30x per command on large
+   * projects). Entries live only for one command generation and are dropped
+   * on any write through this instance, so a transcript/waveform/beats/scenes
+   * analysis written mid-command is always seen afterwards. Only active while
+   * a command scope is open (`currentHashGeneration() > 0`); without a scope
+   * every call reads the database, as before.
+   */
+  private latestMemoGen = -1;
+  private latestMemoWriteSeq = -1;
+  private latestMemo = new Map<string, unknown>();
 
   constructor(sqlitePath: string, options?: MediaLedgerOptions) {
     this.sqlitePath = path.resolve(sqlitePath);
@@ -209,6 +229,7 @@ export class MediaLedger {
   }
 
   public setWaveform<T>(sha256: string, bins: number, metrics: T): void {
+    this.latestMemoInvalidate();
     const key = `${sha256}:${bins}`;
     this.db
       .prepare(
@@ -227,6 +248,7 @@ export class MediaLedger {
   }
 
   public setBeats<T>(sha256: string, sensitivity: number, metrics: T): void {
+    this.latestMemoInvalidate();
     const key = `${sha256}:${sensitivity.toFixed(2)}`;
     this.db
       .prepare(
@@ -245,6 +267,7 @@ export class MediaLedger {
   }
 
   public setScenes<T>(sha256: string, threshold: number, metrics: T): void {
+    this.latestMemoInvalidate();
     const key = `${sha256}:${threshold.toFixed(2)}`;
     this.db
       .prepare(
@@ -321,28 +344,75 @@ export class MediaLedger {
     return null;
   }
 
+  private latestMemoGet<T>(kind: string, sha256: string): { hit: boolean; value: T | null } {
+    const gen = currentHashGeneration();
+    if (gen <= 0) return { hit: false, value: null };
+    // Any analysis write through any instance of this process invalidates
+    // every memo: the writer is usually not the reader (bridge auto-analysis,
+    // speech flows, tests), and only the reader's generation is not enough.
+    if (this.latestMemoGen !== gen || this.latestMemoWriteSeq !== ledgerWriteSeq) {
+      this.latestMemoGen = gen;
+      this.latestMemoWriteSeq = ledgerWriteSeq;
+      this.latestMemo.clear();
+    }
+    const key = `${kind}:${sha256}`;
+    if (this.latestMemo.has(key)) return { hit: true, value: this.latestMemo.get(key) as T | null };
+    return { hit: false, value: null };
+  }
+
+  private latestMemoSet(kind: string, sha256: string, value: unknown): void {
+    // Misses are memoized too: most digests of a large project have no
+    // analysis row, and re-querying every miss once per composition cue
+    // dominates the bridge export. Staleness is impossible inside one
+    // command: every analysis write through any instance bumps the
+    // process-wide counter, which drops all memos on their next read.
+    if (this.latestMemoGen !== currentHashGeneration()) return;
+    const key = `${kind}:${sha256}`;
+    if (this.latestMemo.size > 2000) this.latestMemo.clear();
+    this.latestMemo.set(key, value);
+  }
+
+  private latestMemoInvalidate(): void {
+    ledgerWriteSeq += 1;
+    this.latestMemo.clear();
+  }
+
   public getLatestWaveform<T>(sha256: string): T | null {
+    const memo = this.latestMemoGet<T>("waveform", sha256);
+    if (memo.hit) return memo.value;
     const row = this.db
       .prepare(`SELECT metrics_json FROM waveform_cache WHERE sha256 = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
       .get(sha256) as { metrics_json: string } | undefined;
-    return row ? (JSON.parse(row.metrics_json) as T) : null;
+    const value = row ? (JSON.parse(row.metrics_json) as T) : null;
+    this.latestMemoSet("waveform", sha256, value);
+    return value;
   }
 
   public getLatestBeats<T>(sha256: string): T | null {
+    const memo = this.latestMemoGet<T>("beats", sha256);
+    if (memo.hit) return memo.value;
     const row = this.db
       .prepare(`SELECT metrics_json FROM beats_cache WHERE sha256 = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
       .get(sha256) as { metrics_json: string } | undefined;
-    return row ? (JSON.parse(row.metrics_json) as T) : null;
+    const value = row ? (JSON.parse(row.metrics_json) as T) : null;
+    this.latestMemoSet("beats", sha256, value);
+    return value;
   }
 
   public getLatestScenes<T>(sha256: string): T | null {
+    const memo = this.latestMemoGet<T>("scenes", sha256);
+    if (memo.hit) return memo.value;
     const row = this.db
       .prepare(`SELECT metrics_json FROM scenes_cache WHERE sha256 = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
       .get(sha256) as { metrics_json: string } | undefined;
-    return row ? (JSON.parse(row.metrics_json) as T) : null;
+    const value = row ? (JSON.parse(row.metrics_json) as T) : null;
+    this.latestMemoSet("scenes", sha256, value);
+    return value;
   }
 
   public getLatestTranscript<T>(sha256: string): T | null {
+    const memo = this.latestMemoGet<T>("transcript", sha256);
+    if (memo.hit) return memo.value;
     const row = this.db
       .prepare(`SELECT lang, transcript_json FROM transcript_cache WHERE sha256 = ? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
       .get(sha256) as { lang: string; transcript_json: string } | undefined;
@@ -371,7 +441,9 @@ export class MediaLedger {
           // non-blocking shared cache promotion
         }
       }
-      return JSON.parse(row.transcript_json) as T;
+      const value = JSON.parse(row.transcript_json) as T;
+      this.latestMemoSet("transcript", sha256, value);
+      return value;
     }
 
     const shared = this.getSharedDb();
@@ -387,17 +459,21 @@ export class MediaLedger {
                VALUES (?, ?, ?, ?, ?)`
             )
             .run(sharedRow.cache_key, sha256, sharedRow.lang, sharedRow.transcript_json, new Date().toISOString());
-          return JSON.parse(sharedRow.transcript_json) as T;
+          const value = JSON.parse(sharedRow.transcript_json) as T;
+          this.latestMemoSet("transcript", sha256, value);
+          return value;
         }
       } catch {
         // non-blocking shared cache read
       }
     }
 
+    this.latestMemoSet("transcript", sha256, null);
     return null;
   }
 
   public setTranscript<T>(sha256: string, lang: string, transcript: T): void {
+    this.latestMemoInvalidate();
     const normLang = lang.toLowerCase();
     const key = `${sha256}:${normLang}`;
     const serialized = JSON.stringify(transcript);
