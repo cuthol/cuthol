@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { CutholSequence } from "../core/schema.js";
 import type { ParameterEnvelope } from "../core/schema.js";
-import { CutholError, DIAGNOSTICS, type CutholDiagnostic } from "../core/diagnostics.js";
+import { CutholError, DIAGNOSTICS, pushRepeatDiagnostic, type CutholDiagnostic } from "../core/diagnostics.js";
 import { spawnWatchedSync } from "../core/subprocess.js";
 import {
   compileLut,
@@ -118,9 +118,23 @@ function ensureStaticLut(
   const file = colorLutBlobPath(rootDir, hash);
   if (!fs.existsSync(file)) writeCube(compiled.lut, file);
   if (compiled.lut.size >= LUT_FINE_SIZE && compiled.selftest.p99_de > LUT_SELFTEST_P99_LIMIT) {
-    const d = DIAGNOSTICS.COLOR_LUT_SELFTEST_ABOVE_LIMIT(itemId, compiled.selftest.p99_de);
-    if (warnings) warnings.push(d);
-    else console.warn(d.formatted);
+    const p99 = Math.round(compiled.selftest.p99_de * 100) / 100;
+    if (warnings) {
+      pushRepeatDiagnostic(
+        warnings,
+        `CUTHOL-G440:${LUT_SELFTEST_P99_LIMIT}`,
+        { subjectId: itemId, detail: String(p99) },
+        (e) => DIAGNOSTICS.COLOR_LUT_SELFTEST_ABOVE_LIMIT(e.subjectId, Number(e.detail)),
+        (es) =>
+          DIAGNOSTICS.COLOR_LUT_SELFTEST_ABOVE_LIMIT_MANY(
+            LUT_SELFTEST_P99_LIMIT,
+            es.map((e) => ({ id: e.subjectId, p99: Number(e.detail) }))
+          )
+      );
+      return { hash, file, size: compiled.lut.size, selftest: compiled.selftest };
+    }
+    const d = DIAGNOSTICS.COLOR_LUT_SELFTEST_ABOVE_LIMIT(itemId, p99);
+    console.warn(d.formatted);
   }
   return { hash, file, size: compiled.lut.size, selftest: compiled.selftest };
 }

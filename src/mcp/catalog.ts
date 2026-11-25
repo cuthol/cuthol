@@ -16,6 +16,7 @@ import { MEDIA_ACTION_SPECS } from "./catalog_specs_media.js";
 import { OUTPUT_ACTION_SPECS } from "./catalog_specs_output.js";
 import { COLOR_ACTION_SPECS } from "./catalog_specs_color.js";
 import { TREATMENT_ACTION_SPECS } from "./catalog_specs_treatments.js";
+import { CLI_ACTION_SPECS } from "./catalog_specs_cli.js";
 
 export type { ParamType, ParamSpec, ActionSpec, ToolSpec } from "./catalog_types.js";
 
@@ -119,13 +120,72 @@ export const ACTION_SPECS: ActionSpec[] = [
   ...OUTPUT_ACTION_SPECS,
   ...COLOR_ACTION_SPECS,
   ...TREATMENT_ACTION_SPECS,
+  ...CLI_ACTION_SPECS,
+  {
+    tool: "guide",
+    action: "explain",
+    argv: ["explain"],
+    summary: "Explain a diagnostic code or topic (skeleton: reports that no record exists yet).",
+    mutates: false,
+    params: [
+      { name: "query", type: "string", description: "Diagnostic code (CUTHOL-G...) or topic to explain.", required: true },
+    ],
+  },
 ];
 
 /** Tools that do not take a workspace `dir`. */
 export const WORKSPACELESS_TOOLS = new Set(["guide"]);
 
+/**
+ * Every action the MCP surface serves: `ACTION_SPECS` without CLI-only entries.
+ * CLI-only entries (`cliOnly: true`, `catalog_specs_cli.ts`) have no MCP tool and
+ * must be invisible to every MCP-facing check; they keep their own coverage in
+ * `src/test/w0a_catalog.test.ts`.
+ */
+export function mcpActionSpecs(): ActionSpec[] {
+  return ACTION_SPECS.filter((a) => !a.cliOnly);
+}
+
 export function actionsForTool(tool: string): ActionSpec[] {
-  return ACTION_SPECS.filter((a) => a.tool === tool);
+  return ACTION_SPECS.filter((a) => a.tool === tool && !a.cliOnly);
+}
+
+/** Every action including CLI-only ones (for `cuthol ... --help` and flag parsing). */
+export function cliActionSpecs(): ActionSpec[] {
+  return ACTION_SPECS.filter((a) => a.argv.length > 0);
+}
+
+/** Longest-argv-prefix match for a CLI command; merges cliOnly patch params into the hit. */
+export function findCliActionSpec(
+  group: string | undefined,
+  action?: string | null,
+  rest: string[] = [],
+): { spec: ActionSpec; params: ParamSpec[] } | undefined {
+  if (!group) return undefined;
+  const words = [group, ...(action ? [action] : []), ...rest];
+  let best: ActionSpec | undefined;
+  for (const a of cliActionSpecs()) {
+    if (a.argv.length > words.length) continue;
+    if (!a.argv.every((w, i) => words[i] === w)) continue;
+    if (!best || a.argv.length > best.argv.length) best = a;
+  }
+  if (!best) return undefined;
+  const merged: ParamSpec[] = [];
+  const seen = new Set<string>();
+  for (const a of ACTION_SPECS) {
+    if (a.tool !== best.tool || (a.action ?? null) !== (best.action ?? null)) continue;
+    for (const prm of a.params) {
+      if (seen.has(prm.name)) continue;
+      seen.add(prm.name);
+      merged.push(prm);
+    }
+  }
+  return { spec: best, params: merged };
+}
+
+/** CLI flag name (without dashes) for a catalog param. */
+export function paramFlagName(prm: ParamSpec): string {
+  return prm.flag ?? prm.name.replace(/_/g, "-");
 }
 
 export function findActionSpec(tool: string, action: string | null): ActionSpec | undefined {

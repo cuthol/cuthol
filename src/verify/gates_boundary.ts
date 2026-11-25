@@ -9,7 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnWatchedSync } from "../core/subprocess.js";
 import { resolveCueStartMs } from "../core/timeline.js";
-import { DIAGNOSTICS, CutholDiagnostic } from "../core/diagnostics.js";
+import { DIAGNOSTICS, CutholDiagnostic, pushRepeatDiagnostic } from "../core/diagnostics.js";
 import { CutholSequence, LaneCue } from "../core/schema.js";
 import { WorkspacePaths } from "../core/workspace.js";
 import { syncScalarVarsAndComputeCompositionHash } from "../compositor/hf_cache_state.js";
@@ -179,12 +179,17 @@ export function verifyEnvelopeParameters(
   const check = (targetId: string, params: { parameter: string }[]) => {
     for (const env of params) {
       if (!isKnownEnvelopeParameter(env.parameter)) {
-        diagnostics.push(
-          DIAGNOSTICS.ENVELOPE_UNKNOWN_PARAMETER(
-            env.parameter,
-            targetId,
-            suggestEnvelopeParameter(env.parameter)
-          )
+        pushRepeatDiagnostic(
+          diagnostics,
+          `CUTHOL-G140:${env.parameter}`,
+          { subjectId: targetId },
+          (e) =>
+            DIAGNOSTICS.ENVELOPE_UNKNOWN_PARAMETER(
+              env.parameter,
+              e.subjectId,
+              suggestEnvelopeParameter(env.parameter)
+            ),
+          (es) => DIAGNOSTICS.ENVELOPE_UNKNOWN_PARAMETER_MANY(env.parameter, es.map((e) => e.subjectId))
         );
       }
     }

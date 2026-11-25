@@ -533,7 +533,7 @@ function fxFrozenProbe(
     });
     if (findings.some((f) => f.severity === "ERROR")) {
       const ferr = findings.find((f) => f.severity === "ERROR")!;
-      return { frozen: true, diagnostic: DIAGNOSTICS.FX_PARAM_FROZEN(ferr.filter ?? "?") };
+      return { frozen: true, diagnostic: DIAGNOSTICS.FX_PARAM_FROZEN(ferr.filter ?? "?", targetId) };
     }
     return { frozen: false };
   } catch {

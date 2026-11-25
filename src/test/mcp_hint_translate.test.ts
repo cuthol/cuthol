@@ -12,7 +12,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { ACTION_SPECS, buildCliArgv, findActionSpec, TOOL_SPECS } from "../mcp/catalog.js";
-import { translateCliHint } from "../mcp/mcp_format.js";
+import { formatEnvelopeCompact, translateCliHint } from "../mcp/mcp_format.js";
 
 /** Split `tool(action=x, k=v, ...)` into tool + params (handles `"quoted values"`). */
 function parseCall(call: string): { tool: string; action: string | null; params: Map<string, string> } {
@@ -53,7 +53,13 @@ function parseCall(call: string): { tool: string; action: string | null; params:
 // quoted 'cuthol …' commands, which use only literal text and <angle> placeholders).
 function diagnosticExamples(): string[] {
   const here = path.dirname(fileURLToPath(import.meta.url));
-  const src = fs.readFileSync(path.resolve(here, "..", "..", "src", "core", "diagnostics.ts"), "utf8");
+  const candidates = [
+    path.resolve(here, "..", "..", "src", "core", "diagnostics.ts"),
+    path.resolve("src", "core", "diagnostics.ts"),
+  ];
+  const hit = candidates.find((p) => fs.existsSync(p));
+  assert.ok(hit, `diagnostics.ts not found in ${candidates.join(", ")}`);
+  const src = fs.readFileSync(hit, "utf8");
   const found = new Set<string>();
   for (const m of src.matchAll(/'(cuthol [^'`$]+)'/g)) found.add(m[1]);
   return [...found].sort();
@@ -159,4 +165,90 @@ test("hint translation: every diagnostics example is balanced, valid and round-t
     assert.deepEqual(argvValues, cliValues, `value mismatch for ${cli}: ${out}`);
   }
   assert.ok(translated > 10, `expected many translated examples, got ${translated} of ${examples.length}`);
+});
+/** Backquoted suggestion/what template literals of diagnostics.ts (`${…}` → `x1`). */
+function diagnosticTemplates(): string[] {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.resolve(here, "..", "..", "src", "core", "diagnostics.ts"),
+    path.resolve("src", "core", "diagnostics.ts"),
+  ];
+  const found = candidates.find((p) => fs.existsSync(p));
+  assert.ok(found, `diagnostics.ts not found in ${candidates.join(", ")}`);
+  const src = fs.readFileSync(found, "utf8");
+  const out: string[] = [];
+  for (const m of src.matchAll(/`((?:[^`\\]|\\.)*)`/g)) out.push(m[1].replace(/\$\{[^}]*\}/g, "x1"));
+  assert.ok(out.length > 100, `expected diagnostics templates, got ${out.length}`);
+  return out;
+}
+
+test("hint translation: two commands on one line translate cleanly (G152 line)", () => {
+  const line =
+    "INFO [CUTHOL-G152] First visual source suggests stage 1080x1080 " +
+    "(stage is still the default; adopting avoids a rescale of every placed item). " +
+    "Run: 'cuthol workspace stage --size 1080x1080'. | Suggestion: Run the suggested " +
+    "command to adopt the source size; rule: 'cuthol explain G152'.";
+  assert.equal(
+    translateCliHint(line),
+    "INFO [CUTHOL-G152] First visual source suggests stage 1080x1080 " +
+      "(stage is still the default; adopting avoids a rescale of every placed item). " +
+      "Run: workspace(action=stage, size=1080x1080). | Suggestion: Run the suggested " +
+      "command to adopt the source size; rule: guide(action=explain, query=G152)."
+  );
+
+  const unquoted =
+    "Run: cuthol workspace stage --size 1080x1080. | Suggestion: x; rule: 'cuthol explain G152'.";
+  assert.equal(
+    translateCliHint(unquoted),
+    "Run: workspace(action=stage, size=1080x1080). | Suggestion: x; rule: guide(action=explain, query=G152)."
+  );
+
+  const multi =
+    "Do 'cuthol brief --lens overview', then 'cuthol explain G101'; see 'cuthol workspace journal undo'.";
+  assert.equal(
+    translateCliHint(multi),
+    "Do brief(lens=overview), then guide(action=explain, query=G101); see workspace(action=undo)."
+  );
+});
+
+test("hint translation: every suggestion/what template translates without quote corruption", () => {
+  const CALL_RE = /[A-Za-z_][\w]*\(action=[^()\n]*\)/g;
+  const SPAN_RE = /'cuthol [^'\n]*?'/g;
+  const lits = diagnosticTemplates().filter((t) => t.includes("cuthol"));
+  assert.ok(lits.length > 50, `expected many cuthol templates, got ${lits.length}`);
+  for (const t of lits) {
+    assert.ok(!t.includes("(action="), `template already in MCP form: ${t.slice(0, 80)}`);
+    const out = translateCliHint(t);
+    assert.ok(!/'[A-Za-z_][\w]*\(action=/.test(out), `stray quote before a call: ${out}`);
+    for (const call of out.match(CALL_RE) ?? []) {
+      assert.ok(!call.includes("'"), `quote inside call value: ${call}`);
+    }
+    const quotesIn = (t.match(/'/g) ?? []).length;
+    const quotesOut = (out.match(/'/g) ?? []).length;
+    const spans = t.match(SPAN_RE) ?? [];
+    const gone = spans.filter((s) => !out.includes(s)).length;
+    assert.equal(
+      quotesIn - quotesOut,
+      2 * gone,
+      `quote conservation broken (in=${quotesIn} out=${quotesOut} translated=${gone}): ${out}`
+    );
+    if (quotesIn % 2 === 0) assert.equal(quotesOut % 2, 0, `unbalanced quotes: ${out}`);
+  }
+});
+
+test("compact hint form: CLI keeps the CLI suggestion, MCP keeps the translation", () => {
+  const envelope = {
+    ok: false,
+    command: "library waveform",
+    error: {
+      code: "CUTHOL-G999",
+      message: "No waveform for handle 'vid_nope'.",
+      suggestion: "Inspect it with 'cuthol brief --lens overview'.",
+    },
+  };
+  const cli = formatEnvelopeCompact({ envelope, hintForm: "cli" });
+  assert.ok(cli.text.includes("'cuthol brief --lens overview'"), `CLI form lost: ${cli.text}`);
+  assert.ok(!cli.text.includes("brief(lens=overview)"), `CLI text was translated: ${cli.text}`);
+  const mcp = formatEnvelopeCompact({ envelope });
+  assert.ok(mcp.text.includes("brief(lens=overview)"), `MCP form not translated: ${mcp.text}`);
 });

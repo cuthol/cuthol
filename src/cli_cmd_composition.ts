@@ -67,6 +67,7 @@ function emitCoordsAsyncError(err: unknown): void {
       values: activeCliValues,
       revisionBefore: activeCliRevisionBefore,
       exitCode: 1,
+      hintForm: "cli",
     });
     console.error(text);
   } else {

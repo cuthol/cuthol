@@ -70,6 +70,7 @@ export function emitEnvelopeObject(
       values: activeCliValues,
       revisionBefore: activeCliRevisionBefore,
       exitCode: envObj.ok === false ? 1 : 0,
+      hintForm: "cli",
     });
     console.log(text);
     return;

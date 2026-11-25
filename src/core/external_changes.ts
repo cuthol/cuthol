@@ -1719,7 +1719,8 @@ export function assertMutatorKeptExternalFiles(paths: WorkspacePaths, prestate: 
     DIAGNOSTICS.EXTERNAL_CHANGE_WOULD_BE_OVERWRITTEN(
       overwritten.slice(0, 5).join(", ") + (overwritten.length > 5 ? ` (+${overwritten.length - 5})` : ""),
       `this Cuthol operation would have overwritten externally-changed files; the operation was stopped, file(s) restored to their previous state` +
-        (unrestored.length > 0 ? ` (not restorable: ${unrestored.slice(0, 3).join(", ")})` : "")
+        (unrestored.length > 0 ? ` (not restorable: ${unrestored.slice(0, 3).join(", ")})` : ""),
+      overwritten
     )
   );
 }
@@ -1825,7 +1826,8 @@ export function assertBridgeWontRewriteExternal(
       throw new CutholError(
         DIAGNOSTICS.EXTERNAL_CHANGE_WOULD_BE_OVERWRITTEN(
           `${c.key}/${c.entry_html}`,
-          `Cuthol bridge sync would have rewritten the externally-changed entry HTML (${lost}); operation stopped, file unchanged`
+          `Cuthol bridge sync would have rewritten the externally-changed entry HTML (${lost}); operation stopped, file unchanged`,
+          [`${c.key}/${c.entry_html}`]
         )
       );
     }

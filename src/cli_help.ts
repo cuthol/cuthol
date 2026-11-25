@@ -1,7 +1,9 @@
 // Plain-text `cuthol help` output (split out of cli.ts).
 import { CutholError, DIAGNOSTICS } from "./core/diagnostics.js";
-import { strFlag } from "./cli_args.js";
+import { cliParamFlagName, strFlag } from "./cli_args.js";
 import { getGuideText } from "./mcp/server.js";
+import { ACTION_SPECS, cliActionSpecs, findCliActionSpec } from "./mcp/catalog.js";
+import type { ActionSpec, ParamSpec } from "./mcp/catalog_types.js";
 
 const HELP_LINES: string[] = [
       "Cuthol — Agent-First Open-Source Non-Linear Video Editor (NLE)",
@@ -87,9 +89,106 @@ const HELP_LINES: string[] = [
  * group/action's usage lines and exits 0: the existing global text filtered,
  * no new hand-written text.
  */
-export function printHelp(group?: string, action?: string): void {
+function displaySummary(spec: ActionSpec): string {
+  if (!spec.cliOnly) return spec.summary;
+  const real = ACTION_SPECS.find((a) => !a.cliOnly && a.tool === spec.tool && (a.action ?? null) === (spec.action ?? null));
+  return real ? real.summary : spec.summary;
+}
+
+function flagKind(prm: ParamSpec): string {
+  switch (prm.type) {
+    case "boolean": return "";
+    case "time": return " <time>";
+    case "number": return " <number>";
+    case "string_list": return " <a,b>";
+    case "object": return " <json>";
+    default: return " <text>";
+  }
+}
+
+function exampleValue(prm: ParamSpec): string | null {
+  if (prm.type === "boolean") return null;
+  if (prm.enum?.length) return prm.enum[0];
+  if (prm.type === "time") return "1.5s";
+  if (prm.type === "number") return "1";
+  if (prm.type === "string_list") return "a,b";
+  if (prm.type === "object") return "'{}'";
+  const samples: Record<string, string> = {
+    handle: "vid_01", clip: "sp_01", clips: "sp_01", item: "sp_01", items: "sp_01",
+    dir: ".", file: "input.mp4", files: "input.mp4", out: "out.png", cue: "cue_01",
+    asset: "vid_01", text: "hello", topic: "cuthol", query: "CUTHOL-G110", name: "demo",
+    kind: "dissolve", param: "opacity", at: "1.5s", mode: "ask", port: "8321",
+  };
+  return samples[prm.name] ?? `<${prm.name}>`;
+}
+
+function printActionDetail(spec: ActionSpec, params: ParamSpec[]): void {
+  const usage: string[] = [`cuthol ${spec.argv.join(" ")}`];
+  for (const prm of params) {
+    if (prm.positional) {
+      usage.push(prm.required ? `<${prm.name}${prm.type === "string_list" ? "..." : ""}>` : `[<${prm.name}>]`);
+    } else if (prm.type === "boolean") {
+      usage.push(prm.required ? `--${cliParamFlagName(prm)}` : `[--${cliParamFlagName(prm)}]`);
+    } else {
+      usage.push(prm.required ? `--${cliParamFlagName(prm)}${flagKind(prm)}` : `[--${cliParamFlagName(prm)}${flagKind(prm)}]`);
+    }
+  }
+  const lines = [usage.join(" "), "", displaySummary(spec), ""];
+  const flags = params.filter((prm) => !prm.positional);
+  if (flags.length) {
+    lines.push("Flags:");
+    for (const prm of flags) {
+      const req = prm.required ? "required" : "optional";
+      const kind = prm.type === "boolean" ? "" : flagKind(prm);
+      const vals = prm.enum?.length ? ` [${prm.enum.join("|")}]` : "";
+      lines.push(`  --${cliParamFlagName(prm)}${kind} ${req}${vals} — ${prm.description}`);
+    }
+    lines.push("");
+  }
+  const positionals = params.filter((prm) => prm.positional);
+  if (positionals.length) {
+    lines.push("Positional arguments:");
+    for (const prm of positionals) {
+      lines.push(`  <${prm.name}> ${prm.required ? "required" : "optional"} — ${prm.description}`);
+    }
+    lines.push("");
+  }
+  const example = [`cuthol ${spec.argv.join(" ")}`];
+  for (const prm of params) {
+    if (!prm.required) continue;
+    const v = exampleValue(prm);
+    if (prm.positional) example.push(v ?? prm.name);
+    else if (v !== null) example.push(`--${cliParamFlagName(prm)} ${v}`);
+    else example.push(`--${cliParamFlagName(prm)}`);
+  }
+  lines.push("Example:", `  ${example.join(" ")}`);
+  console.log(lines.join("\n"));
+}
+
+export function printHelp(group?: string, action?: string, rest: string[] = []): void {
   if (!group || group === "help") {
     console.log(HELP_LINES.join("\n"));
+    return;
+  }
+  const words = [group, ...(action ? [action] : []), ...rest];
+  const hit = findCliActionSpec(group, action, rest);
+  if (hit && hit.spec.argv.length === words.length && hit.spec.argv.every((w, i) => words[i] === w)) {
+    printActionDetail(hit.spec, hit.params);
+    return;
+  }
+  const children = cliActionSpecs().filter(
+    (a) => a.argv.length > words.length && words.every((w, i) => a.argv[i] === w),
+  );
+  if (children.length) {
+    console.log(
+      [`cuthol ${words.join(" ")} ...`, ""]
+        .concat(
+          [...new Map(children.map((a) => [a.argv.slice(words.length).join(" "), a] as const)).entries()].map(
+            ([sub, a]) => `  ${sub} — ${displaySummary(a)}`,
+          ),
+        )
+        .join("\n"),
+    );
     return;
   }
   const needle = `cuthol ${group}`;

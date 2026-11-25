@@ -1,7 +1,7 @@
 // Overlay render bookkeeping: per-render summary, concurrent pre-pass collector and runner, HyperFrames pipeline summary parsing (split out of hyperframes_bridge.ts).
 import fs from "node:fs";
 import path from "node:path";
-import { CutholDiagnostic, createSubprocessFailureDiagnostic, CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
+import { CutholDiagnostic, createSubprocessFailureDiagnostic, CutholError, DIAGNOSTICS, pushRepeatDiagnostic } from "../core/diagnostics.js";
 import {
   resolveHyperFramesWorkers,
   resolveOverlayConcurrency
@@ -388,9 +388,21 @@ export function finishOverlayRenderTracking(): RenderOverlaySummary {
     const modeSuffix = modeParts.length > 0 ? `; ${modeParts.join(", ")}` : "";
     summary = `${cached}/${total} cached, ${rendered} rendered (${reasonParts}; ${names}${more}${modeSuffix}) in ${secStr}`;
   }
-  const scriptErrorDiagnostics: CutholDiagnostic[] = scriptErrors.map((s) =>
-    DIAGNOSTICS.SCRIPT_ERROR_ISOLATED(s.composition, s.element, s.composition_id, s.error)
-  );
+  const scriptErrorDiagnostics: CutholDiagnostic[] = [];
+  for (const s of scriptErrors) {
+    pushRepeatDiagnostic(
+      scriptErrorDiagnostics,
+      `CUTHOL-G415:${s.composition}`,
+      { subjectId: s.element, detail: s.error },
+      (e) => DIAGNOSTICS.SCRIPT_ERROR_ISOLATED(s.composition, e.subjectId, s.composition_id, e.detail ?? ""),
+      (es) =>
+        DIAGNOSTICS.SCRIPT_ERROR_ISOLATED_MANY(
+          s.composition,
+          es.map((e) => e.subjectId),
+          es[0]?.detail ?? ""
+        )
+    );
+  }
   if (scriptErrors.length > 0) {
     const shown = scriptErrors
       .slice(0, 3)

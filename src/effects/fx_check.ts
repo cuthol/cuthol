@@ -309,7 +309,7 @@ export function checkEffectDefinition(
           message: `Shader '${where}' was not compiled in a browser yet (no cached result for its content hash): only the static scan ran. Run 'extension enable' for its extension, then re-run this check.`,
         }];
       }
-      return [{ severity: "WARN", code: "CUTHOL-G705", message: `fx definition check passed with a warning on 'definition' fx '${def.kind}': shader effects are not checked by spine fx check yet.` }];
+      return [{ severity: "WARN", code: "CUTHOL-G705", message: `fx definition check passed with a warning on 'definition' fx '${def.kind}' in this run: shader effects are not checked by spine fx check yet, so this shader is unchecked.` }];
     }
     return [];
   }

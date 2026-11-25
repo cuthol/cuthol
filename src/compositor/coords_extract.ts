@@ -15,7 +15,7 @@ import { pathToFileURL } from "node:url";
 // Types only: the browser library loads on the first launch, so a CLI start does not pay
 // for it (it was ~0.6 s of every command).
 import type { Browser, Page } from "puppeteer-core";
-import { CutholError, CutholDiagnostic, DIAGNOSTICS } from "../core/diagnostics.js";
+import { CutholError, CutholDiagnostic, DIAGNOSTICS, pushRepeatDiagnostic } from "../core/diagnostics.js";
 import { CutholSequence, LaneCue } from "../core/schema.js";
 import { spawnWatchedSync } from "../core/subprocess.js";
 import { resolveCueStartMs } from "../core/timeline.js";
@@ -1304,7 +1304,13 @@ function prepareMeasuredCue(
   // Missing entry fails fast (before any sync/browser): a 404 page must never "measure".
   if (!fs.existsSync(path.join(absCompDir, entryHtml))) {
     const reason = `composition entry '${comp.composition_dir}/${entryHtml}' not found`;
-    warnings.push(DIAGNOSTICS.COORDS_MEASUREMENT_FAILED(cue.id, reason));
+    pushRepeatDiagnostic(
+      warnings,
+      `CUTHOL-G417:${reason}`,
+      { subjectId: cue.id },
+      (e) => DIAGNOSTICS.COORDS_MEASUREMENT_FAILED(e.subjectId, reason),
+      (es) => DIAGNOSTICS.COORDS_MEASUREMENT_FAILED_MANY(reason, es.map((e) => e.subjectId))
+    );
     skipped.push({ cue: cue.id, reason });
     return null;
   }
@@ -1397,7 +1403,13 @@ function prepareMeasuredCue(
       propsHash = hashInfo.propsHash;
     } catch (err) {
       const reason = shortReason(err);
-      warnings.push(DIAGNOSTICS.COORDS_MEASUREMENT_FAILED(cue.id, reason));
+      pushRepeatDiagnostic(
+        warnings,
+        `CUTHOL-G417:${reason}`,
+        { subjectId: cue.id },
+        (e) => DIAGNOSTICS.COORDS_MEASUREMENT_FAILED(e.subjectId, reason),
+        (es) => DIAGNOSTICS.COORDS_MEASUREMENT_FAILED_MANY(reason, es.map((e) => e.subjectId))
+      );
       skipped.push({ cue: cue.id, reason });
       return null;
     }
@@ -1516,7 +1528,14 @@ async function measureMisses(
           bundledHtml = await bundler(m.absCompDir);
           fontsBundled = true;
         } catch (err) {
-          warnings.push(DIAGNOSTICS.COORDS_FONTS_NOT_BUNDLED(m.cue.id, shortReason(err)));
+          const fontReason = shortReason(err);
+          pushRepeatDiagnostic(
+            warnings,
+            `CUTHOL-G418:${fontReason}`,
+            { subjectId: m.cue.id },
+            (e) => DIAGNOSTICS.COORDS_FONTS_NOT_BUNDLED(e.subjectId, fontReason),
+            (es) => DIAGNOSTICS.COORDS_FONTS_NOT_BUNDLED_MANY(fontReason, es.map((e) => e.subjectId))
+          );
         } finally {
           console.log = savedConsole.log;
           console.info = savedConsole.info;
@@ -1524,7 +1543,13 @@ async function measureMisses(
           console.error = savedConsole.error;
         }
       } else if (bundlerError) {
-        warnings.push(DIAGNOSTICS.COORDS_FONTS_NOT_BUNDLED(m.cue.id, bundlerError));
+        pushRepeatDiagnostic(
+          warnings,
+          `CUTHOL-G418:${bundlerError}`,
+          { subjectId: m.cue.id },
+          (e) => DIAGNOSTICS.COORDS_FONTS_NOT_BUNDLED(e.subjectId, bundlerError),
+          (es) => DIAGNOSTICS.COORDS_FONTS_NOT_BUNDLED_MANY(bundlerError, es.map((e) => e.subjectId))
+        );
       }
       const meta: CompositionMeta = {
         width: m.compWidth,
@@ -1597,7 +1622,14 @@ async function measureMisses(
         if (opened.errors.length > 0) {
           const first = opened.errors[0];
           const extra = opened.errors.length > 1 ? ` (+${opened.errors.length - 1} more)` : "";
-          warnings.push(DIAGNOSTICS.COORDS_PAGE_ISSUES(m.cue.id, `${first}${extra}`));
+          const pageDetail = `${first}${extra}`;
+          pushRepeatDiagnostic(
+            warnings,
+            `CUTHOL-G419:${pageDetail}`,
+            { subjectId: m.cue.id },
+            (e) => DIAGNOSTICS.COORDS_PAGE_ISSUES(e.subjectId, pageDetail),
+            (es) => DIAGNOSTICS.COORDS_PAGE_ISSUES_MANY(pageDetail, es.map((e) => e.subjectId))
+          );
         }
         // Script-error record: every measurement (clean ones too) refreshes the
         // content-keyed record that `verify` and `monitor` read without a browser.
@@ -1627,7 +1659,13 @@ async function measureMisses(
       }
     } catch (err) {
       const reason = shortReason(err);
-      warnings.push(DIAGNOSTICS.COORDS_MEASUREMENT_FAILED(m.cue.id, reason));
+      pushRepeatDiagnostic(
+        warnings,
+        `CUTHOL-G417:${reason}`,
+        { subjectId: m.cue.id },
+        (e) => DIAGNOSTICS.COORDS_MEASUREMENT_FAILED(e.subjectId, reason),
+        (es) => DIAGNOSTICS.COORDS_MEASUREMENT_FAILED_MANY(reason, es.map((e) => e.subjectId))
+      );
       skipped.push({ cue: m.cue.id, reason });
     }
   }
@@ -1695,7 +1733,13 @@ export async function measureCompositionCues(
     } catch (err) {
       for (const m of misses) {
         const reason = `browser launch failed: ${shortReason(err)}`;
-        warnings.push(DIAGNOSTICS.COORDS_MEASUREMENT_FAILED(m.cue.id, reason));
+        pushRepeatDiagnostic(
+          warnings,
+          `CUTHOL-G417:${reason}`,
+          { subjectId: m.cue.id },
+          (e) => DIAGNOSTICS.COORDS_MEASUREMENT_FAILED(e.subjectId, reason),
+          (es) => DIAGNOSTICS.COORDS_MEASUREMENT_FAILED_MANY(reason, es.map((e) => e.subjectId))
+        );
         skipped.push({ cue: m.cue.id, reason });
       }
     }
@@ -1735,11 +1779,13 @@ export async function measureCompositionCues(
     // Forward slashes: valid absolute path on Windows, shorter in JSON envelopes.
     result.file = coordsCachePath(projectDir, m.cacheKey).replace(/\\/g, "/");
     if (unmappableFrames > 0) {
-      warnings.push(
-        DIAGNOSTICS.COORDS_PAGE_ISSUES(
-          m.cue.id,
-          `${unmappableFrames} frame box(es) used static placement (non-finite enveloped value)`
-        )
+      const staticDetail = `${unmappableFrames} frame box(es) used static placement (non-finite enveloped value)`;
+      pushRepeatDiagnostic(
+        warnings,
+        `CUTHOL-G419:${staticDetail}`,
+        { subjectId: m.cue.id },
+        (e) => DIAGNOSTICS.COORDS_PAGE_ISSUES(e.subjectId, staticDetail),
+        (es) => DIAGNOSTICS.COORDS_PAGE_ISSUES_MANY(staticDetail, es.map((e) => e.subjectId))
       );
     }
     cues.push(result);

@@ -107,7 +107,7 @@ test("relay: a changed build restarts from disk, replays initialize, announces t
     relay.forward(JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: {} }), 7);
     const first = await waitFor(out, (m) => m.id === 7);
     const text: string = first.result.content[0].text;
-    assert.match(text, /^\[CUTHOL-G635\] Cuthol was rebuilt on disk while this MCP session ran \(1\.0\.0 -> 1\.1\.0\)/);
+    assert.match(text, /^\[CUTHOL-G635\] Cuthol was rebuilt on disk while this MCP session ran \(server build 1\.0\.0 -> 1\.1\.0\)/);
     assert.match(text, /from new build tools\/call$/);
 
     relay.forward(JSON.stringify({ jsonrpc: "2.0", id: 8, method: "tools/call", params: {} }), 8);
@@ -161,7 +161,7 @@ test("relay: a second rebuild replaces the restarted server instead of nesting",
     assert.equal(out.filter((m) => m.method === "notifications/tools/list_changed").length, 2);
     relay.forward(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: {} }), 2);
     const answer = await waitFor(out, (m) => m.id === 2);
-    assert.match(answer.result.content[0].text, /^\[CUTHOL-G635\] .*\(1\.0\.0 \(build .*\) -> 1\.0\.0 \(build .*\)\)/);
+    assert.match(answer.result.content[0].text, /^\[CUTHOL-G635\] .*\(server build 1\.0\.0 \(build .*\) -> 1\.0\.0 \(build .*\)\)/);
     // Exactly one answer per request (the replaced server's late output never reaches the client).
     assert.equal(out.filter((m) => m.id === 2).length, 1);
   } finally {

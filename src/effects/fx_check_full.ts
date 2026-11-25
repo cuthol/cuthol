@@ -334,7 +334,7 @@ export function runFxCheckFull(req: FxFullRequest): FxFullResult {
     findings.push({
       severity: "WARN",
       code: "CUTHOL-G349",
-      message: `fx full check for kind '${kind}': manifest cost_class '${req.spec.cost_class}' contradicts the measured '${measured}'.`,
+      message: `fx full check for kind '${kind}' in this run: manifest cost_class '${req.spec.cost_class}' contradicts the measured '${measured}' (1080p per-frame probe); rule: 'cuthol explain G349'.`,
     });
     rows.push({ variant: "-", check: "cost_class", ok: true, detail: `${costMs.toFixed(2)} ms/frame -> ${measured} (manifest: ${req.spec.cost_class}, WARN)` });
   } else {

@@ -11,7 +11,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
-import { ACTION_SPECS, buildCliArgv, findActionSpec, TOOL_SPECS, validateActionArgs } from "../mcp/catalog.js";
+import { ACTION_SPECS, buildCliArgv, findActionSpec, mcpActionSpecs, TOOL_SPECS, validateActionArgs } from "../mcp/catalog.js";
 import { CutholMcpServer, GUIDE_TOPICS, SERVER_INSTRUCTIONS } from "../mcp/server.js";
 import { resolveGuideTopic } from "../core/skills_install.js";
 
@@ -51,7 +51,7 @@ function safeRm(dir: string): void {
 }
 
 test("1. Catalog: every action maps to a CLI command or an MCP-only handler, schemas are closed", () => {
-  for (const spec of ACTION_SPECS) {
+  for (const spec of mcpActionSpecs()) {
     assert.ok(spec.mcpOnly || spec.argv.length > 0, `${spec.tool}.${spec.action} needs argv or mcpOnly`);
     assert.ok(TOOL_SPECS.some((t) => t.name === spec.tool), `unknown tool ${spec.tool}`);
   }

@@ -22,10 +22,13 @@ You can drive it two ways. They are the same commands:
 | `spine(action="trim", clip="sp_01", out="4s")` | `cuthol spine trim --clip sp_01 --out 4s --dir <project>` |
 | `lane(action="add_cue", lane="ln_titles", text="Hi")` | `cuthol lane add-cue --lane ln_titles --text "Hi"` |
 | `brief(lens="flow")` | `cuthol brief --lens flow` |
-| `color(action="set", clip="sp_01", patch={...})` | `cuthol color set --clip sp_01 --patch '{...}'` |
+| `color(action="set", item="sp_01", patch={...})` | `cuthol color set --item sp_01 --patch '{...}'` |
+| `library(action="ingest", files=["a.mp4"])` | `cuthol library ingest a.mp4` (files are positional) |
 
 MCP names use `_` where the CLI uses `-` (`add_cue` ↔ `add-cue`,
-`comp_dir` ↔ `--comp-dir`). Error suggestions match your interface. Requirements: Node.js ≥ 22.5, `ffmpeg`/`ffprobe` 8.x (`cuthol setup --ffmpeg --apply` installs a pinned 8.1). If a tool seems missing (no ffmpeg, no browser, no speech key), run `cuthol doctor` first: one line per check, each with its fix.
+`comp_dir` ↔ `--comp-dir`); list parameters such as `files` become
+positional arguments or comma lists on the CLI — `cuthol <group> <action>
+--help` prints the exact flags. Error suggestions match your interface. Requirements: Node.js ≥ 22.5, `ffmpeg`/`ffprobe` 8.x (`cuthol setup --ffmpeg --apply` installs a pinned 8.1). If a tool seems missing (no ffmpeg, no browser, no speech key), run `cuthol doctor` first: one line per check, each with its fix.
 
 ## MCP or CLI
 
@@ -33,8 +36,10 @@ MCP names use `_` where the CLI uses `-` (`add_cue` ↔ `add-cue`,
   relative paths against the project folder, and returns monitor images inline.
   Use it for interactive work: inspecting, checking frames, verifying, mixing.
 - The CLI resolves relative input file paths against the current working
-  directory; `--out` (and `--png`) resolve against the project folder, on the
-  CLI and over MCP. Monitor calls print PNG paths (open them with your image
+  directory; `--out` (and `--png`, and the file `cue export --file` writes)
+  resolve against the project folder, on the CLI and over MCP; `cue
+  apply|plan|diff --file` look in the working directory first, then the
+  project folder. Monitor calls print PNG paths (open them with your image
   reader).
   It suits bulk work: setup scripts, shell loops, cue sheets. Pass `--compact`
   for the same short text MCP returns (default CLI output is JSON).
@@ -42,6 +47,18 @@ MCP names use `_` where the CLI uses `-` (`add_cue` ↔ `add-cue`,
   the client session restarts; until then use the CLI (full tool reference:
   `references/mcp.md`). API keys live in the environment or a project `.env`
   (found up to 4 folders above the project).
+
+## Finding an answer (never read Cuthol's source)
+
+| You want to know | Ask Cuthol |
+|---|---|
+| The flags, defaults and accepted values of a command | `cuthol <group> <action> --help` (`cuthol <group> --help` lists the actions) |
+| What a `CUTHOL-Gxxx` means, what it measured, its threshold, the fix | the message itself, then `cuthol explain G401` (MCP: `guide(action="explain", query="G401")`) |
+| How a behaviour works | `cuthol explain <topic>`: `transition-duration`, `audio-gain-envelopes`, `cue-sheet-fields`, `caption-styles`, `render-audio-rate`, `output-paths` |
+| Which category skill covers a task | the table at the end of this file |
+| What is in the project now | `brief(lens="overview")`, `library.query` |
+
+If none of these answers it, say so in your result instead of guessing.
 
 ## The model in one minute
 

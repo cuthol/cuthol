@@ -346,9 +346,21 @@ export function checkRenderedColor(opts: { workspaceDir: string; renderedFile: s
     return [];
   }
   const results: RenderedColorItemResult[] = [];
+  // [w1b G775–G777] items excluded from the render comparison and why.
   const skipped: string[] = [];
-  const noteSkip = (id: string): void => {
-    if (!skipped.includes(id)) skipped.push(id);
+  const noteSkip = (id: string, why?: string): void => {
+    const entry = why ? `${id} (${why})` : id;
+    if (!skipped.includes(entry)) skipped.push(entry);
+  };
+  const fxOf = (item: ColorItemRef): number => {
+    if (item.track === "spine") {
+      return seq.spine.clips.find((c) => c.id === item.id)?.fx?.length ?? 0;
+    }
+    for (const lane of seq.lanes) {
+      const cue = lane.cues.find((q) => q.id === item.id);
+      if (cue) return cue.fx?.length ?? 0;
+    }
+    return 0;
   };
   interface PlannedItem {
     item: ColorItemRef;
@@ -371,11 +383,22 @@ export function checkRenderedColor(opts: { workspaceDir: string; renderedFile: s
           continue;
         }
       }
+      // Clips with pixel fx or motion/placement layers are not compared: the
+      // render-free colour prediction cannot replicate them, so comparing
+      // whenever the frame size matches fires G512 by construction.
+      if (fxOf(item) > 0) {
+        noteSkip(item.id, "pixel fx changes the picture after grading");
+        continue;
+      }
+      if (geometryModeOf(seq, item, span.envelopes) !== "default-cover") {
+        noteSkip(item.id, "custom motion/placement moves the compared pixels");
+        continue;
+      }
       const instants = pickInstants(seq, opts.workspaceDir, item, span.startMs, span.durationMs, span.envelopes).filter(
         (p) => !p.identity
       );
       if (instants.length === 0) {
-        noteSkip(item.id);
+        noteSkip(item.id, "no comparable instants");
         continue;
       }
       planned.push({
@@ -387,7 +410,7 @@ export function checkRenderedColor(opts: { workspaceDir: string; renderedFile: s
     }
     if (planned.length === 0) {
       if (skipped.length === 0) return [];
-      return [DIAGNOSTICS.COLOR_RENDER_GRADE_OK(`no comparable instants; skipped ${skipped.join(", ")} (geometry)`)];
+      return [DIAGNOSTICS.COLOR_RENDER_GRADE_OK(`no comparable items; skipped ${skipped.join(", ")}`)];
     }
     // Every instant on both sides decodes in one parallel batch (sync API).
     const jobs: CheckFrameJob[] = [];
@@ -456,7 +479,7 @@ export function checkRenderedColor(opts: { workspaceDir: string; renderedFile: s
         }
       }
       if (used === 0) {
-        noteSkip(pl.item.id);
+        noteSkip(pl.item.id, "no comparable instants");
         continue;
       }
       results.push({ itemId: pl.item.id, meanDe: sum / used, worstAtMs: worstAt, worstDe, instants: used });
@@ -464,12 +487,19 @@ export function checkRenderedColor(opts: { workspaceDir: string; renderedFile: s
   } catch {
     return [];
   }
-  const skipNote = skipped.length > 0 ? `; skipped ${skipped.join(", ")} (geometry)` : "";
+  const skipNote = skipped.length > 0 ? `; skipped ${skipped.join(", ")}` : "";
   const bad = results.filter((r) => r.meanDe > MISMATCH_MEAN_DE);
-  if (bad.length > 0) {
-    const warns = bad.map((r) =>
-      DIAGNOSTICS.COLOR_RENDER_GRADE_MISMATCH(r.itemId, r.worstAtMs, Math.round(r.meanDe * 100) / 100)
-    );
+  if (bad.length === 1) {
+    const r = bad[0];
+    const warns = [DIAGNOSTICS.COLOR_RENDER_GRADE_MISMATCH(r.itemId, r.worstAtMs, Math.round(r.meanDe * 100) / 100)];
+    if (skipNote) warns.push(DIAGNOSTICS.COLOR_RENDER_GRADE_OK(`no comparable instants${skipNote}`));
+    return warns;
+  }
+  if (bad.length > 1) {
+    const items = [...bad]
+      .sort((a, b) => a.itemId.localeCompare(b.itemId))
+      .map((r) => ({ id: r.itemId, atMs: r.worstAtMs, meanDe: Math.round(r.meanDe * 100) / 100 }));
+    const warns = [DIAGNOSTICS.COLOR_RENDER_GRADE_MISMATCH_MANY(items)];
     if (skipNote) warns.push(DIAGNOSTICS.COLOR_RENDER_GRADE_OK(`no comparable instants${skipNote}`));
     return warns;
   }

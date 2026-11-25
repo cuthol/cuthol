@@ -141,7 +141,13 @@ export function runLibraryCommand(ctx: CliCommandContext): CliCommandResult {
     });
     const pageWarning =
       qRes.truncated_by === "max_tokens"
-        ? DIAGNOSTICS.QUERY_PAGE_TOKEN_TRUNCATED(qRes.returned, qRes.next_cursor ?? "")
+        ? DIAGNOSTICS.QUERY_PAGE_TOKEN_TRUNCATED(
+            qRes.returned,
+            qRes.matched,
+            qRes.tokens_est,
+            numFlag(flags, "max-tokens") ?? 2000,
+            qRes.next_cursor ?? ""
+          )
         : null;
     emitEnvelopeJson(workspaceDir, "library.query", {
       action: "library.query",

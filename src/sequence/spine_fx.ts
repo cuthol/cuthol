@@ -143,7 +143,7 @@ export function probeEntryOrThrow(
       projectDir: workspaceDir,
     });
     const ferr = frozen.find((f) => f.severity === "ERROR");
-    if (ferr) throw new CutholError(DIAGNOSTICS.FX_PARAM_FROZEN(filterName));
+    if (ferr) throw new CutholError(DIAGNOSTICS.FX_PARAM_FROZEN(filterName, targetId));
   }
 }
 

@@ -27,7 +27,7 @@ Notation: `tool.action(args)` is an MCP call; the CLI form is
   scales follow the new stage fit) in one journaled step (undo restores).
   `workspace.backdrop(color="#RRGGBB")` sets the stage colour showing
   wherever nothing covers it (default `#0D0F12`); journaled.
-- `library.ingest(files=[...], handle?)` probes and hashes files → `vid_XX`,
+- `library.ingest(files=[...], handle?)` (CLI: `cuthol library ingest <files...>`) probes and hashes files → `vid_XX`,
   `aud_XX`, `img_XX` (cached; re-ingesting is free). Variable-frame-rate
   sources are recorded and reported as `INFO [CUTHOL-G207]` during `verify`.
 - Still images have no length of their own: hold one for any duration
@@ -57,7 +57,7 @@ the media are rejected (G202).
 | `append(asset, in?, out?)` | Add a source range at the end. `in`/`out` are **source** times. |
 | `trim(clip, in?, out?)` | New source in/out. Later clips ripple. |
 | `split(clip, at=[...], sequence_time?)` | Split at clip-local times (or timeline times with `sequence_time=true`). Every point must fall strictly inside the clip, else nothing is written (G383 names the clip-local and sequence ranges). Envelopes and anchored cues carry over to the right pieces. |
-| `excise(clip, ranges, coord?)` | Remove `ranges=["a..b", …]` (**comma-separated**) and close the gaps. `coord`: `clip_local` (default), `source`, `sequence`. |
+| `excise(clip, ranges, coord?, snap?)` | Remove `ranges=["a..b", …]` (**comma-separated**) and close the gaps. `coord`: `clip_local` (default), `source`, `sequence`. `snap=true` moves each range edge (within ±100 ms) to the quietest nearby point so the join does not cut into a sound; leave it off to cut exactly where you said. |
 | `remove(clips, cascade_cues?)` | Delete clips; anchored cues go too, unless `cascade_cues=false` (they detach, keep absolute time). |
 | `reorder(clip, before\|after\|index)` | Move a clip. |
 | `speed(clip, rate?, ramp?, preserve_pitch?)` | Constant `rate` (0.1..16) or `ramp` (`["0s:1","2s:4"]`, source offsets; `["none"]` removes it); never both. Pitch is preserved by default. Ramps outside 0.5..2.0 warn G410. |

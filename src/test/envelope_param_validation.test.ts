@@ -81,7 +81,10 @@ test("spine envelope rejects unknown params, accepts real ones", { timeout: 300_
     const env = parseEnvelope(bad.stdout, bad.stderr);
     const diag = env.diagnostic as { code?: string; formatted?: string };
     assert.equal(diag.code, "CUTHOL-G140");
-    assert.match(diag.formatted ?? "", /ignores it/);
+    const text = diag.formatted ?? "";
+    assert.match(text, new RegExp(`'${param}'`));
+    assert.match(text, /no effect/);
+    assert.match(text, /placement\.scale_x/);
   }
 
   const sug = runCli([

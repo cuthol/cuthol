@@ -1,0 +1,21 @@
+{
+  "commands": [
+    "color ...",
+    "guide",
+    "guide --topic extensions",
+    "help",
+    "library beats --asset ${assetHandle}",
+    "live stop --dir \"${dir}\"",
+    "live stop --dir <project>",
+    "spine",
+    "spine envelope --item ${ownerId} --param <name> --points <...>",
+    "spine envelope --item ${ownerId} --param fx.${fxId}.<param> --points <...>",
+    "spine envelope --item ${ownerId} --param fx.<fx-id>.<param> --points <...>",
+    "spine envelope --item ${ownerId} ...",
+    "spine fx",
+    "spine fx --clip ${item}",
+    "spine fx set --item ${ownerId} --fx ${fxId} --param name=value",
+    "spine show",
+    "spine transition --clip ${clipId} --kind ${kind} --param name=value"
+  ]
+}

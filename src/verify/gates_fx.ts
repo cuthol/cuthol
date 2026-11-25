@@ -4,7 +4,7 @@
 // version/hash drift) is advisory and never blocks a commit. Clips without fx entries or fx envelopes are
 // skipped untouched, so fx-less projects verify byte-identically to before.
 import fs from "node:fs";
-import { CutholDiagnostic, CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
+import { CutholDiagnostic, CutholError, DIAGNOSTICS, pushRepeatDiagnostic } from "../core/diagnostics.js";
 import type { CutholSequence, ExtensionEffectRef } from "../core/schema.js";
 import type { WorkspacePaths } from "../core/workspace.js";
 import type { VideoGraphCompileContext } from "../compositor/compiler.js";
@@ -142,10 +142,19 @@ export function verifySpineFx(
             chainWithEnvelope: chain, frameIndex: 65, envelopeChangesValue: true,
             projectDir: rootDirEarly,
           })) {
-            diagnostics.push(
-              f.severity === "ERROR"
-                ? DIAGNOSTICS.FX_PARAM_FROZEN(f.filter ?? filterName)
-                : DIAGNOSTICS.FX_CHECK_PROBE_FAILED(f.filter ?? filterName, f.detail ?? "frame render unavailable")
+            if (f.severity !== "ERROR") {
+              diagnostics.push(
+                DIAGNOSTICS.FX_CHECK_PROBE_FAILED(f.filter ?? filterName, f.detail ?? "frame render unavailable")
+              );
+              continue;
+            }
+            const frozenFilter = f.filter ?? filterName;
+            pushRepeatDiagnostic(
+              diagnostics,
+              `CUTHOL-G324:${frozenFilter}`,
+              { subjectId: owner.id },
+              (e) => DIAGNOSTICS.FX_PARAM_FROZEN(frozenFilter, e.subjectId),
+              (es) => DIAGNOSTICS.FX_PARAM_FROZEN_MANY(frozenFilter, es.map((e) => e.subjectId))
             );
           }
         }

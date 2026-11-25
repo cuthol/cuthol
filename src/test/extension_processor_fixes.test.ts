@@ -371,12 +371,12 @@ test("shortened video_filter warns when audio duration drifts, including a cache
     assert.equal(diag.subject_id, first.output_asset.handle);
 
     const match = diag.what.match(
-      /video stream is (\d+) ms and audio is (\d+) ms; the gap is larger than one frame \((\d+) ms\)/
+      /video stream is (\d+) ms and audio is (\d+) ms; the gap of (\d+) ms is larger than one frame \((\d+) ms\)/
     );
     assert.ok(match, diag.what);
     const videoMs = Number(match[1]);
     const audioMs = Number(match[2]);
-    const frameMs = Number(match[3]);
+    const frameMs = Number(match[4]);
     assert.ok(Math.abs(audioMs - videoMs) > frameMs);
     assert.ok(frameMs >= 1 && frameMs <= 40);
 

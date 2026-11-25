@@ -303,7 +303,7 @@ test("cli silent argument errors", { timeout: 300_000 }, async (t) => {
     assert.match(blob, /CUTHOL-G115/);
     assert.match(blob, /token/);
     assert.match(blob, new RegExp(String(env.returned)));
-    assert.match(blob, new RegExp(`next_cursor=${env.next_cursor}`));
+    assert.match(blob, new RegExp(`--cursor ${env.next_cursor}`));
 
     const compact = formatEnvelopeCompact({
       envelope: env,
@@ -330,6 +330,6 @@ test("cli silent argument errors", { timeout: 300_000 }, async (t) => {
     ]);
     assert.equal(text.status, 0, text.stderr || text.stdout);
     assert.match(text.stdout, /WARN \[CUTHOL-G115\]/);
-    assert.match(text.stdout, /next_cursor=/);
+    assert.match(text.stdout, /--cursor 1/);
   });
 });

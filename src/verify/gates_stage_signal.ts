@@ -1,7 +1,7 @@
 // Gates 4-5 (G4_STAGE, G5_SIGNAL) of the 5-Gate sequence verification engine.
 import fs from "node:fs";
 import path from "node:path";
-import { CutholDiagnostic, CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
+import { CutholDiagnostic, CutholError, DIAGNOSTICS, pushRepeatDiagnostic } from "../core/diagnostics.js";
 import { CutholSequence, LaneCue, LibraryItem } from "../core/schema.js";
 import { isVerticalStage, OPEN_STANDARDS } from "../core/standards.js";
 import { resolveCueStartMs } from "../core/timeline.js";
@@ -273,21 +273,41 @@ export function verifyG4Stage(
       // Check Safe Zones & Reading Speed on Title / Caption cues
       if (cue.kind === "title" || cue.kind === "caption" || cue.typography) {
         const safeBox = measureCueSafeZoneBox(seq.stage, cue, assetAr, paths?.rootDir);
+        // One cause (shared caption placement) fires for many cues: aggregate
+        // repeats into one G401 line per (lane, edge) — count + id range + worst.
+        const pushSafeZone = (edge: string, overflowPx: number, boxEdgePx: number, safeEdgePx: number) => {
+          pushRepeatDiagnostic(
+            diagnostics,
+            `G401@${lane.id}@${edge}`,
+            { subjectId: cue.id, detail: `${Math.round(overflowPx)}@${Math.round(boxEdgePx)}` },
+            (entry) =>
+              DIAGNOSTICS.SAFE_ZONE_VIOLATION(
+                entry.subjectId,
+                edge,
+                Number((entry.detail ?? "").split("@")[0])
+              ),
+            (entries) =>
+              DIAGNOSTICS.SAFE_ZONE_VIOLATION_MANY(
+                lane.id,
+                edge,
+                entries.map((e) => {
+                  const [overflow, boxEdge] = (e.detail ?? "").split("@").map(Number);
+                  return { cueId: e.subjectId, overflowPx: overflow, boxEdgePx: boxEdge, safeEdgePx };
+                })
+              )
+          );
+        };
         if (safeBox.left < safeLeft) {
-          diagnostics.push(DIAGNOSTICS.SAFE_ZONE_VIOLATION(cue.id, "left", safeLeft - safeBox.left));
+          pushSafeZone("left", safeLeft - safeBox.left, safeBox.left, safeLeft);
         }
         if (safeBox.right > safeRight) {
-          diagnostics.push(
-            DIAGNOSTICS.SAFE_ZONE_VIOLATION(cue.id, "right", safeBox.right - safeRight)
-          );
+          pushSafeZone("right", safeBox.right - safeRight, safeBox.right, safeRight);
         }
         if (safeBox.top < safeTop) {
-          diagnostics.push(DIAGNOSTICS.SAFE_ZONE_VIOLATION(cue.id, "top", safeTop - safeBox.top));
+          pushSafeZone("top", safeTop - safeBox.top, safeBox.top, safeTop);
         }
         if (safeBox.bottom > safeBottom) {
-          diagnostics.push(
-            DIAGNOSTICS.SAFE_ZONE_VIOLATION(cue.id, "bottom", safeBox.bottom - safeBottom)
-          );
+          pushSafeZone("bottom", safeBox.bottom - safeBottom, safeBox.bottom, safeBottom);
         }
 
         if (cue.kind === "caption" && cue.typography && cue.duration_ms > 0) {
@@ -309,8 +329,23 @@ export function verifyG4Stage(
             ? OPEN_STANDARDS.CAPTIONS.TURKISH_MAX_CPS
             : OPEN_STANDARDS.CAPTIONS.DEFAULT_MAX_CPS;
           if (cps > maxCps) {
-            diagnostics.push(
-              DIAGNOSTICS.CAPTION_READING_SPEED_HIGH(cue.id, cps, maxCps)
+            // One cause (dense caption track) fires for many cues: aggregate
+            // repeats into one G402 line per lane — count + id range + worst.
+            pushRepeatDiagnostic(
+              diagnostics,
+              `G402@${lane.id}`,
+              { subjectId: cue.id, detail: cps.toFixed(1) },
+              (entry) =>
+                DIAGNOSTICS.CAPTION_READING_SPEED_HIGH(
+                  entry.subjectId,
+                  Number(entry.detail ?? "0"),
+                  maxCps
+                ),
+              (entries) =>
+                DIAGNOSTICS.CAPTION_READING_SPEED_HIGH_MANY(
+                  lane.id,
+                  entries.map((e) => ({ cueId: e.subjectId, cps: Number(e.detail), maxCps }))
+                )
             );
           }
         }

@@ -451,6 +451,12 @@ export class CutholMcpServer {
       );
     }
 
+    if (spec.tool === "guide" && spec.action === "explain") {
+      const { runExplain } = await import("../explain/explain.js");
+      const q = String(values.query ?? "");
+      const r = runExplain(q);
+      return this.recordOutcome(signature, this.textResult(r.text, false));
+    }
     if (spec.tool === "guide") {
       const hintDir =
         typeof args.dir === "string" && args.dir.trim()
@@ -881,7 +887,7 @@ export class CutholMcpServer {
 export const CUTHOL_MCP_TOOLS = TOOL_SPECS.map((t) => buildToolDefinition(t));
 
 /** All catalogued actions (for documentation and tests). */
-export const CUTHOL_MCP_ACTIONS = ACTION_SPECS;
+export const CUTHOL_MCP_ACTIONS = ACTION_SPECS.filter((a) => !a.cliOnly);
 
 /**
  * The one-line skills hint for this session, or null when nothing should be

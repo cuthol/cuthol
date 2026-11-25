@@ -5,6 +5,7 @@ import path from "node:path";
 import { compileSequenceAudioPlan } from "../compositor/compile_audio.js";
 import {
   createSubprocessFailureDiagnostic,
+  CutholDiagnostic,
   CutholError,
   DIAGNOSTICS,
   estimateCommandLineLength,
@@ -728,6 +729,22 @@ function roundRate(matched: number, expected: number, heard: number): number {
 }
 
 /**
+ * Shared join-edge rule: at or above JOIN_EDGE_LOUD_SHARE_WARN_THRESHOLD the
+ * summary is the G741 WARN, below it the G740 INFO. `verify` and
+ * `speech verify-cleanup` both use this so they can never disagree.
+ */
+export function pickJoinEdgeDiagnostic(
+  summaryLine: string,
+  loudShare: number,
+  totalJoins: number
+): CutholDiagnostic {
+  if (totalJoins > 0 && loudShare >= JOIN_EDGE_LOUD_SHARE_WARN_THRESHOLD) {
+    return DIAGNOSTICS.JOIN_EDGE_LOUD_SHARE_HIGH(summaryLine);
+  }
+  return DIAGNOSTICS.JOIN_EDGE_SUMMARY(summaryLine);
+}
+
+/**
  * Acoustic-only join summary for `speech verify-cleanup`: no transcription,
  * just the kept-edge loudness of every excise join on the spine.
  */
@@ -753,11 +770,12 @@ export function buildJoinEdgeSummary(
     clips: sequence.spine.clips,
     profileByHandle,
   });
-  const abnormal =
-    summary.total_joins > 0 && summary.loud_share >= JOIN_EDGE_LOUD_SHARE_WARN_THRESHOLD;
-  const diagnostic = abnormal
-    ? DIAGNOSTICS.JOIN_EDGE_LOUD_SHARE_HIGH(summary.summary_line)
-    : DIAGNOSTICS.JOIN_EDGE_SUMMARY(summary.summary_line);
+  const diagnostic = pickJoinEdgeDiagnostic(
+    summary.summary_line,
+    summary.loud_share,
+    summary.total_joins
+  );
+  const abnormal = diagnostic.code === "CUTHOL-G741";
   return {
     total_joins: summary.total_joins,
     loud_joins: summary.loud_joins,

@@ -124,7 +124,13 @@ function collectDiagnostics(env: Record<string, unknown>): DiagnosticLike[] {
 
 /** CLI-style suggestions ("cuthol brief --lens overview") translated to tool-call wording. */
 export function translateCliHint(text: string): string {
-  return text.replace(/'?cuthol [^'`\n]*'?/g, translateOneCliCommand);
+  const quoted = text.replace(/'cuthol [^'\n]*?'/g, translateOneCliCommand);
+  return quoted.replace(/(?<![\w'])cuthol [^'"`\n]*?(?=[.;,](?:[\s'"`]|$)|\r|\n| \||$|\))/g, (m) => {
+    const trimmed = m.replace(/\s+$/, "");
+    if (!trimmed || trimmed === "cuthol") return m;
+    const translated = translateOneCliCommand(trimmed);
+    return translated + m.slice(trimmed.length);
+  });
 }
 
 /** Splits a CLI fragment on whitespace, keeping `"quoted values"` together (quotes stripped). */
@@ -980,6 +986,12 @@ export interface FormatEnvelopeCompactOptions {
   values?: Record<string, unknown>;
   revisionBefore?: number | null;
   exitCode?: number | null;
+  /**
+   * Who reads the text. `"mcp"` (default) translates `'cuthol …'` suggestions
+   * into tool-call wording; `"cli"` keeps the CLI form verbatim so a CLI user
+   * always sees a runnable command.
+   */
+  hintForm?: "mcp" | "cli";
 }
 
 /**
@@ -998,6 +1010,8 @@ export function formatEnvelopeCompact(options: FormatEnvelopeCompactOptions): {
   const values = options.values ?? {};
   const revisionBefore = options.revisionBefore ?? null;
   const exitCode = options.exitCode ?? 0;
+  // CLI readers get suggestions verbatim; MCP readers get the translated tool-call form.
+  const hint = (s: string): string => (options.hintForm === "cli" ? s : translateCliHint(s));
 
   const label = spec.action ? `${spec.tool}.${spec.action}` : spec.tool;
   const ok = env.ok !== false && exitCode === 0;
@@ -1032,11 +1046,11 @@ export function formatEnvelopeCompact(options: FormatEnvelopeCompactOptions): {
       return `${head} … [truncated ${text.length - head.length} chars; full text in the JSON result]`;
     };
     if (diag) {
-      lines.push(`[${diag.code}] ${shortErrorText(diag.what ?? "")}${diag.suggestion ? ` | Suggestion: ${translateCliHint(diag.suggestion)}` : ""}`);
+      lines.push(`[${diag.code}] ${shortErrorText(diag.what ?? "")}${diag.suggestion ? ` | Suggestion: ${hint(diag.suggestion)}` : ""}`);
     } else if (typeof err === "string") {
-      lines.push(translateCliHint(shortErrorText(err)));
+      lines.push(hint(shortErrorText(err)));
     } else if (err) {
-      lines.push(`[${err.code ?? "ERROR"}] ${shortErrorText(err.message ?? "")}${err.suggestion ? ` | Suggestion: ${translateCliHint(err.suggestion)}` : ""}`);
+      lines.push(`[${err.code ?? "ERROR"}] ${shortErrorText(err.message ?? "")}${err.suggestion ? ` | Suggestion: ${hint(err.suggestion)}` : ""}`);
     } else if (Array.isArray(env.contract_findings) && env.contract_findings.length > 0) {
       for (const cf of (env.contract_findings as string[]).slice(0, 6)) {
         lines.push(`[CUTHOL-G105] ${cf}`);
@@ -1107,11 +1121,11 @@ export function formatEnvelopeCompact(options: FormatEnvelopeCompactOptions): {
       `Loudness: ${beforeLufs}${env.achieved_lufs} LUFS (target ${env.target_lufs} LUFS, true_peak ${env.achieved_true_peak_dbtp ?? "?"} / ${env.true_peak_dbtp ?? -1} dBTP${masterGain}) · target_reached=${reached}${skippedMuted}`
     );
     if (!reached && typeof env.warning === "string") {
-      lines.push(`WARN [TARGET_NOT_REACHED] ${translateCliHint(env.warning)}`);
+      lines.push(`WARN [TARGET_NOT_REACHED] ${hint(env.warning)}`);
     }
   }
   if (spec.tool === "mix" && spec.action === "beat_align" && typeof env.duration_warning === "string") {
-    lines.push(`WARN [DURATION_CHANGED] ${translateCliHint(env.duration_warning)}`);
+    lines.push(`WARN [DURATION_CHANGED] ${hint(env.duration_warning)}`);
   }
 
   const verification = env.verification as {
@@ -1134,7 +1148,7 @@ export function formatEnvelopeCompact(options: FormatEnvelopeCompactOptions): {
     const sevLabel =
       d.severity === "ERROR" ? "ERROR" : d.severity === "INFO" ? "INFO" : "WARN";
     lines.push(
-      `${sevLabel} [${d.code}] ${d.what}${d.suggestion ? ` | Suggestion: ${translateCliHint(d.suggestion)}` : ""}`
+      `${sevLabel} [${d.code}] ${d.what === undefined ? d.what : hint(d.what)}${d.suggestion ? ` | Suggestion: ${hint(d.suggestion)}` : ""}`
     );
   }
   if (diags.length > 12) lines.push(`… ${diags.length - 12} more diagnostic(s); run verify.`);

@@ -44,6 +44,40 @@ import {
   resolveShaderCacheCapGb,
 } from "./pre_pass.js";
 
+/**
+ * Empty-composition render diagnostics (G720, aggregated): a transparent
+ * overlay capture that drew nothing writes assets/cuthol-bbox.json with
+ * empty:true. One line per cue, or one line for 2+ cues with every id in
+ * `subject_ids`.
+ */
+export function collectEmptyRenderDiagnostics(
+  sequence: CutholSequence,
+  rootDir: string
+): CutholDiagnostic[] {
+  const seenEmpty = new Set<string>();
+  const ids: string[] = [];
+  for (const lane of sequence.lanes) {
+    if (lane.muted) continue;
+    for (const cue of lane.cues) {
+      if (cue.kind !== "composition" || !cue.composition || seenEmpty.has(cue.id)) continue;
+      seenEmpty.add(cue.id);
+      try {
+        const dir = cue.composition.composition_dir;
+        const abs = path.isAbsolute(dir) ? dir : path.resolve(rootDir, dir);
+        const sidecar = path.join(abs, "assets/cuthol-bbox.json");
+        if (!fs.existsSync(sidecar)) continue;
+        const raw = JSON.parse(fs.readFileSync(sidecar, "utf8")) as { empty?: boolean };
+        if (raw?.empty === true) ids.push(cue.id);
+      } catch {
+        // unreadable sidecar: no warning
+      }
+    }
+  }
+  if (ids.length === 1) return [DIAGNOSTICS.EMPTY_COMPOSITION_RENDER(ids[0] as string)];
+  if (ids.length > 1) return [DIAGNOSTICS.EMPTY_COMPOSITION_RENDER_MANY(ids)];
+  return [];
+}
+
 /** Default render output folder: `render.output_dir` (project scope) or `<root>/output`. */
 export function resolveRenderOutputDir(rootDir: string): string {
   try {
@@ -393,28 +427,9 @@ function runPostRenderChecks(params: {
     verification.diagnostics.push(edgeStrip);
     verification.warning_count += 1;
   }
-  // Empty-composition WARN (one per cue): a transparent overlay capture that
-  // drew nothing writes assets/cuthol-bbox.json with empty:true.
-  const seenEmpty = new Set<string>();
-  for (const lane of sequence.lanes) {
-    if (lane.muted) continue;
-    for (const cue of lane.cues) {
-      if (cue.kind !== "composition" || !cue.composition || seenEmpty.has(cue.id)) continue;
-      seenEmpty.add(cue.id);
-      try {
-        const dir = cue.composition.composition_dir;
-        const abs = path.isAbsolute(dir) ? dir : path.resolve(paths.rootDir, dir);
-        const sidecar = path.join(abs, "assets/cuthol-bbox.json");
-        if (!fs.existsSync(sidecar)) continue;
-        const raw = JSON.parse(fs.readFileSync(sidecar, "utf8")) as { empty?: boolean };
-        if (raw?.empty === true) {
-          verification.diagnostics.push(DIAGNOSTICS.EMPTY_COMPOSITION_RENDER(cue.id));
-          verification.warning_count += 1;
-        }
-      } catch {
-        // unreadable sidecar: no warning
-      }
-    }
+  for (const diag of collectEmptyRenderDiagnostics(sequence, paths.rootDir)) {
+    verification.diagnostics.push(diag);
+    verification.warning_count += 1;
   }
   const tAudioHealth0 = Date.now();
   const audioHealth = scanRenderedMp4AudioHealth(resolvedOut, sequence, paths, {

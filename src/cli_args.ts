@@ -279,6 +279,78 @@ function levenshtein(a: string, b: string): number {
   return dp[m][n];
 }
 
+/** CLI flag name (without dashes) for a catalog param. */
+export function cliParamFlagName(prm: { flag?: string; name: string }): string {
+  return prm.flag ?? prm.name.replace(/_/g, "-");
+}
+
+/** Boolean-flag set for one catalog action: spec booleans plus global output flags. */
+export function specBooleanFlags(params: Array<{ flag?: string; name: string; type: string }>): Set<string> {
+  const out = new Set(["help", "json", "compact", "verbose"]);
+  for (const prm of params) {
+    if (prm.type === "boolean") out.add(cliParamFlagName(prm));
+  }
+  return out;
+}
+
+/** `spine fx try --at`: bare numbers stay seconds, time literals become seconds. */
+export function normalizeFxTryAt(raw: string): string {
+  return raw
+    .split(",")
+    .map((piece) => {
+      const s = piece.trim();
+      if (/^[+-]?(\d+(\.\d+)?)$/.test(s)) return s;
+      return String(parseTimeMs(s) / 1000);
+    })
+    .join(",");
+}
+
+const GLOBAL_HELP_FLAGS = ["dir", "json", "compact", "format", "verbose", "help"];
+
+/**
+ * Per-command unknown-flag message: names the command, says the flag is not
+ * accepted there, points at the closest accepted flag (edit distance) and the
+ * accepted list, or at `--help`. A flag matching a positional param name says
+ * the value is positional instead.
+ */
+export function describeUnknownFlag(
+  group: string,
+  action: string | undefined,
+  key: string,
+  params: Array<{ flag?: string; name: string; type: string; positional?: boolean }>,
+): string {
+  const label = `${group}${action ? ` ${action}` : ""}`;
+  const accepted: string[] = [];
+  for (const prm of params) {
+    if (prm.positional) continue;
+    const flag = cliParamFlagName(prm);
+    if (!accepted.includes(flag)) accepted.push(flag);
+  }
+  const positionalHit = params.find((prm) => prm.positional && (prm.name === key || cliParamFlagName(prm) === key));
+  const flagSuffix =
+    accepted.length <= 7
+      ? `(accepted flags: ${[...accepted.map((f) => `--${f}`), "--dir"].join(", ")})`
+      : `(run \`cuthol ${label} --help\`)`;
+  if (positionalHit) {
+    const plural = positionalHit.type === "string_list" ? "are" : "is";
+    const mark = positionalHit.type === "string_list" ? "..." : "";
+    return (
+      `\`--${key}\` is not a flag of \`${label}\`; ${positionalHit.name} ${plural} positional: ` +
+      `\`cuthol ${label} <${positionalHit.name}${mark}>\` ${flagSuffix}`
+    );
+  }
+  let best = accepted[0] ?? "help";
+  let bestDist = Infinity;
+  for (const flag of accepted) {
+    const d = levenshtein(key, flag);
+    if (d < bestDist) {
+      bestDist = d;
+      best = flag;
+    }
+  }
+  return `\`--${key}\` is not a flag of \`${label}\`; did you mean \`--${best}\`? ${flagSuffix}`;
+}
+
 export function suggestFlagFix(unknownFlag: string, group: string, action?: string): string {
   // No `--no-*` negation pattern exists; disabling pitch preservation is an
   // explicit value, so point at it directly.
@@ -337,6 +409,11 @@ function setValueFlag(flags: Record<string, string | boolean>, key: string, valu
 }
 
 export function parseArgv(argv: string[]): ParsedArgs {
+  return parseArgvWithBooleans(argv, (key) => BOOLEAN_FLAGS.has(key));
+}
+
+/** Same lexer as `parseArgv` but the boolean/value decision comes from the caller. */
+export function parseArgvWithBooleans(argv: string[], isBoolean: (key: string) => boolean): ParsedArgs {
   const positionals: string[] = [];
   const flags: Record<string, string | boolean> = {};
 
@@ -350,7 +427,7 @@ export function parseArgv(argv: string[]): ParsedArgs {
       } else {
         const key = token.slice(2);
         const next = argv[i + 1];
-        if (BOOLEAN_FLAGS.has(key)) {
+        if (isBoolean(key)) {
           if (next === "true" || next === "false" || next === "1" || next === "0") {
             flags[key] = next;
             i++;

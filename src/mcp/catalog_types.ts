@@ -33,6 +33,8 @@ export interface ActionSpec {
   imageKeys?: string[];
   /** Handled inside the MCP server instead of the CLI. */
   mcpOnly?: boolean;
+  /** CLI-only: used for `cuthol ... --help` and per-command flag parsing, never served over MCP. */
+  cliOnly?: boolean;
   /** Plain-text (markdown) CLI output instead of a JSON envelope. */
   textOutput?: boolean;
 }

@@ -43,9 +43,23 @@ import { verifyTransitionBackstop } from "./gates_transitions.js";
 import { verifyColorGates } from "./gates_color.js";
 import { measureAssetAcousticWindows } from "../library/waveform.js";
 import { summarizeJoinEdgeLoudness } from "../speech/cleanup_acoustic.js";
+import { pickJoinEdgeDiagnostic } from "../speech/verify_cleanup.js";
 
 /**
- * Surfaces the cleanup join-edge summary as INFO on `verify` (best effort:
+ * The `verify` path for a join-edge summary: same shared rule as
+ * `speech verify-cleanup` (G741 at or above the WARN threshold, G740 below).
+ */
+export function pushJoinEdgeSummaryDiagnostic(
+  summary: { summary_line: string; loud_share: number; total_joins: number },
+  diagnostics: CutholDiagnostic[]
+): void {
+  diagnostics.push(
+    pickJoinEdgeDiagnostic(summary.summary_line, summary.loud_share, summary.total_joins)
+  );
+}
+
+/**
+ * Surfaces the cleanup join-edge summary on `verify` (best effort:
  * skipped when no excise joins exist or acoustic profiles are unmeasurable).
  */
 function pushJoinEdgeSummaryInfo(
@@ -83,7 +97,7 @@ function pushJoinEdgeSummaryInfo(
     }
     const summary = summarizeJoinEdgeLoudness({ clips: seq.spine.clips, profileByHandle });
     if (summary.total_joins === 0) return;
-    diagnostics.push(DIAGNOSTICS.JOIN_EDGE_SUMMARY(summary.summary_line));
+    pushJoinEdgeSummaryDiagnostic(summary, diagnostics);
   } catch {
     // Acoustic summary is informational only; never fail verification for it.
   }

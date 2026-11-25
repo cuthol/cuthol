@@ -19,13 +19,19 @@ import {
 } from "./mcp/server.js";
 import {
   assertNoExtraPositionals,
+  describeUnknownFlag,
+  normalizeFxTryAt,
   parseArgv,
+  parseArgvWithBooleans,
   boolFlag,
   KNOWN_CLI_FLAGS,
+  specBooleanFlags,
   suggestFlagFix,
   strFlag,
   numFlag,
 } from "./cli_args.js";
+import { findCliActionSpec } from "./mcp/catalog.js";
+import { runExplain } from "./explain/explain.js";
 import { printHelp, runGuideCommand } from "./cli_help.js";
 import { drainLiveInbox } from "./live/live_inbox.js";
 import {
@@ -71,8 +77,21 @@ import { runExportCommand } from "./cli_cmd_export.js";
  * `argv` = the arguments after the script path; `invokedPath` = the script path (selects `cuthol-mcp`).
  */
 export async function runCli(argv: string[] = process.argv.slice(2), invokedPath: string = process.argv[1] ?? ""): Promise<void> {
-  const { positionals, flags } = parseArgv(argv);
+  const firstPass = parseArgv(argv);
+  const [preGroup, preAction, ...preRest] = firstPass.positionals;
+  const cliSpec = findCliActionSpec(preGroup, preAction, preRest);
+  const specBooleans = cliSpec ? specBooleanFlags(cliSpec.params) : null;
+  const { positionals, flags } = specBooleans
+    ? parseArgvWithBooleans(argv, (key) => specBooleans.has(key))
+    : firstPass;
   const [group, action, ...rest] = positionals;
+  if (group === "spine" && action === "fx" && rest[0] === "try" && typeof flags["at"] === "string") {
+    try {
+      flags["at"] = normalizeFxTryAt(flags["at"] as string);
+    } catch {
+      // Leave the raw value: the fx try handler reports the time error.
+    }
+  }
   setActiveCliCommand(group ?? "", action, rest[0]);
 
   const formatFlag = typeof flags["format"] === "string" ? flags["format"].trim().toLowerCase() : "";
@@ -97,8 +116,11 @@ export async function runCli(argv: string[] = process.argv.slice(2), invokedPath
   // `--agent`) writes into agent tool folders.
   for (const key of Object.keys(flags)) {
     if (!KNOWN_CLI_FLAGS.has(key)) {
+      const suggestion = cliSpec
+        ? describeUnknownFlag(group ?? "", action, key, cliSpec.params)
+        : suggestFlagFix(key, group ?? "", action);
       throw new CutholError(
-        DIAGNOSTICS.UNKNOWN_FLAG(`--${key}`, `${group ?? "cuthol"}${action ? `.${action}` : ""}`, suggestFlagFix(key, group ?? "", action))
+        DIAGNOSTICS.UNKNOWN_FLAG(`--${key}`, `${group ?? "cuthol"}${action ? `.${action}` : ""}`, suggestion)
       );
     }
   }
@@ -167,7 +189,7 @@ export async function runCli(argv: string[] = process.argv.slice(2), invokedPath
     if (group === "help") {
       printHelp(action);
     } else {
-      printHelp(group, action);
+      printHelp(group, action, rest);
     }
     return;
   }
@@ -247,6 +269,15 @@ export async function runCli(argv: string[] = process.argv.slice(2), invokedPath
     case "guide":
       runGuideCommand(workspaceDir, flags);
       return;
+    case "explain": {
+      const bits = [...(action ? [action] : []), ...rest];
+      const joined = bits.join(" ").trim();
+      const query =
+        joined || (typeof flags["query"] === "string" ? (flags["query"] as string) : undefined);
+      if (!query) throw new CutholError(DIAGNOSTICS.EXPLAIN_MISSING_QUERY());
+      console.log(runExplain(query).text);
+      return;
+    }
   }
 
   printHelp();
@@ -294,6 +325,7 @@ function reportCliError(err: unknown): void {
       values: activeCliValues,
       revisionBefore: activeCliRevisionBefore,
       exitCode: 1,
+      hintForm: "cli",
     });
     console.error(text);
   } else {

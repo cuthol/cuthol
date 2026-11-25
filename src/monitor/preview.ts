@@ -541,6 +541,39 @@ function activeCompositionCuesAt(sequence: CutholSequence, tMs: number): LaneCue
 }
 
 /**
+ * Empty-composition frame diagnostics (G722, aggregated): one line per cue,
+ * or one line for 2+ cues with every id in `subject_ids`.
+ */
+export function emptyFrameDiagnostics(
+  sequence: CutholSequence,
+  projectDir: string,
+  activeCompCues: LaneCue[],
+  clampedMs: number
+): CutholDiagnostic[] {
+  const ids: string[] = [];
+  for (const cue of activeCompCues) {
+    const offsetMs = Math.max(0, clampedMs - resolveCueStartMs(sequence, cue));
+    if (compositionOverlayEmptyAt(projectDir, cue, offsetMs)) ids.push(cue.id);
+  }
+  const atLabel = `${Math.round(clampedMs)}ms`;
+  if (ids.length > 1) return [DIAGNOSTICS.EMPTY_COMPOSITION_FRAME_MANY(ids, atLabel)];
+  return ids.map((id) => DIAGNOSTICS.EMPTY_COMPOSITION_FRAME(id, atLabel));
+}
+
+/**
+ * Empty-composition sheet diagnostics (G723, aggregated): one line per cue,
+ * or one line for 2+ cues with every id in `subject_ids`.
+ */
+export function emptySheetDiagnostics(sheetCues: LaneCue[], projectDir: string): CutholDiagnostic[] {
+  const ids = sheetCues
+    .filter((cue) => isEmptyCompositionSidecar(projectDir, cue))
+    .map((cue) => cue.id);
+  if (ids.length === 1) return [DIAGNOSTICS.EMPTY_COMPOSITION_SHEET(ids[0] as string)];
+  if (ids.length > 1) return [DIAGNOSTICS.EMPTY_COMPOSITION_SHEET_MANY(ids)];
+  return [];
+}
+
+/**
  * Script-error diagnostics for the compositions active at the rendered moment(s).
  * Reads content-keyed records (measurement / preview / earlier probes) and probes
  * only compositions with no record, so a broken script can never present a frame
@@ -670,15 +703,12 @@ export function captureMonitorFrame(options: {
   // (opaque mp4) never get this sidecar, so they are never flagged here.
   // Frames are checked against the sidecar regardless of pixel content:
   // the box comes from layout, not pixels, so an empty draw still shows it.
-  const emptyDiagnostics: CutholDiagnostic[] = [];
-  for (const cue of activeCompCues) {
-    const offsetMs = Math.max(0, clampedMs - resolveCueStartMs(sequence, cue));
-    if (compositionOverlayEmptyAt(paths.rootDir, cue, offsetMs)) {
-      emptyDiagnostics.push(
-        DIAGNOSTICS.EMPTY_COMPOSITION_FRAME(cue.id, `${Math.round(clampedMs)}ms`)
-      );
-    }
-  }
+  const emptyDiagnostics: CutholDiagnostic[] = emptyFrameDiagnostics(
+    sequence,
+    paths.rootDir,
+    activeCompCues,
+    clampedMs
+  );
 
   return {
     ok: true,
@@ -885,14 +915,11 @@ export function captureMonitorSheet(options: {
     }
   }
   diagnostics.push(...collectCompositionScriptDiagnostics(sequence, paths.rootDir, sheetCues));
-  // Empty-composition sheet WARN: one per cue, only when the sidecar says the
+  // Empty-composition sheet WARN (aggregated): only when the sidecar says the
   // cue draws nothing at all (opaque-mp4 overlay frames never write the
   // transparent-capture sidecar, so they never match). Per-tile dashed boxes
   // are drawn independently of this warning.
-  for (const cue of sheetCues) {
-    if (isEmptyCompositionSidecar(paths.rootDir, cue))
-      diagnostics.push(DIAGNOSTICS.EMPTY_COMPOSITION_SHEET(cue.id));
-  }
+  diagnostics.push(...emptySheetDiagnostics(sheetCues, paths.rootDir));
 
   return {
     ok: true,

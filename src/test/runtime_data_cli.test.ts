@@ -30,6 +30,7 @@ import {
 import { initWorkspace, loadSequence } from "../core/workspace.js";
 import { MediaLedger } from "../library/ledger.js";
 import { CutholMcpServer } from "../mcp/server.js";
+import { translateCliHint } from "../mcp/mcp_format.js";
 import { fixturePath, missingFixture } from "./fixtures.js";
 
 const REPO_ROOT = process.cwd();
@@ -423,7 +424,8 @@ test("4. CLI --compact and --format text produce identical output to MCP across 
       dir: tmpDirMcp,
     });
     assert.equal(cliEdit.status, 0);
-    assert.equal(cliEdit.stdout.trim(), mcpEdit.content[0].text!.trim());
+    assert.ok(!cliEdit.stdout.includes("(action="), "CLI text must not contain MCP-form calls");
+    assert.equal(translateCliHint(cliEdit.stdout.trim()), mcpEdit.content[0].text!.trim());
 
     // (b) Verify command: --compact and --format text
     const cliVerify = spawnSync(
@@ -438,8 +440,8 @@ test("4. CLI --compact and --format text produce identical output to MCP across 
     );
     const mcpVerify = await srv.callTool("verify", { dir: tmpDirMcp });
     assert.equal(cliVerify.status, 0);
-    assert.equal(cliVerify.stdout.trim(), mcpVerify.content[0].text!.trim());
-    assert.equal(cliVerifyFormatText.stdout.trim(), mcpVerify.content[0].text!.trim());
+    assert.equal(translateCliHint(cliVerify.stdout.trim()), mcpVerify.content[0].text!.trim());
+    assert.equal(translateCliHint(cliVerifyFormatText.stdout.trim()), mcpVerify.content[0].text!.trim());
 
     // Default CLI output without --compact remains JSON
     const cliVerifyJson = spawnSync(
@@ -465,7 +467,8 @@ test("4. CLI --compact and --format text produce identical output to MCP across 
       dir: tmpDirMcp,
     });
     assert.equal(cliErr.status, 1);
-    assert.equal(cliErr.stderr.trim(), mcpErr.content[0].text!.trim());
+    assert.ok(!cliErr.stderr.includes("(action="), "CLI text must not contain MCP-form calls");
+    assert.equal(translateCliHint(cliErr.stderr.trim()), mcpErr.content[0].text!.trim());
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
     fs.rmSync(tmpDirMcp, { recursive: true, force: true });

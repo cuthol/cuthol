@@ -13,7 +13,7 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
+import { CutholError, DIAGNOSTICS, pushRepeatDiagnostic } from "../core/diagnostics.js";
 import type { ClipFxSpec, CutholSequence, EffectParamValue, ParameterEnvelope } from "../core/schema.js";
 import { MOTION_FX_KIND } from "../effects/effect_types.js";
 import { MOTION_EFFECT_DEFINITION } from "../effects/effect_types.js";
@@ -565,8 +565,13 @@ function maybeEmitCompositionTemporalSingleFrameWarning(
   const hit = filters.find((f) => TEMPORAL_FX_FILTER_RE.test(f)) ?? "temporal fx";
   const holder = ctx as unknown as { compileWarnings?: import("../core/diagnostics.js").CutholDiagnostic[] };
   if (!Array.isArray(holder.compileWarnings)) holder.compileWarnings = [];
-  if (holder.compileWarnings.some((d) => d.code === "CUTHOL-G267" && d.subject_id === owner.id)) return;
-  holder.compileWarnings.push(DIAGNOSTICS.COMPOSITION_TEMPORAL_FX_SINGLEFRAME(owner.id, hit.trim()));
+  pushRepeatDiagnostic(
+    holder.compileWarnings,
+    `CUTHOL-G267:${hit.trim()}`,
+    { subjectId: owner.id },
+    (e) => DIAGNOSTICS.COMPOSITION_TEMPORAL_FX_SINGLEFRAME(e.subjectId, hit.trim()),
+    (es) => DIAGNOSTICS.COMPOSITION_TEMPORAL_FX_SINGLEFRAME_MANY(hit.trim(), es.map((e) => e.subjectId))
+  );
 }
 
 /**

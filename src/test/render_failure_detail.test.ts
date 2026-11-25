@@ -41,7 +41,7 @@ test("G503: pathological logs lose only the tail", () => {
     stdout: "",
     stderr: longLine,
   });
-  assert.ok(err.diagnostic.what.startsWith("HyperFrames composition 'compositions/kart' failed to render; the render was stopped (no fallback image is substituted): Failed: xxx"));
+  assert.ok(err.diagnostic.what.startsWith("HyperFrames composition 'compositions/kart' failed to render; the render stopped with no fallback image substituted: Failed: xxx"));
   assert.ok(err.diagnostic.what.length < 2400);
 });
 

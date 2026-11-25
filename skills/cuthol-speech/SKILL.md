@@ -83,6 +83,8 @@ project default (journaled, undoable; `"builtin"` clears one). Unknown ids fail
 with `[CUTHOL-G230]`. Transcripts and voiceovers cache per provider identity +
 version + options, so providers never share records.
 
+The full contract of the `local` provider (sidecar file, `CUTHOL_LOCAL_ASR_CMD` input/output JSON, filler rules, the installed engine): `references/local-asr.md`.
+
 Two ways to use local models: the `local` door (sidecar transcript, or
 `CUTHOL_LOCAL_ASR_CMD` / `CUTHOL_LOCAL_TTS_CMD`) or an `ext:` provider
 extension (see `cuthol-extensions`).

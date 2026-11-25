@@ -1,7 +1,7 @@
 // Gates 1-3 (G1_SCHEMA, G2_ASSETS, G3_TIMING) of the 5-Gate sequence verification engine.
 import fs from "node:fs";
 import path from "node:path";
-import { CutholDiagnostic, DIAGNOSTICS } from "../core/diagnostics.js";
+import { CutholDiagnostic, DIAGNOSTICS, pushRepeatDiagnostic } from "../core/diagnostics.js";
 import {
   CutholSequence,
   getCuePlaybackRate,
@@ -56,9 +56,10 @@ export function verifyG1Schema(
   diagnostics: CutholDiagnostic[]
 ): void {
   const seenHandles = new Set<string>();
+  const dupCounts = new Map<string, number>();
   const checkUnique = (id: string) => {
     if (seenHandles.has(id)) {
-      diagnostics.push(DIAGNOSTICS.DUPLICATE_HANDLE(id));
+      dupCounts.set(id, (dupCounts.get(id) ?? 1) + 1);
     }
     seenHandles.add(id);
   };
@@ -98,6 +99,13 @@ export function verifyG1Schema(
   }
   for (const marker of seq.markers) {
     checkUnique(marker.id);
+  }
+  if (dupCounts.size > 0) {
+    diagnostics.push(
+      DIAGNOSTICS.DUPLICATE_HANDLE_MANY(
+        [...dupCounts.entries()].map(([id, occurrences]) => ({ id, occurrences }))
+      )
+    );
   }
 }
 
@@ -499,19 +507,35 @@ export function verifyG3Timing(
           DIAGNOSTICS.ENVELOPE_OUT_OF_RANGE(cue.id, "at_ms", cueStartMs, cue.duration_ms)
         );
       }
-      // Warn if an active lane cue extends past the primary spine duration
+      // Warn if an active lane cue extends past the primary spine duration;
+      // one cause (short spine) can fire for many cues, so aggregate repeats
+      // into a single G306 line (count + id range, all ids in subject_ids).
       if (
         !lane.muted &&
         seq.spine.clips.length > 0 &&
         expectedTimelineIn > 0 &&
         cueStartMs + cue.duration_ms > expectedTimelineIn + minMs
       ) {
-        diagnostics.push(
-          DIAGNOSTICS.LANE_EXTENDS_PAST_SPINE(
-            cue.id,
-            cueStartMs + cue.duration_ms,
-            expectedTimelineIn
-          )
+        const cueEndMs = cueStartMs + cue.duration_ms;
+        const spineEndMs = expectedTimelineIn;
+        pushRepeatDiagnostic(
+          diagnostics,
+          `G306@${spineEndMs}`,
+          { subjectId: cue.id, detail: String(cueEndMs) },
+          (entry) =>
+            DIAGNOSTICS.LANE_EXTENDS_PAST_SPINE(
+              entry.subjectId,
+              Number(entry.detail),
+              spineEndMs
+            ),
+          (entries) =>
+            DIAGNOSTICS.LANE_EXTENDS_PAST_SPINE_MANY(
+              entries.map((e) => ({
+                cueId: e.subjectId,
+                cueEndMs: Number(e.detail),
+                spineEndMs,
+              }))
+            )
         );
       }
       for (const env of cue.envelopes) {
