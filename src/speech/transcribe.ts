@@ -29,11 +29,29 @@ import {
   transcribeWithDeepgram,
   transcribeWithLocalProvider,
 } from "./providers.js";
-import { LOCAL_ASR_ENGINE_REVISION } from "./local_engine.js";
+import { LOCAL_ASR_ENGINE_REVISION, PARAKEET_LANGUAGES, resolveLocalEngine, type LocalAsrEngineId } from "./local_engine.js";
 
-/** Cache namespace of the keyless local ASR engine (old `local:*` keys miss). */
-export function localAsrCachePrefix(): string {
-  return `local@${LOCAL_ASR_ENGINE_REVISION}`;
+/**
+ * Cache namespace of the local ASR path (old `local:*` keys miss). Keyless
+ * engine transcripts are namespaced per engine (`local@v5+whisper`,
+ * `local@v5+parakeet`) so one engine never serves the other's transcript;
+ * sidecar/custom-cli transcripts stay under the engine-independent base key.
+ */
+export function localAsrCachePrefix(engine?: string): string {
+  const base = `local@${LOCAL_ASR_ENGINE_REVISION}`;
+  return engine ? `${base}+${engine}` : base;
+}
+
+/**
+ * True when a cached keyless-engine transcript was made by a different
+ * engine than the request asks for. Records without an engine stamp predate
+ * the stamp and are handled by the legacy rule instead.
+ */
+function isEngineMismatchedTranscript(doc: TranscriptDocument, engine: LocalAsrEngineId | undefined): boolean {
+  if (engine === undefined) return false;
+  const docEngine = (doc.engine ?? "").trim().toLowerCase();
+  if (docEngine !== "whisper" && docEngine !== "parakeet") return false;
+  return docEngine !== engine;
 }
 
 /**
@@ -139,6 +157,20 @@ function markTranscriptWithKeyterms(doc: TranscriptDocument, keyterms: string[])
   return { ...doc, keyterms } as TranscriptDocument;
 }
 
+/**
+ * True when a cached record predates the keyterm stamp: every fresh
+ * transcript now carries the keyterms it was made with (possibly none), so
+ * a builtin-provider record without the property was made with the old
+ * invisible default terms. Skipped on read in the transcribe lookup only,
+ * so the asset is re-transcribed once with the current request; every
+ * downstream reader keeps serving the stored record. Extension records
+ * never had default terms and are exempt.
+ */
+function isLegacyUnmarkedTranscript(doc: TranscriptDocument): boolean {
+  if (doc.provider !== "deepgram" && doc.provider !== "local") return false;
+  return !Object.prototype.hasOwnProperty.call(doc, "keyterms");
+}
+
 function resolveTranscribeLookupKeys(
   providerSource: string,
   cacheLangKey: string,
@@ -180,6 +212,7 @@ export async function transcribeLibraryAsset(options: {
   provider?: string;
   keyterms?: string[];
   refresh?: boolean;
+  engine?: string;
 }): Promise<TranscribeResult> {
   const { paths, sequence } = loadSequence(options.workspaceDir);
   loadDotEnvIfNeeded(paths.rootDir);
@@ -199,9 +232,24 @@ export async function transcribeLibraryAsset(options: {
   });
   const provider: AsrProviderId = resolvedProvider.id;
   const extProviderName = extensionNameOf(provider);
+  // The keyless local engine is resolved only when a transcription actually
+  // has to run, so a request servable from a stored transcript never fails
+  // on engine resolution. Sidecar and custom-cli paths are engine-independent
+  // and keep the base key.
+  const forcedEngineOpt = (options.engine ?? "").trim().toLowerCase();
+  const forcedValid =
+    forcedEngineOpt === "whisper" || forcedEngineOpt === "parakeet"
+      ? (forcedEngineOpt as LocalAsrEngineId)
+      : undefined;
+  const isKeylessPath =
+    provider === "local" &&
+    extProviderName === null &&
+    !process.env.CUTHOL_LOCAL_ASR_CMD &&
+    !fs.existsSync(`${resolveLibraryItemPath(paths.rootDir, item)}.transcript.json`);
+  let keylessEngine: LocalAsrEngineId | undefined;
   // Extension transcripts are keyed by provider identity + version + content hash, so the
   // same file transcribed by different providers keeps separate cache records.
-  const providerKeyPrefix =
+  let providerKeyPrefix =
     extProviderName !== null
       ? providerCacheTag(
           resolveExtensionProvider({
@@ -211,7 +259,7 @@ export async function transcribeLibraryAsset(options: {
           }).extension
         )
       : provider === "local"
-        ? localAsrCachePrefix()
+        ? localAsrCachePrefix(keylessEngine)
         : provider;
   // Keyterms are part of the transcription request, so they are part of the
   // cache key: a short hash suffix keeps the `<provider>:<lang>` shape (and
@@ -222,28 +270,45 @@ export async function transcribeLibraryAsset(options: {
   const keytermSuffix = keyterms
     ? `:k${createHash("sha256").update(keyterms.join("\0")).digest("hex").slice(0, 12)}`
     : "";
-  const cacheProviderPrefix = `${providerKeyPrefix}${keytermSuffix}`;
+  let cacheProviderPrefix = `${providerKeyPrefix}${keytermSuffix}`;
   const cacheLangKey = `${cacheProviderPrefix}:${lang}`;
 
   const ledger = new MediaLedger(paths.ledgerFile);
 
   try {
     let doc: TranscriptDocument | null = null;
+    let staleFallback: TranscriptDocument | null = null;
     if (!options.refresh) {
-      const lookupKeys = resolveTranscribeLookupKeys(
+      let lookupKeys = resolveTranscribeLookupKeys(
         resolvedProvider.source,
         cacheLangKey,
         lang,
         requestedAuto,
         keyterms !== null
       );
+      if (isKeylessPath && resolvedProvider.source === "builtin") {
+        const extra: string[] = [];
+        for (const k of lookupKeys) {
+          for (const e of ["whisper", "parakeet"] as const) {
+            const scoped = k.replace(
+              `local@${LOCAL_ASR_ENGINE_REVISION}`,
+              `local@${LOCAL_ASR_ENGINE_REVISION}+${e}`
+            );
+            if (scoped !== k) extra.push(scoped);
+          }
+        }
+        lookupKeys = [...lookupKeys, ...extra];
+      }
       for (const k of lookupKeys) {
         const candidate = ledger.getTranscript<TranscriptDocument>(item.digest_sha256, k);
         if (!candidate) continue;
         if (isPoisonedCacheRecord(k, candidate.language)) continue;
         // A record from an older keyless local engine is re-transcribed once
         // with the current engine instead of being served again.
-        if (isStaleLocalEngineRecord(candidate)) continue;
+        if (isStaleLocalEngineRecord(candidate)) {
+          if (staleFallback === null && keyterms === null) staleFallback = candidate;
+          continue;
+        }
         // An English Deepgram record made with nova-3 holds no fillers;
         // an explicit-English transcribe re-transcribes it once with
         // nova-2. Auto requests keep nova-3, so the rule never applies.
@@ -253,8 +318,28 @@ export async function transcribeLibraryAsset(options: {
         // A plain request never reads a keyterm-made record: when only a
         // keyterm transcript is cached the lookup misses and transcribes.
         if (keyterms === null && isKeytermMarkedTranscript(candidate)) continue;
+        // A record made with the old invisible default terms is never
+        // served: it is re-transcribed once with the current request.
+        if (isLegacyUnmarkedTranscript(candidate)) {
+          if (staleFallback === null && keyterms === null) staleFallback = candidate;
+          continue;
+        }
+        // A forced engine never reads the other engine's transcript;
+        // without a forced engine any engine's stored transcript serves.
+        if (isEngineMismatchedTranscript(candidate, forcedValid)) continue;
         doc = candidate;
         break;
+      }
+    }
+    if (doc === null && staleFallback !== null && isKeylessPath) {
+      // Cache first: when no engine can run (uncovered language, nothing
+      // installed) a stored transcript is served instead of failing on
+      // engine resolution. When an engine can run, the stale record stays
+      // a miss and is re-transcribed once below.
+      try {
+        resolveLocalEngine({ language: lang, forced: options.engine });
+      } catch {
+        doc = staleFallback;
       }
     }
     let wasCached = Boolean(doc);
@@ -274,6 +359,13 @@ export async function transcribeLibraryAsset(options: {
       }
     } else {
       wasCached = false;
+      if (isKeylessPath) {
+        // Only a real run resolves the engine: an uncovered language or a
+        // missing install fails here with the specific diagnostic.
+        keylessEngine = resolveLocalEngine({ language: lang, forced: options.engine });
+        providerKeyPrefix = localAsrCachePrefix(keylessEngine);
+        cacheProviderPrefix = `${providerKeyPrefix}${keytermSuffix}`;
+      }
       // Pre-compute acoustic 25ms-window silence intervals so ASR word tails stretched across silent pauses are clamped accurately
       let acousticSilenceIntervals: Array<{ start_ms: number; end_ms: number; duration_ms: number }> = [];
       try {
@@ -306,6 +398,7 @@ export async function transcribeLibraryAsset(options: {
           language: lang,
           durationMs: item.probe.duration_ms,
           keyterms: keyterms ?? undefined,
+          ...(keylessEngine ? { engine: keylessEngine } : {}),
         });
       } else {
         // Extract clean 16 kHz mono WAV into `.cuthol/blobs/` for fast upload to Deepgram
@@ -476,9 +569,25 @@ export async function transcribeLibraryAsset(options: {
 
       const detectedRaw = (doc.language ?? "").trim().toLowerCase();
       if (requestedAuto && (!detectedRaw || detectedRaw === "auto")) {
+        if (keylessEngine === "parakeet") {
+          // Parakeet transcribed the audio but never reports the detected
+          // language, so `--lang auto` cannot tag the transcript. The generic
+          // G213 cannot name the 25 covered languages, so this engine's case
+          // fails with the free-form local-speech error carrying the retry.
+          throw new CutholError(
+            DIAGNOSTICS.LOCAL_SPEECH_BRIDGE_FAILED(
+              "local ASR",
+              `Parakeet transcribed the audio but does not report the detected language, so '--lang auto' cannot tag this transcript. Parakeet covers 25 European languages (${PARAKEET_LANGUAGES.join(", ")}), not Turkish`,
+              `Re-run with an explicit language, e.g. 'cuthol speech transcribe --handle ${item.handle} --lang en --provider local', or install Whisper for auto-detect with 'cuthol setup --local-speech --engine whisper --apply'`
+            )
+          );
+        }
         throw new CutholError(DIAGNOSTICS.ASR_LANGUAGE_REQUIRED(provider));
       }
       const realLang = detectedRaw && detectedRaw !== "auto" ? detectedRaw : lang;
+      // Stamp every fresh transcript with the keyterms it was made with
+      // (possibly none) so the lookup can spot legacy default-term records.
+      doc = markTranscriptWithKeyterms(doc, keyterms ?? []);
       if (keyterms) {
         // Keyterm-scoped transcripts stay under scoped keys only, plus the
         // shared `latest` pointer (marked, so plain transcribe lookups skip
@@ -489,7 +598,7 @@ export async function transcribeLibraryAsset(options: {
         ledger.setTranscript(item.digest_sha256, `${cacheProviderPrefix}:${realLang}`, marked);
         ledger.setTranscript(item.digest_sha256, "latest", marked);
         if (requestedAuto) {
-          ledger.setTranscript(item.digest_sha256, cacheLangKey, marked);
+          ledger.setTranscript(item.digest_sha256, `${cacheProviderPrefix}:${lang}`, marked);
         }
       } else {
         ledger.setTranscript(item.digest_sha256, `${providerKeyPrefix}:${realLang}`, doc);
@@ -499,7 +608,7 @@ export async function transcribeLibraryAsset(options: {
         if (requestedAuto) {
           // The provider's own latest auto detection, so an explicit provider
           // hits its own auto cache without ever reading another provider's.
-          ledger.setTranscript(item.digest_sha256, cacheLangKey, doc);
+          ledger.setTranscript(item.digest_sha256, `${cacheProviderPrefix}:${lang}`, doc);
         }
       }
     }

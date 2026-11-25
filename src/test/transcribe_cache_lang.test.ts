@@ -102,7 +102,10 @@ function makeDoc(
       is_repetition: false,
     })),
     disfluencies: [],
-  };
+    // New-scheme stamp: records without it are re-transcribed once as
+    // legacy default-term records (these tests pin key routing, not that).
+    keyterms: [],
+  } as TranscriptDocument;
 }
 
 const TR_DOC = () =>

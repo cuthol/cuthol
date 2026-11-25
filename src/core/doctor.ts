@@ -14,7 +14,11 @@ import { installedFfmpegBinDir } from "./ffmpeg_install.js";
 import { findLocalHyperFramesCliMjs } from "../compositor/hf_common.js";
 import { listSkillsStatus, skillsWarningIds } from "./skills_install.js";
 import { resolveBundledGsapMinJs } from "./package_resolve.js";
-import { localSpeechInstallState } from "../speech/local_engine.js";
+import {
+  PARAKEET_LANGUAGES,
+  localSpeechInstallState,
+  parakeetInstallState,
+} from "../speech/local_engine.js";
 
 export type DoctorStatus = "ok" | "warn" | "fail";
 
@@ -204,24 +208,61 @@ export function checkSpeechKeys(probes: DoctorProbes = {}): DoctorCheck {
 }
 
 export function checkLocalSpeech(probes: DoctorProbes = {}): DoctorCheck {
-  const state = probes.localSpeech ?? localSpeechInstallState().state;
-  const detail = probes.localSpeechDetail ?? localSpeechInstallState().reason;
-  if (state === "installed") {
-    return { id: "local-speech", status: "ok", found: `keyless local speech installed (${detail})`, fix: "none" };
+  // Probes drive the legacy assertions; real lookups add the per-engine
+  // picture (installed engine(s) and their languages) below.
+  if (probes.localSpeech !== undefined || probes.localSpeechDetail !== undefined) {
+    const state = probes.localSpeech ?? localSpeechInstallState().state;
+    const detail = probes.localSpeechDetail ?? localSpeechInstallState().reason;
+    if (state === "installed") {
+      return { id: "local-speech", status: "ok", found: `keyless local speech installed (${detail})`, fix: "none" };
+    }
+    if (state === "broken") {
+      return {
+        id: "local-speech",
+        status: "fail",
+        found: `keyless local speech is broken (${detail})`,
+        fix: "Re-run 'cuthol setup --local-speech --apply' to repair it. [CUTHOL-G239]",
+      };
+    }
+    return {
+      id: "local-speech",
+      status: "warn",
+      found: "keyless local speech is not installed (cloud keys or explicit CUTHOL_LOCAL_*_CMD still work)",
+      fix: "Run 'cuthol setup --local-speech --apply' for keyless transcription and voiceover. [CUTHOL-G237]",
+    };
   }
-  if (state === "broken") {
+  const whisper = localSpeechInstallState();
+  const parakeet = parakeetInstallState();
+  const parts: string[] = [
+    whisper.state === "installed"
+      ? "whisper installed (all languages incl. Turkish)"
+      : `whisper ${whisper.state} (${whisper.reason})`,
+    parakeet.installed
+      ? `parakeet installed (${PARAKEET_LANGUAGES.length} European languages, not Turkish)`
+      : `parakeet missing (${parakeet.reason})`,
+  ];
+  const found = `local ASR engines: ${parts.join("; ")}`;
+  if (whisper.state === "installed" || parakeet.installed) {
+    return {
+      id: "local-speech",
+      status: "ok",
+      found,
+      fix: whisper.state === "installed" ? "none" : "Run 'cuthol setup --local-speech --engine whisper --apply' for Turkish and auto-detect. [CUTHOL-G237]",
+    };
+  }
+  if (whisper.state === "broken") {
     return {
       id: "local-speech",
       status: "fail",
-      found: `keyless local speech is broken (${detail})`,
-      fix: "Re-run 'cuthol setup --local-speech --apply' to repair it. [CUTHOL-G239]",
+      found: `${found}; keyless whisper install is broken (${whisper.reason})`,
+      fix: "Re-run 'cuthol setup --local-speech --engine whisper --apply' to repair it. [CUTHOL-G239]",
     };
   }
   return {
     id: "local-speech",
     status: "warn",
-    found: "keyless local speech is not installed (cloud keys or explicit CUTHOL_LOCAL_*_CMD still work)",
-    fix: "Run 'cuthol setup --local-speech --apply' for keyless transcription and voiceover. [CUTHOL-G237]",
+    found: `${found} (cloud keys or explicit CUTHOL_LOCAL_*_CMD still work)`,
+    fix: "Run 'cuthol setup --local-speech --engine <parakeet|whisper> --apply' to install one engine. [CUTHOL-G237]",
   };
 }
 

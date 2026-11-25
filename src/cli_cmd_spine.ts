@@ -1126,11 +1126,15 @@ export async function runSpineCommand(ctx: CliCommandContext): Promise<CliComman
       action === "unmute"
         ? false
         : boolFlag(flags, "muted", true) ?? true;
+    const fadeInRaw = strFlag(flags, "fade-in");
+    const fadeOutRaw = strFlag(flags, "fade-out");
     const res = setSpineMute({
       workspaceDir,
       clipIds,
       allSpine: allSpineFlag,
       muted: mutedVal,
+      fadeInMs: fadeInRaw !== undefined ? parseTimeMs(fadeInRaw, { allowNegative: true }) : undefined,
+      fadeOutMs: fadeOutRaw !== undefined ? parseTimeMs(fadeOutRaw, { allowNegative: true }) : undefined,
     });
     const cmdName = mutedVal ? "spine.mute" : "spine.unmute";
     emitEnvelopeJson(workspaceDir, cmdName, { action: cmdName, ...res });

@@ -21,6 +21,7 @@ import { checkExtTransitionBackstop } from "../verify/gates_transitions.js";
 import { sliceEnvelopes, sliceReframeFocalPoints } from "./spine_envelope.js";
 import { dropSlicedPresetRecords } from "../effects/preset_apply.js";
 import { probeEntryOrThrow } from "./spine_fx.js";
+import { assertAudioFadeMs } from "./lanes.js";
 import { assertFxEnvelopeWritable } from "./envelope_points.js";
 import { isKnownEnvelopeParameter, suggestEnvelopeParameter } from "./envelope_params.js";
 import { isProjectEmptyForAdoption, maybeAdoptStageFromFirstSource } from "./stage_adopt.js";
@@ -1012,6 +1013,8 @@ export function setSpineMute(options: {
   clipIds?: string[];
   allSpine?: boolean;
   muted: boolean;
+  fadeInMs?: number;
+  fadeOutMs?: number;
 }): {
   clips: SpineClip[];
   muted_ids: string[];
@@ -1049,6 +1052,14 @@ export function setSpineMute(options: {
       for (const clip of seq.spine.clips) {
         if (!targetSet.has(clip.id)) continue;
         clip.audio_chain.muted = options.muted;
+        if (options.fadeInMs !== undefined) {
+          assertAudioFadeMs(clip.id, "fade-in", options.fadeInMs, clip.duration_ms);
+          clip.audio_chain.fade_in_ms = options.fadeInMs;
+        }
+        if (options.fadeOutMs !== undefined) {
+          assertAudioFadeMs(clip.id, "fade-out", options.fadeOutMs, clip.duration_ms);
+          clip.audio_chain.fade_out_ms = options.fadeOutMs;
+        }
         updatedClips.push(clip);
         if (options.muted) mutedIds.push(clip.id);
         else unmutedIds.push(clip.id);

@@ -214,6 +214,12 @@ test("local door stays backward compatible for sidecar ASR; local TTS without in
   const saved = clearProviderEnv();
   const savedLocalTtsCmd = process.env.CUTHOL_LOCAL_TTS_CMD;
   delete process.env.CUTHOL_LOCAL_TTS_CMD;
+  // Isolate from any real keyless install on the machine (a whisper/parakeet
+  // install would serve TTS instead of failing): the "without installation"
+  // case needs an empty data dir.
+  const emptyDataDir = fs.mkdtempSync(path.join(TEST_ROOT, "no-install-"));
+  const savedDataDir = process.env.CUTHOL_DATA_DIR;
+  process.env.CUTHOL_DATA_DIR = emptyDataDir;
   try {
     const wavFile = path.join(wsDir, "talk.wav");
     writeToneWav(wavFile, 2);
@@ -240,5 +246,8 @@ test("local door stays backward compatible for sidecar ASR; local TTS without in
   } finally {
     restoreProviderEnv(saved);
     if (savedLocalTtsCmd !== undefined) process.env.CUTHOL_LOCAL_TTS_CMD = savedLocalTtsCmd;
+    if (savedDataDir === undefined) delete process.env.CUTHOL_DATA_DIR;
+    else process.env.CUTHOL_DATA_DIR = savedDataDir;
+    fs.rmSync(emptyDataDir, { recursive: true, force: true });
   }
 });

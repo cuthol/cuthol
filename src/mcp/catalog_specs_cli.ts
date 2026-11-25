@@ -427,6 +427,7 @@ export const CLI_ACTION_SPECS: ActionSpec[] = [
       { name: "apply", type: "boolean", description: "Write changes (default is check only)." },
       { name: "force", type: "boolean", description: "Overwrite existing setup." },
       { name: "local_speech", type: "boolean", description: "Set up local speech-to-text." },
+      { name: "engine", type: "string", description: "Local speech engine: parakeet (fast, 25 European languages; run without --engine to list them) or whisper (covers every language including Turkish). Only with --local-speech; only the chosen engine is installed.", enum: ["parakeet", "whisper"] },
       { name: "model", type: "string", description: "Local speech model id." },
       { name: "voice", type: "string", description: "Local speech voice id." },
     ],

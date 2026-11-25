@@ -2,6 +2,12 @@
 import path from "node:path";
 import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
 import { loadDotEnvIfNeeded } from "../core/env.js";
+import {
+  PARAKEET_LANGUAGES,
+  parakeetInstallState,
+  whisperInstallState,
+  type LocalAsrEngineId,
+} from "./local_engine.js";
 import { commitSequenceMutation, loadSequence } from "../core/workspace.js";
 import { EXTENSION_NAME_RE } from "../extensions/ext_manifest.js";
 import { AsrProviderId, TtsProviderId } from "./providers.js";
@@ -162,12 +168,42 @@ export function setProjectProviderDefaults(
   return { defaults: result, revision };
 }
 
+export interface LocalEngineInfo {
+  id: LocalAsrEngineId;
+  installed: boolean;
+  detail: string;
+  languages: string;
+}
+
+/** Installed local ASR engine(s) and the languages each covers. */
+export function describeLocalEngines(): { engines: LocalEngineInfo[] } {
+  const whisper = whisperInstallState();
+  const parakeet = parakeetInstallState();
+  return {
+    engines: [
+      {
+        id: "whisper",
+        installed: whisper.installed,
+        detail: whisper.installed ? "faster-whisper keyless installation" : whisper.reason,
+        languages: "all languages including Turkish (auto-detects)",
+      },
+      {
+        id: "parakeet",
+        installed: parakeet.installed,
+        detail: parakeet.reason,
+        languages: `European languages only (${PARAKEET_LANGUAGES.join(", ")}); not Turkish`,
+      },
+    ],
+  };
+}
+
 export function describeProviderResolution(workspaceDir: string): {
   stored: ProjectProviderDefaults;
   effective: {
     asr: { id: string; source: ProviderSource };
     tts: { id: string; source: ProviderSource };
   };
+  localEngines: { engines: LocalEngineInfo[] };
 } {
   return {
     stored: getProjectProviderDefaults(workspaceDir),
@@ -175,5 +211,6 @@ export function describeProviderResolution(workspaceDir: string): {
       asr: resolveAsrProvider({ workspaceDir }),
       tts: resolveTtsProvider({ workspaceDir }),
     },
+    localEngines: describeLocalEngines(),
   };
 }

@@ -32,6 +32,7 @@ import {
   transcribeWithLocalProvider,
 } from "./providers.js";
 import { loadCachedTranscriptForAsset } from "./transcribe.js";
+import { resolveLocalEngine, type LocalAsrEngineId } from "./local_engine.js";
 
 const FRAGMENT_MAX_MS = 200;
 const NEIGHBOR_CUT_MS = OPEN_STANDARDS.DIALOGUE_CLEANUP.MAX_PAD_MS;
@@ -501,19 +502,47 @@ async function transcribeRenderedSpeech(options: {
   durationMs: number;
   provider: AsrProviderId;
   language: string;
+  engine?: LocalAsrEngineId;
 }): Promise<{ doc: TranscriptDocument; sha256: string; cached: boolean }> {
   const sha256 = sha256File(options.wavPath);
-  const cacheKey = `${options.provider}:${options.language}`;
+  // The re-transcribe uses the same keyless engine as the stored transcript
+  // (the cache key is engine-scoped so engines never share records). An
+  // explicit local command is engine-independent and resolves nothing. The
+  // engine is resolved only on a cache miss so a servable transcript never
+  // fails on engine resolution.
+  const isKeyless = options.provider === "local" && !process.env.CUTHOL_LOCAL_ASR_CMD;
   const ledger = new MediaLedger(options.paths.ledgerFile);
   try {
-    const cached = ledger.getTranscript<TranscriptDocument>(sha256, cacheKey);
-    if (cached) return { doc: cached, sha256, cached: true };
+    if (isKeyless) {
+      const keys =
+        options.engine !== undefined
+          ? [`${options.provider}+${options.engine}:${options.language}`]
+          : [
+              `${options.provider}:${options.language}`,
+              `${options.provider}+whisper:${options.language}`,
+              `${options.provider}+parakeet:${options.language}`,
+            ];
+      for (const key of keys) {
+        const cached = ledger.getTranscript<TranscriptDocument>(sha256, key);
+        if (cached) return { doc: cached, sha256, cached: true };
+      }
+    } else {
+      const cacheKey = `${options.provider}:${options.language}`;
+      const cached = ledger.getTranscript<TranscriptDocument>(sha256, cacheKey);
+      if (cached) return { doc: cached, sha256, cached: true };
+    }
+    const engine = isKeyless
+      ? (options.engine ?? resolveLocalEngine({ language: options.language }))
+      : undefined;
+    const cacheKey =
+      engine !== undefined ? `${options.provider}+${engine}:${options.language}` : `${options.provider}:${options.language}`;
     const fresh =
       options.provider === "local"
         ? await transcribeWithLocalProvider({
             audioFilePath: options.wavPath,
             language: options.language,
             durationMs: options.durationMs,
+            ...(engine ? { engine } : {}),
           })
         : await transcribeWithDeepgram({
             audioFilePath: options.wavPath,
@@ -818,6 +847,12 @@ export async function verifyCleanup(options: VerifyCleanupOptions): Promise<Veri
   const preserved = collectPreservedSpans(options.workspaceDir, clips, docsByHandle);
   const gaps = collectExciseGaps(sequence.spine.clips);
 
+  // Re-transcribe with the same keyless engine as the stored transcript:
+  // the first stored keyless engine wins; records without a stamp predate
+  // the stamp and resolve to the current default engine.
+  const storedEngine = [...docsByHandle.values()]
+    .map((d) => (d.engine ?? "").trim().toLowerCase())
+    .find((e) => e === "whisper" || e === "parakeet") as LocalAsrEngineId | undefined;
   const rendered = renderSpineSpeechWav(sequence, paths, clips);
   let heardDoc: TranscriptDocument;
   let sha256: string;
@@ -829,6 +864,7 @@ export async function verifyCleanup(options: VerifyCleanupOptions): Promise<Veri
       durationMs: rendered.durationMs,
       provider,
       language,
+      ...(storedEngine ? { engine: storedEngine } : {}),
     });
     heardDoc = transcribed.doc;
     sha256 = transcribed.sha256;

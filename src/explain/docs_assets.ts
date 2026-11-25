@@ -29,7 +29,7 @@ export const ASSETS_DOCS: DiagnosticDoc[] = [
     code: "G239",
     title: "Local speech bridge failed",
     checks: "Runs the local ASR/TTS bridge op and reports its failure detail: the first stderr lines naming the error plus the tail (selectBridgeFailureDetail), with a suggestion fitted to the failure class.",
-    fires_when: "A local transcription or synthesis op through the bridge fails (missing model, crashed worker, bad audio); the message keeps the failure cause line(s) and names the op, and the suggestion names the matching remedy (model re-download, Piper voice check, input-audio check, or memory/jobs). Output-parse failures surface as `local ASR output` / `local TTS output` ops.",
+    fires_when: "A local transcription or synthesis op through the bridge fails (missing model, crashed worker, bad audio); the message keeps the failure cause line(s) and names the op, and the suggestion names the matching remedy (model re-download, Piper voice check, input-audio check, or memory/jobs). Output-parse failures surface as `local ASR output` / `local TTS output` ops. A Parakeet-engine transcript with `--lang auto` also fails here: Parakeet transcribes but never reports the detected language, so the detail names its 25 European languages and the suggestion gives the explicit --lang retry or the Whisper setup command.",
     source: "src/core/local_speech_setup.ts (bridge op runner)",
     severity: "ERROR",
     gate: "SYS",

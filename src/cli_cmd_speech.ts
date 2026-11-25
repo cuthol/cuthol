@@ -24,6 +24,7 @@ export async function runSpeechCommand(ctx: CliCommandContext): Promise<CliComma
       provider: strFlag(flags, "provider"),
       keyterms: strListFlag(flags, "keyterms", "keyterm"),
       refresh: boolFlag(flags, "refresh", false),
+      engine: strFlag(flags, "engine"),
     });
     const payload = flags["verbose"]
       ? { action: "speech.transcribe", ...res }

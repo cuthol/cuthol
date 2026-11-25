@@ -39,6 +39,22 @@ export interface CompiledAudioPlan {
  */
 export const SPINE_JOIN_FADE_CURVE = "qsin";
 
+/**
+ * Fixed processing latency of the `afftdn` denoise filter, as a duration.
+ * Measured with a chirp probe through `afftdn` alone (cross-correlation 1.00):
+ * 1200 samples at 48 kHz and 1102 samples at 44.1 kHz, i.e. 25 ms in both
+ * cases, so the latency is a fixed time, not a fixed sample count. No stage
+ * before `afftdn` in the compiled chain fixes the sample rate (the chain is
+ * `atrim`/clock rebase, `aresample=async=1` passthrough, optional rate
+ * filters; the 48 kHz `aformat` only runs at the master finalize after the
+ * mix), so `afftdn` sees the source rate and a sample-count trim would be
+ * wrong off 48 kHz. The chain therefore drops the latency as a time
+ * (`atrim=start=0.025`, valid at any rate) right after `afftdn`, so denoised
+ * audio stays aligned with the picture (offset < 1 ms, no G508 for this
+ * reason). The trailing `apad=whole_dur=` restores the planned duration.
+ */
+export const AFFTDN_LATENCY_SEC = 0.025;
+
 export interface SpineJoinFade {
   fadeInMs: number;
   fadeOutMs: number;
@@ -270,7 +286,9 @@ function buildRampedAudioPostFilters(options: {
   if (ac) {
     if (ac.denoise.enabled) {
       aFilters.push(
-        `afftdn=nr=${ac.denoise.nr_db.toFixed(1)}:nf=${ac.denoise.noise_floor_db.toFixed(1)}`
+        `afftdn=nr=${ac.denoise.nr_db.toFixed(1)}:nf=${ac.denoise.noise_floor_db.toFixed(1)}`,
+        `atrim=start=${AFFTDN_LATENCY_SEC}`,
+        `asetpts=PTS-STARTPTS`
       );
     }
     if (ac.voice_clarity.enabled) {
@@ -387,7 +405,9 @@ function buildSingleAudioTrackFilterChain(options: {
   if (ac) {
     if (ac.denoise.enabled) {
       aFilters.push(
-        `afftdn=nr=${ac.denoise.nr_db.toFixed(1)}:nf=${ac.denoise.noise_floor_db.toFixed(1)}`
+        `afftdn=nr=${ac.denoise.nr_db.toFixed(1)}:nf=${ac.denoise.noise_floor_db.toFixed(1)}`,
+        `atrim=start=${AFFTDN_LATENCY_SEC}`,
+        `asetpts=PTS-STARTPTS`
       );
     }
     if (ac.voice_clarity.enabled) {

@@ -2552,6 +2552,17 @@ export const DIAGNOSTICS = {
       cueId
     ),
 
+  // [szb G786–G789] audio fade validation for lane cues and spine clips.
+  INVALID_AUDIO_FADE: (itemId: string, detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G786",
+      "G3_TIMING",
+      "ERROR",
+      `Audio fade for '${itemId}' is invalid: ${detail} (gate G3: a fade must be a finite time from 0ms up to the item duration).`,
+      `Set fades within 0ms and the item duration ('cuthol lane update-cue --cue ${itemId} --fade-out 200ms'); rule: 'cuthol explain G786'.`,
+      itemId
+    ),
+
   // --- Composition coordinates: codes CUTHOL-G417, CUTHOL-G418, CUTHOL-G419, CUTHOL-G428, CUTHOL-G429 ---
   COORDS_MEASUREMENT_FAILED: (cueId: string, reason: string) =>
     createDiagnostic(

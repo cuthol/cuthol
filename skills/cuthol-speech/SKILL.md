@@ -89,15 +89,16 @@ Two ways to use local models: the `local` door (sidecar transcript, or
 `CUTHOL_LOCAL_ASR_CMD` / `CUTHOL_LOCAL_TTS_CMD`) or an `ext:` provider
 extension (see `cuthol-extensions`).
 
-Keyless local speech needs no API keys and no hand-wiring: run
-`cuthol setup --local-speech --apply` once (private venv under the user data
-folder, pinned faster-whisper + Piper voice), then `provider="local"` just
-works; explicit `CUTHOL_LOCAL_*_CMD` still wins when set. Choose it for
-offline or zero-cost transcription and voiceover. Limits: product and brand
-names are sometimes misheard (pass them as project keyterms, forwarded as
-Whisper hotwords), numbers come back as digits, and Turkish TTS word timings
-are proportional estimates, not measured. The `small` model is ~2x faster
-than `large-v3-turbo` at similar timing quality.
+Keyless local speech needs no API keys: install **one** engine once.
+`cuthol setup --local-speech` (dry run) lists both. `--engine parakeet --apply`
+is fast and accurate for 25 European languages (no Turkish; pass `lang`);
+`--engine whisper --apply` covers every language including Turkish and also
+installs the Piper voice for local voiceover. Then `provider="local"` just
+works; explicit `CUTHOL_LOCAL_*_CMD` still wins when set. Details and the
+language list: `references/local-asr.md`. Limits: product and brand names are
+sometimes misheard (pass them as `keyterms`; nothing is sent by default),
+numbers come back as digits, and Turkish TTS word timings are proportional
+estimates, not measured.
 
 Music and effects can come from a provider shelf: `library.search(provider=
 "ext:media-folder", kind="music", query="calm", min="10s", max="60s")` lists

@@ -66,7 +66,7 @@ and never reused; they may appear in old projects and logs.
 | G234 | SYS ERROR | Provider script crashed / missing output → check script and config. |
 | G235 | SYS WARN | Extension TTS returned audio without alignment → no word timings; transcribe the voiceover or change provider. |
 | G236 | G2 ERROR | Media provider has no candidate with that id → `library.search` again. |
-| G237 | SYS ERROR | Keyless local speech not installed → `cuthol setup --local-speech --apply` (or wire `CUTHOL_LOCAL_*_CMD`). |
+| G237 | SYS ERROR | Keyless local speech not installed (or the installed engine cannot do this language) → `cuthol setup --local-speech --engine parakeet --apply` or `--engine whisper` (or wire `CUTHOL_LOCAL_*_CMD`). |
 | G238 | SYS ERROR | Local speech setup failed at a step → fix the cause, re-run with `--apply`. |
 | G239 | SYS ERROR | Local speech bridge (ASR/TTS) failed → re-run setup with `--apply`, then retry. |
 | G301 | G3 ERROR | Clip shorter than 2 frames. |

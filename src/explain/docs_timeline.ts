@@ -38,6 +38,18 @@ export const TIMELINE_DOCS: DiagnosticDoc[] = [
     fix: ["'cuthol lane add-cue --lane <ln_XX> --at <ms>ms --duration <ms>ms'", "Extend the adjacent cue; ignore if the empty backdrop is intentional.", "'cuthol explain G308'"],
   },
   {
+    code: "G786",
+    title: "Invalid audio fade length on a cue or clip",
+    checks: "Validates each --fade-in/--fade-out value for lane cues (lane update-cue) and spine clips (spine mute/unmute) through the shared assertAudioFadeMs guard: the value must be a finite number from 0ms up to the item's own duration.",
+    fires_when: "updateLaneCue or setSpineMute receives a non-finite (NaN/Infinity), negative, or over-duration fade (e.g. a 5 s fade on a 3 s cue); the write is rejected before anything is stored or journaled.",
+    source: "src/core/diagnostics.ts INVALID_AUDIO_FADE; src/sequence/lanes.ts assertAudioFadeMs (called by updateLaneCue), src/sequence/spine_edit.ts setSpineMute",
+    severity: "ERROR",
+    gate: "G3_TIMING",
+    messageShape: "Audio fade for '${itemId}' is invalid: ${detail} (gate G3: a fade must be a finite time from 0ms up to the item duration).",
+    thresholds: [{ none: true, why: "The upper bound is the item's own duration, not a shared constant; any value outside 0..duration fires." }],
+    fix: ["cuthol lane update-cue --cue <cue_XX> --fade-out 200ms", "cuthol spine unmute --clip <sp_XX> --fade-in 100ms", "cuthol explain G786"],
+  },
+  {
     code: "G740",
     title: "Cleanup join-edge loudness summary",
     checks: "Measures loudness across each cleanup join edge and summarizes the share of loud joins.",

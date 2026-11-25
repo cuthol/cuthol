@@ -118,12 +118,12 @@ test("request model and keyterm param follow the language", async () => {
     assert.equal(seen.length, 5);
     const param = (i: number, name: string) => new URL(seen[i]).searchParams.getAll(name);
     assert.equal(new URL(seen[0]).searchParams.get("model"), "nova-2");
-    assert.deepEqual(param(0, "keywords"), ["Cuthol", "HyperFrames"]);
+    assert.deepEqual(param(0, "keywords"), []);
     assert.deepEqual(param(0, "keyterm"), []);
     assert.equal(new URL(seen[1]).searchParams.get("model"), "nova-2");
-    assert.deepEqual(param(1, "keywords"), ["Cuthol", "HyperFrames"]);
+    assert.deepEqual(param(1, "keywords"), []);
     assert.equal(new URL(seen[2]).searchParams.get("model"), "nova-3");
-    assert.deepEqual(param(2, "keyterm"), ["Cuthol", "HyperFrames"]);
+    assert.deepEqual(param(2, "keyterm"), []);
     assert.equal(new URL(seen[3]).searchParams.get("model"), "nova-3");
     assert.equal(new URL(seen[3]).searchParams.get("detect_language"), "true");
     assert.equal(new URL(seen[4]).searchParams.get("model"), "nova-3");
@@ -168,7 +168,7 @@ test("language helpers pick nova-2 for English only", () => {
   assert.equal(deepgramModelForLanguage(undefined), "nova-3");
 });
 
-function staleDoc(extra: Partial<TranscriptDocument> = {}): TranscriptDocument {
+function staleDoc(extra: Partial<TranscriptDocument> & Record<string, unknown> = {}): TranscriptDocument {
   return {
     provider: "deepgram",
     model: "nova-3",
@@ -338,7 +338,9 @@ test("explicit English re-transcribes a nova-3 record once; readers keep it", as
 
 test("Turkish nova-3 records keep hitting with no network use", async () => {
   const wsDir = setupMedia("ws_tr_nova3_hit");
-  seedDeepgram(wsDir, "deepgram:tr", staleDoc({ language: "tr", model: "nova-3" }));
+  // Stamped with the current scheme (keyterms it was made with, possibly
+  // none): records predating the stamp are re-transcribed once instead.
+  seedDeepgram(wsDir, "deepgram:tr", staleDoc({ language: "tr", model: "nova-3", keyterms: [] }));
   const prevProvider = ensureBuiltinProvider();
   const prevKey = process.env.DEEPGRAM_API_KEY;
   delete process.env.DEEPGRAM_API_KEY;

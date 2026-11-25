@@ -177,7 +177,7 @@ test("second setup run is a no-op (idempotent)", () => {
   const fake = makeFakeRoot();
   try {
     withEnv({ CUTHOL_DATA_DIR: fake.root }, () => {
-      const plan = planLocalSpeechSetup({});
+      const plan = planLocalSpeechSetup({ engine: "whisper" });
       assert.equal(plan.alreadyInstalled, true);
       const lines = describeLocalSpeechSetup(plan);
       assert.ok(lines.join("\n").includes("nothing to do"));
@@ -198,8 +198,13 @@ test("missing installation fails with the setup suggestion (G237)", async () => 
       CUTHOL_LOCAL_TTS_CMD: undefined,
     },
     async () => {
+      // Turkish stays on the Whisper path even where Parakeet is installed.
       await assert.rejects(
-        transcribeWithLocalProvider({ audioFilePath: path.join(dir, "no.wav"), durationMs: 1000 }),
+        transcribeWithLocalProvider({
+          audioFilePath: path.join(dir, "no.wav"),
+          language: "tr",
+          durationMs: 1000,
+        }),
         /CUTHOL-G237.*cuthol setup --local-speech --apply/
       );
       assert.equal(
@@ -211,7 +216,7 @@ test("missing installation fails with the setup suggestion (G237)", async () => 
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test("fake bridge transcribes with honest model id and keyterm default", async () => {
+test("fake bridge transcribes with honest model id and no default keyterms", async () => {
   const fake = useFakeRoot();
   try {
     const status = localSpeechStatus();
@@ -220,15 +225,28 @@ test("fake bridge transcribes with honest model id and keyterm default", async (
       audioFilePath: path.join(fake.root, "talk.wav"),
       language: "tr",
       durationMs: 2000,
+      engine: "whisper",
     });
     assert.equal(doc.provider, "local");
     assert.equal(doc.model, "faster-whisper-small");
     assert.equal(doc.language, "tr");
     assert.ok(
-      doc.words.some((w) => w.punctuated_word === "Cuthol"),
-      "default keyterms reach the bridge"
+      !doc.words.some((w) => w.punctuated_word === "Cuthol"),
+      "no keyterms reach the bridge by default"
     );
     assert.ok(doc.words.every((w) => Number.isFinite(w.source_start_ms)));
+    // Caller-given keyterms still reach the bridge payload.
+    const scoped = await transcribeWithLocalProvider({
+      audioFilePath: path.join(fake.root, "talk.wav"),
+      language: "tr",
+      durationMs: 2000,
+      engine: "whisper",
+      keyterms: ["Cuthol"],
+    });
+    assert.ok(
+      scoped.words.some((w) => w.punctuated_word === "Cuthol"),
+      "caller keyterms reach the bridge"
+    );
   } finally {
     removeFakeRoot(fake);
   }

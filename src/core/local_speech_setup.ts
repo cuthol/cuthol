@@ -17,19 +17,29 @@ import {
   LOCAL_SPEECH_PINNED_PACKAGES,
   LOCAL_SPEECH_VOICES,
   LocalSpeechConfig,
+  PARAKEET_DOWNLOAD_BYTES,
+  PARAKEET_LANGUAGES,
+  PARAKEET_MODEL_ID,
+  hyperframesBin,
   localSpeechRoot,
+  parakeetInstallState,
   type LocalSpeechModelName,
 } from "../speech/local_engine.js";
+
+export type LocalSpeechSetupEngine = "whisper" | "parakeet";
 
 export interface LocalSpeechSetupOptions {
   model?: string;
   voice?: string;
+  engine?: string;
   apply?: boolean;
 }
 
 export interface LocalSpeechSetupPlan {
   model: string;
   voice: string;
+  /** Chosen engine; undefined in the dry run until `--engine` names one. */
+  engine?: LocalSpeechSetupEngine;
   root: string;
   venvDir: string;
   modelRepo: string;
@@ -59,6 +69,28 @@ export function resolveLocalSpeechVoice(raw: string | undefined): string {
   return voice;
 }
 
+export function resolveLocalSpeechEngine(
+  raw: string | undefined,
+  opts: { requireChoice?: boolean } = {}
+): LocalSpeechSetupEngine | undefined {
+  const name = (raw ?? "").trim().toLowerCase();
+  if (!name) {
+    if (opts.requireChoice) {
+      fail(
+        "engine",
+        "Choose one engine: 'cuthol setup --local-speech --engine parakeet --apply' (fast, European languages) or " +
+          "'cuthol setup --local-speech --engine whisper --apply' (all languages including Turkish). " +
+          "Only the chosen engine is installed."
+      );
+    }
+    return undefined;
+  }
+  if (name !== "whisper" && name !== "parakeet") {
+    fail("validate", `Unknown engine '${raw}'. Use one of: whisper, parakeet.`);
+  }
+  return name as LocalSpeechSetupEngine;
+}
+
 function isInstalled(plan: LocalSpeechSetupPlan): boolean {
   const configPath = path.join(plan.root, LOCAL_SPEECH_CONFIG_FILE);
   let config: LocalSpeechConfig | null = null;
@@ -83,12 +115,14 @@ function venvPython(plan: LocalSpeechSetupPlan): string {
 }
 
 export function planLocalSpeechSetup(options: LocalSpeechSetupOptions = {}): LocalSpeechSetupPlan {
+  const engine = resolveLocalSpeechEngine(options.engine);
   const model = resolveLocalSpeechModel(options.model);
   const voice = resolveLocalSpeechVoice(options.voice);
   const root = localSpeechRoot();
   const plan: LocalSpeechSetupPlan = {
     model,
     voice,
+    ...(engine ? { engine } : {}),
     root,
     venvDir: path.join(root, "venv"),
     modelRepo: LOCAL_SPEECH_MODELS[model].repo,
@@ -99,7 +133,7 @@ export function planLocalSpeechSetup(options: LocalSpeechSetupOptions = {}): Loc
       LOCAL_SPEECH_VOICES[voice as keyof typeof LOCAL_SPEECH_VOICES].downloadBytes,
     alreadyInstalled: false,
   };
-  plan.alreadyInstalled = isInstalled(plan);
+  plan.alreadyInstalled = engine === "parakeet" ? parakeetInstallState().installed : isInstalled(plan);
   return plan;
 }
 
@@ -108,8 +142,41 @@ export function formatBytes(bytes: number): string {
   return `${Math.round(bytes / 1e6)} MB`;
 }
 
-/** Human-readable dry-run: exactly what `--apply` would install, with sizes. */
+/**
+ * Human-readable dry-run. Without `--engine` it prints both engines plainly
+ * (name, size, speed on a 10-min talk, languages, install command) so the
+ * user picks one; with `--engine` exactly what `--apply` would install.
+ * Only the chosen engine is ever installed.
+ */
 export function describeLocalSpeechSetup(plan: LocalSpeechSetupPlan): string[] {
+  if (plan.engine === undefined) {
+    return [
+      "local speech installs exactly one engine (only the chosen one is downloaded):",
+      `- parakeet (HyperFrames '${PARAKEET_MODEL_ID}', via 'hyperframes models install parakeet'): ` +
+        `${formatBytes(PARAKEET_DOWNLOAD_BYTES)} download; ~85 s for a 10-min English talk (1664 words, 50 fillers); ` +
+        `covers ${PARAKEET_LANGUAGES.length} European languages (${PARAKEET_LANGUAGES.join(", ")}), not Turkish; ` +
+        `needs '--lang' (it does not report the detected language); ` +
+        `install with 'cuthol setup --local-speech --engine parakeet --apply'.`,
+      `- whisper (faster-whisper==${LOCAL_SPEECH_PINNED_PACKAGES.fasterWhisper} '${plan.model}' + piper-tts==${LOCAL_SPEECH_PINNED_PACKAGES.piperTts} voice '${plan.voice}'): ` +
+        `${formatBytes(plan.downloadBytes)} model + voice download (plus ~310 MB venv with packages) into '${plan.root}'; ` +
+        `~121 s for a 10-min English talk (1685 words, 49 fillers); covers all languages including Turkish, auto-detects; ` +
+        `install with 'cuthol setup --local-speech --engine whisper --apply'.`,
+      "no engine is installed by default: re-run with '--engine <parakeet|whisper> --apply' to install one; " +
+        "running setup twice installs both, and '--provider local' then uses Parakeet for the languages it covers, Whisper otherwise.",
+    ];
+  }
+  if (plan.engine === "parakeet") {
+    if (plan.alreadyInstalled) {
+      return [`local speech engine parakeet already installed (HyperFrames '${PARAKEET_MODEL_ID}'); nothing to do.`];
+    }
+    return [
+      `local speech would install engine parakeet via 'hyperframes models install parakeet' (${formatBytes(PARAKEET_DOWNLOAD_BYTES)} download, HyperFrames cache):`,
+      `- engine: Parakeet '${PARAKEET_MODEL_ID}' (~85 s for a 10-min English talk, 1664 words, 50 fillers)`,
+      `- covers ${PARAKEET_LANGUAGES.length} European languages (${PARAKEET_LANGUAGES.join(", ")}), not Turkish`,
+      `- Whisper is untouched: Turkish and auto-detect need 'cuthol setup --local-speech --engine whisper --apply'`,
+      `re-run with '--apply' to install.`,
+    ];
+  }
   if (plan.alreadyInstalled) {
     return [
       `local speech already installed in '${plan.root}' (model ${plan.model}, voice ${plan.voice}); nothing to do.`,
@@ -213,11 +280,45 @@ export function verifyLocalSpeechPiper(plan: LocalSpeechSetupPlan): void {
   }
 }
 
+async function applyParakeetSetup(
+  plan: LocalSpeechSetupPlan,
+  startedAt: number
+): Promise<{ plan: LocalSpeechSetupPlan; noop: boolean; seconds: number }> {
+  if (plan.alreadyInstalled) {
+    return { plan, noop: true, seconds: 0 };
+  }
+  // Parakeet installs through the pinned HyperFrames CLI (its public
+  // command; nothing is patched): exactly one engine is downloaded.
+  const bin = hyperframesBin();
+  if (!fs.existsSync(bin)) {
+    fail("parakeet-install", `HyperFrames CLI missing at '${bin}'.`);
+  }
+  const proc = spawnSync(process.execPath, [bin, "models", "install", "parakeet", "--json"], {
+    windowsHide: true,
+    encoding: "utf8",
+    timeout: 280_000,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  if (proc.status !== 0 || proc.error) {
+    fail(
+      "parakeet-install",
+      `${bin} models install parakeet exited with ${proc.status ?? proc.error}: ${(proc.stderr || proc.stdout || "").slice(-500)}`
+    );
+  }
+  return { plan, noop: false, seconds: Math.round((Date.now() - startedAt) / 1000) };
+}
+
 export async function applyLocalSpeechSetup(
   options: LocalSpeechSetupOptions = {},
   startedAt = Date.now()
 ): Promise<{ plan: LocalSpeechSetupPlan; noop: boolean; seconds: number }> {
-  const plan = planLocalSpeechSetup(options);
+  // `--apply` without `--engine` installs nothing: the choice is explicit,
+  // there is no silent default download.
+  const engine = resolveLocalSpeechEngine(options.engine, { requireChoice: true });
+  const plan = planLocalSpeechSetup({ ...options, engine });
+  if (engine === "parakeet") {
+    return applyParakeetSetup(plan, startedAt);
+  }
   if (plan.alreadyInstalled) {
     verifyLocalSpeechPiper(plan);
     return { plan, noop: true, seconds: 0 };

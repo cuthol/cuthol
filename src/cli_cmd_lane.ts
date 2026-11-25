@@ -363,6 +363,8 @@ export async function runLaneCommand(ctx: CliCommandContext): Promise<CliCommand
           : { ref: anchorRef, offset_ms: parseTimeMs(offsetRaw) }
         : undefined;
     const compAudioMode = parseCompositionAudioFlag(cueId, strFlag(flags, "composition-audio"));
+    const fadeInRaw = strFlag(flags, "fade-in");
+    const fadeOutRaw = strFlag(flags, "fade-out");
     const wantsLaneUpdate =
       compAudioMode === undefined ||
       atRaw !== undefined ||
@@ -383,7 +385,9 @@ export async function runLaneCommand(ctx: CliCommandContext): Promise<CliCommand
       flags["size"] !== undefined ||
       flags["max-width"] !== undefined ||
       flags["gain-db"] !== undefined ||
-      flags["muted"] !== undefined;
+      flags["muted"] !== undefined ||
+      fadeInRaw !== undefined ||
+      fadeOutRaw !== undefined;
     let res = wantsLaneUpdate
       ? updateLaneCue({
           workspaceDir,
@@ -406,6 +410,8 @@ export async function runLaneCommand(ctx: CliCommandContext): Promise<CliCommand
           maxWidthPct: numFlag(flags, "max-width"),
           gainDb: numFlag(flags, "gain-db"),
           muted: boolFlag(flags, "muted"),
+          fadeInMs: fadeInRaw !== undefined ? parseTimeMs(fadeInRaw, { allowNegative: true }) : undefined,
+          fadeOutMs: fadeOutRaw !== undefined ? parseTimeMs(fadeOutRaw, { allowNegative: true }) : undefined,
         })
       : null;
     if (compAudioMode !== undefined) {

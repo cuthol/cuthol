@@ -71,6 +71,7 @@ export async function runSetupCommand(ctx: CliCommandContext): Promise<CliComman
     const plan = planLocalSpeechSetup({
       model: strFlag(flags, "model"),
       voice: strFlag(flags, "voice"),
+      engine: strFlag(flags, "engine"),
     });
     const wantsLocalJson = Boolean(flags["json"]);
     if (!boolFlag(flags, "apply", false)) {
@@ -88,7 +89,7 @@ export async function runSetupCommand(ctx: CliCommandContext): Promise<CliComman
     }
     const startedAt = Date.now();
     const { noop, seconds } = await applyLocalSpeechSetup(
-      { model: plan.model, voice: plan.voice, apply: true },
+      { model: plan.model, voice: plan.voice, engine: strFlag(flags, "engine"), apply: true },
       startedAt
     );
     if (wantsLocalJson) {
@@ -103,12 +104,16 @@ export async function runSetupCommand(ctx: CliCommandContext): Promise<CliComman
     }
     if (noop) {
       console.log(
-        `local speech already installed in '${plan.root}' (model ${plan.model}, voice ${plan.voice}); nothing to do.`
+        plan.engine === "parakeet"
+          ? `local speech engine parakeet already installed; nothing to do.`
+          : `local speech already installed in '${plan.root}' (model ${plan.model}, voice ${plan.voice}); nothing to do.`
       );
       return;
     }
     console.log(
-      `local speech installed in '${plan.root}' (model ${plan.model}, voice ${plan.voice}) in ${seconds}s.`
+      plan.engine === "parakeet"
+        ? `local speech engine parakeet installed in ${seconds}s.`
+        : `local speech installed in '${plan.root}' (model ${plan.model}, voice ${plan.voice}) in ${seconds}s.`
     );
     return;
   }

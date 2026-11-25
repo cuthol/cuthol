@@ -17,6 +17,7 @@ import {
   LOCAL_ASR_ENGINE_REVISION,
   LOCAL_SPEECH_DEFAULT_MODEL,
   localSpeechStatus,
+  resolveLocalEngine,
   runLocalAsrBridge,
   runLocalTtsBridge,
 } from "./local_engine.js";
@@ -45,6 +46,12 @@ export interface DetectedDisfluencySpan {
 export interface TranscriptDocument {
   provider: AsrProviderId;
   model: string;
+  /**
+   * Local ASR engine that produced the transcript (`whisper`, `parakeet`,
+   * `sidecar`, `custom-cli`; Deepgram records the model id). Present on
+   * fresh transcripts; older cached records lack it.
+   */
+  engine?: string;
   language: string;
   duration_ms: number;
   text: string;
@@ -267,8 +274,11 @@ export async function transcribeWithDeepgram(options: {
   } else {
     params.set("detect_language", "true");
   }
+  // No default key terms: bias words go on the request only when the caller
+  // gives them (`--keyterms`, project setting). Unconditional defaults once
+  // made "Cuthol"/"HyperFrames" appear in transcripts that never said them.
   const keytermParam = model === "nova-2" ? "keywords" : "keyterm";
-  for (const term of options.keyterms ?? ["Cuthol", "HyperFrames"]) {
+  for (const term of options.keyterms ?? []) {
     if (term.trim()) {
       params.append(keytermParam, term.trim());
     }
@@ -323,6 +333,7 @@ export async function transcribeWithDeepgram(options: {
   return {
     provider: "deepgram",
     model,
+    engine: model,
     language: ch?.detected_language ?? options.language ?? "auto",
     duration_ms: options.durationMs,
     text: alt?.transcript ?? words.map((w) => w.punctuated_word).join(" "),
@@ -355,6 +366,7 @@ export async function transcribeWithLocalProvider(options: {
   durationMs: number;
   keyterms?: string[];
   modelName?: string;
+  engine?: string;
 }): Promise<TranscriptDocument> {
   const sidecarPath = `${options.audioFilePath}.transcript.json`;
   if (fs.existsSync(sidecarPath)) {
@@ -404,6 +416,7 @@ export async function transcribeWithLocalProvider(options: {
     return {
       provider: "local",
       model: "local-sidecar",
+      engine: "sidecar",
       language: sidecarLang,
       duration_ms: options.durationMs,
       text: raw.text ?? words.map((w) => w.punctuated_word).join(" "),
@@ -466,6 +479,7 @@ export async function transcribeWithLocalProvider(options: {
     return {
       provider: "local",
       model: "custom-cli",
+      engine: "custom-cli",
       language: cmdLang,
       duration_ms: options.durationMs,
       text: words.map((w) => w.punctuated_word).join(" "),
@@ -475,18 +489,25 @@ export async function transcribeWithLocalProvider(options: {
     };
   }
 
-  // Keyless fallback: the private installation from `cuthol setup --local-speech --apply`.
-  const localStatus = localSpeechStatus();
-  if (!localStatus.installed) {
-    throw new CutholError(DIAGNOSTICS.LOCAL_SPEECH_NOT_INSTALLED(localStatus.reason));
+  // Keyless fallback: the engine is resolved first so a Parakeet-only
+  // machine never trips the faster-whisper install gate (runLocalAsrBridge
+  // re-resolves from its cache and fails with the install diagnostic when
+  // the wanted engine is missing).
+  const wantedEngine = resolveLocalEngine({ language: options.language, forced: options.engine });
+  if (wantedEngine === "whisper") {
+    const localStatus = localSpeechStatus();
+    if (!localStatus.installed) {
+      throw new CutholError(DIAGNOSTICS.LOCAL_SPEECH_NOT_INSTALLED(localStatus.reason));
+    }
   }
-  const keyterms =
-    options.keyterms && options.keyterms.length > 0 ? options.keyterms : ["Cuthol", "HyperFrames"];
+  // No default key terms (same reason as the Deepgram path above): the
+  // bridge only receives caller-given terms.
   const bridge = runLocalAsrBridge({
     audioFilePath: options.audioFilePath,
     language: options.language,
     modelName: options.modelName ?? LOCAL_SPEECH_DEFAULT_MODEL,
-    keyterms,
+    keyterms: options.keyterms ?? [],
+    ...(options.engine !== undefined ? { engine: options.engine as "whisper" | "parakeet" } : {}),
   });
   const sanitizedBridgeWords = bridge.words
     .filter((w) => w && typeof w.word === "string")
@@ -500,7 +521,8 @@ export async function transcribeWithLocalProvider(options: {
   const { words, disfluencies } = annotateWordsAndDisfluencies(sanitizedBridgeWords, options.durationMs);
   return {
     provider: "local",
-    model: `faster-whisper-${bridge.modelName}`,
+    model: bridge.engine === "parakeet" ? bridge.modelName : `faster-whisper-${bridge.modelName}`,
+    engine: bridge.engine,
     language: bridge.language,
     duration_ms: options.durationMs,
     text: words.map((w) => w.punctuated_word).join(" "),

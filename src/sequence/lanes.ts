@@ -346,6 +346,18 @@ export function addLaneCue(options: {
   return { cue: result, revision, verification };
 }
 
+/**
+ * Shared audio-fade guard for lane cues and spine clips: a fade must be a
+ * finite time between 0 and the item duration (inclusive).
+ */
+export function assertAudioFadeMs(itemId: string, side: string, valueMs: number, durationMs: number): void {
+  if (!Number.isFinite(valueMs) || valueMs < 0 || valueMs > durationMs) {
+    throw new CutholError(
+      DIAGNOSTICS.INVALID_AUDIO_FADE(itemId, `'--${side} ${String(valueMs)}ms' is outside 0ms..${durationMs}ms`)
+    );
+  }
+}
+
 export function updateLaneCue(options: {
   workspaceDir: string;
   cueId: string;
@@ -367,6 +379,8 @@ export function updateLaneCue(options: {
   maxWidthPct?: number;
   gainDb?: number;
   muted?: boolean;
+  fadeInMs?: number;
+  fadeOutMs?: number;
 }): { cue: LaneCue; revision: number; verification: VerificationReport } {
   const { result, revision, verification } = commitVerifiedMutation(
     options.workspaceDir,
@@ -541,6 +555,16 @@ export function updateLaneCue(options: {
       if (options.muted !== undefined) {
         if (!targetCue.audio_chain) targetCue.audio_chain = createDefaultAudioChain();
         targetCue.audio_chain.muted = options.muted;
+      }
+      if (options.fadeInMs !== undefined) {
+        assertAudioFadeMs(targetCue.id, "fade-in", options.fadeInMs, targetCue.duration_ms);
+        if (!targetCue.audio_chain) targetCue.audio_chain = createDefaultAudioChain();
+        targetCue.audio_chain.fade_in_ms = options.fadeInMs;
+      }
+      if (options.fadeOutMs !== undefined) {
+        assertAudioFadeMs(targetCue.id, "fade-out", options.fadeOutMs, targetCue.duration_ms);
+        if (!targetCue.audio_chain) targetCue.audio_chain = createDefaultAudioChain();
+        targetCue.audio_chain.fade_out_ms = options.fadeOutMs;
       }
 
       targetCue.at_ms = resolveCueStartMs(seq, targetCue);
