@@ -9,6 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { compileSequenceRenderPlan } from "../compositor/compiler.js";
+import { rmRetrySync } from "../core/fs_retry.js";
 import { initWorkspace, loadSequence } from "../core/workspace.js";
 import { ensurePlanPrePasses } from "../render/pre_pass.js";
 import { ingestAssetsIntoWorkspace } from "../library/probe.js";
@@ -68,7 +69,7 @@ function installSignalHandlers(): void {
   const cleanup = (): void => {
     for (const dir of trackedTempDirs) {
       try {
-        fs.rmSync(dir, { recursive: true, force: true, maxRetries: 2, retryDelay: 100 });
+        rmRetrySync(dir);
       } catch {
         // best effort
       }
@@ -176,7 +177,7 @@ function cleanStaleSandboxes(): void {
     try {
       const st = fs.statSync(full);
       if (!st.isDirectory() || Date.now() - st.mtimeMs < STALE_MS) continue;
-      fs.rmSync(full, { recursive: true, force: true, maxRetries: 2, retryDelay: 100 });
+      rmRetrySync(full);
     } catch {
       // best effort
     }
@@ -197,7 +198,7 @@ export function openFxSandbox(opts: FxSandboxOpenOptions & { kind?: string; filt
     clearTimeout(watchdog);
     process.removeListener("SIGINT", onSigint);
     try {
-      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      rmRetrySync(dir);
     } catch {
       // best effort
     }
@@ -274,13 +275,16 @@ export function renderSandboxPngs(sb: FxSandbox, outDir: string, opts: { frames?
   const outPattern = path.join(outDir, "f_%02d.png");
   const graphFile = path.join(outDir, "graph.txt");
   fs.writeFileSync(graphFile, plan.filterComplex, "utf8");
+  const started = Date.now();
   const r = spawnSync(
     "ffmpeg",
     ["-y", "-v", "error", ...plan.inputArgs, "-/filter_complex", graphFile, "-map", plan.videoOutPad, "-frames:v", String(frames), "-fps_mode", "cfr", outPattern, "-map", plan.audioOutPad, "-f", "null", "-"],
     { encoding: "utf8", timeout: 120_000, cwd: paths.rootDir as string, windowsHide: true }
   );
   if (r.error || r.status !== 0) {
-    throw new Error(`sandbox render failed: ${String(r.stderr ?? r.error ?? "").split("\n").slice(0, 4).join(" | ").slice(0, 400)}`);
+    throw new Error(
+      `sandbox render failed: exit=${r.status} signal=${r.signal} elapsed=${Date.now() - started}ms timeout=120000ms stderr=${String(r.stderr ?? r.error ?? "").slice(-500) || "no stderr"}`
+    );
   }
   const pngs = fs.readdirSync(outDir).filter((f) => f.endsWith(".png")).sort().map((f) => path.join(outDir, f));
   if (pngs.length === 0) throw new Error("sandbox render produced no frames");
@@ -306,13 +310,16 @@ export function renderSandboxFramesAtTimes(sb: FxSandbox, outDir: string, times:
   const outPattern = path.join(framesDir, "f_%04d.png");
   const graphFile = path.join(outDir, "graph.txt");
   fs.writeFileSync(graphFile, plan.filterComplex, "utf8");
+  const started = Date.now();
   const r = spawnSync(
     "ffmpeg",
     ["-y", "-v", "error", ...plan.inputArgs, "-/filter_complex", graphFile, "-map", plan.videoOutPad, "-frames:v", String(frames), "-fps_mode", "cfr", outPattern, "-map", plan.audioOutPad, "-f", "null", "-"],
     { encoding: "utf8", timeout: 180_000, cwd: paths.rootDir as string, windowsHide: true }
   );
   if (r.error || r.status !== 0) {
-    throw new Error(`sandbox render failed: ${String(r.stderr ?? r.error ?? "").split("\n").slice(0, 4).join(" | ").slice(0, 400)}`);
+    throw new Error(
+      `sandbox render failed: exit=${r.status} signal=${r.signal} elapsed=${Date.now() - started}ms timeout=180000ms stderr=${String(r.stderr ?? r.error ?? "").slice(-500) || "no stderr"}`
+    );
   }
   const all = fs.readdirSync(framesDir).filter((f) => f.endsWith(".png")).sort().map((f) => path.join(framesDir, f));
   if (all.length === 0) throw new Error("sandbox render produced no frames");

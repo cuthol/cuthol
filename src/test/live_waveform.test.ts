@@ -4,6 +4,7 @@
  * carries peaks; the ledger stays writable for a concurrent CLI while the worker runs.
  */
 import "./test_setup.js";
+import { rmRetrySync } from "./fs_cleanup.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -64,13 +65,13 @@ test.after(async () => {
   }
   for (const dir of DIRS.slice(1)) {
     try {
-      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      rmRetrySync(dir);
     } catch {
       // best effort
     }
   }
   try {
-    fs.rmSync(ROOT, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(ROOT);
   } catch {
     // best effort
   }

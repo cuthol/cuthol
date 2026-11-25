@@ -5,6 +5,7 @@
  * event with the same upper time limit as the per-file versions it replaces.
  * No thresholds, durations, presets or assertions are changed by this file.
  */
+export { rmRetrySync } from "./fs_cleanup.js";
 
 /** Wait until `fn` returns truthy (poll 50 ms) or throw after `timeoutMs`. */
 export async function waitFor<T>(

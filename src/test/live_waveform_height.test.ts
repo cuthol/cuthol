@@ -13,6 +13,7 @@ import test, { after } from "node:test";
 import puppeteer, { type Browser } from "puppeteer-core";
 import { resolveCoordsChromePath } from "../compositor/coords_extract.js";
 import { waitFor } from "./b_helpers.js";
+import { rmRetrySync } from "./fs_cleanup.js";
 
 process.env.CUTHOL_SKILLS_AUTO = "0";
 
@@ -77,7 +78,7 @@ after(async () => {
     browser = null;
   }
   try {
-    fs.rmSync(SHOTS, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(SHOTS);
   } catch {
     // best effort
   }
@@ -155,7 +156,7 @@ for (const [name, aspect] of [["16x9", undefined], ["9x16", "9:16"]] as Array<[s
       }
     } finally {
       await stopLive(fx);
-      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      rmRetrySync(dir);
     }
   });
 }

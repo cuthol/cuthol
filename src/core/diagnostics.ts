@@ -394,6 +394,47 @@ export const DIAGNOSTICS = {
       `Could not write '${file}': ${reason}.`,
       `Check that the folder exists and is writable.`
     ),
+  // [setup G250–G254] pinned ffmpeg install
+  FFMPEG_SETUP_FAILED: (step: string, detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G250",
+      "SYS",
+      "ERROR",
+      `ffmpeg setup failed at '${step}': ${detail}`,
+      `Fix the underlying problem and re-run 'cuthol setup --ffmpeg --apply'.`
+    ),
+  FFMPEG_SETUP_UNSUPPORTED: (platform: string, hint: string) =>
+    createDiagnostic(
+      "CUTHOL-G251",
+      "SYS",
+      "ERROR",
+      `No pinned ffmpeg build for platform '${platform}': ${hint}`,
+      `Install ffmpeg 8.x with your package manager and check 'ffmpeg -version' shows 8.x.`
+    ),
+  FFMPEG_SETUP_HASH_MISMATCH: (actual: string, expected: string) =>
+    createDiagnostic(
+      "CUTHOL-G252",
+      "SYS",
+      "ERROR",
+      `Downloaded ffmpeg archive failed verification (sha256 ${actual}, expected ${expected}); the file was deleted.`,
+      `Re-run 'cuthol setup --ffmpeg --apply' to retry the download.`
+    ),
+  FFMPEG_SETUP_TRUNCATED: (actual: number, expected: number) =>
+    createDiagnostic(
+      "CUTHOL-G253",
+      "SYS",
+      "ERROR",
+      `Downloaded ffmpeg archive is truncated (${actual} of ${expected} bytes); the file was deleted.`,
+      `Re-run 'cuthol setup --ffmpeg --apply' to retry the download.`
+    ),
+  FFMPEG_SETUP_VERIFY_FAILED: (detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G254",
+      "SYS",
+      "ERROR",
+      `Installed ffmpeg failed its version check: ${detail}`,
+      `Remove the install folder and re-run 'cuthol setup --ffmpeg --apply'.`
+    ),
   // [lane-mute G125–G126]
   LANE_MUTE_SPINE: () =>
     createDiagnostic(
@@ -868,7 +909,7 @@ export const DIAGNOSTICS = {
       "G2_ASSETS",
       "WARN",
       `${tool} ${found} found; Cuthol is tested with ffmpeg/ffprobe 8.x (tempo, loudness and scene analysis may differ).`,
-      `Install ffmpeg and ffprobe 8.x on PATH and re-run.`
+      `Install ffmpeg and ffprobe 8.x on PATH and re-run, or run 'cuthol setup --ffmpeg --apply'.`
     ),
 
   // --- Keyless local speech: CUTHOL-G237–G239 ---
@@ -1185,12 +1226,13 @@ export const DIAGNOSTICS = {
   BARE_BACKDROP_UNDER_TRANSPARENT_COMPOSITION: (
     spans: Array<{ start_ms: number; end_ms: number }>,
     backdropColor: string,
-    cueIds: string[]
+    cueIds: string[],
+    severity: "WARN" | "INFO" = "INFO"
   ) =>
     createDiagnostic(
       "CUTHOL-G316",
       "G3_TIMING",
-      "INFO",
+      severity,
       `Spine is empty and in ${spans.map((s) => `${s.start_ms}..${s.end_ms}ms`).join(", ")} the only picture comes from transparent composition cue(s) ${cueIds.map((id) => `'${id}'`).join(", ")} with mostly-empty alpha; bare stage backdrop (${backdropColor}) shows through.`,
       `Set a base color with 'cuthol workspace backdrop --color #RRGGBB', or add an opaque background layer under the composition.`
     ),
@@ -2775,6 +2817,72 @@ export const DIAGNOSTICS = {
       `Live preview of '${item}' is approximate for shaders (${detail}).`,
       `Use the Exact frame button to compare with the render.`,
       item
+    ),
+
+  // ---------------------------------------------------------------------------------------------------
+
+  // [ed G380–G389] silent-edit guards: orphan fx envelopes, empty splits, transcript-less captions.
+  ENVELOPE_FX_ORPHAN: (ownerId: string, parameter: string, fxId: string, fxIds: string[]) =>
+    createDiagnostic(
+      "CUTHOL-G380",
+      "G1_SCHEMA",
+      "ERROR",
+      `Envelope '${parameter}' on '${ownerId}' cannot be written: no effect with id '${fxId}' exists on '${ownerId}'.`,
+      fxIds.length > 0
+        ? `'${ownerId}' carries fx: ${fxIds.join(", ")}. Envelope one of their parameters instead ('cuthol spine envelope --item ${ownerId} --param fx.<fx-id>.<param> --points <...>'), or add the effect first ('cuthol spine fx add --item ${ownerId} ...').`
+        : `'${ownerId}' carries no fx entries. Add the effect first ('cuthol spine fx add --item ${ownerId} ...'), then envelope its parameter.`,
+      ownerId
+    ),
+  ENVELOPE_FX_PARAM_NOT_ANIMATABLE: (
+    ownerId: string, parameter: string, fxId: string, kind: string, animatable: string[]
+  ) =>
+    createDiagnostic(
+      "CUTHOL-G381",
+      "G1_SCHEMA",
+      "ERROR",
+      `Envelope '${parameter}' on '${ownerId}' cannot be written: '${parameter.split(".").slice(2).join(".") || parameter}' is not an envelopable parameter of effect '${fxId}' ('${kind}').`,
+      animatable.length > 0
+        ? `Envelopable parameters of '${fxId}': ${animatable.join(", ")}. Envelope one of those instead ('cuthol spine envelope --item ${ownerId} --param fx.${fxId}.<param> --points <...>').`
+        : `Effect '${fxId}' ('${kind}') declares no envelopable parameter, so it cannot carry an envelope. Remove the envelope or pick another effect.`,
+      ownerId
+    ),
+  VERIFY_FX_ENVELOPE_ORPHAN: (ownerId: string, parameter: string, fxId: string) =>
+    createDiagnostic(
+      "CUTHOL-G382",
+      "G1_SCHEMA",
+      "WARN",
+      `Envelope '${parameter}' on '${ownerId}' is orphaned: no effect with id '${fxId}' exists on '${ownerId}' (written by an older build; it has no effect on the render).`,
+      `Remove the envelope ('cuthol spine envelope --item ${ownerId} ...') or re-add the effect it belonged to.`,
+      ownerId
+    ),
+  SPINE_SPLIT_NO_POINT: (
+    clipId: string, givenMs: number[], localMinMs: number, localMaxMs: number, seqMinMs: number, seqMaxMs: number
+  ) =>
+    createDiagnostic(
+      "CUTHOL-G383",
+      "G1_SCHEMA",
+      "ERROR",
+      `Split of '${clipId}' wrote nothing: no split point falls strictly inside the clip (given: ${givenMs.join(", ")}ms).`,
+      `'--at' is clip-local: use a point in ${localMinMs}..${localMaxMs}ms, or pass a sequence time in ${seqMinMs}..${seqMaxMs}ms with '--sequence-time'.`,
+      clipId
+    ),
+  CAPTIONS_NO_TRANSCRIPT: (itemIds: string[], handles: string[]) =>
+    createDiagnostic(
+      "CUTHOL-G384",
+      "G2_ASSETS",
+      "WARN",
+      `Caption run wrote nothing: spine item(s) ${itemIds.join(", ")} have no transcript (source: ${handles.join(", ")}).`,
+      `Transcribe first ('cuthol speech transcribe --handle <h>'), then re-run captions.`,
+      itemIds[0]
+    ),
+  CAPTIONS_PARTIAL_TRANSCRIPT: (itemIds: string[], handles: string[]) =>
+    createDiagnostic(
+      "CUTHOL-G385",
+      "G2_ASSETS",
+      "WARN",
+      `Caption run skipped untranscribed spine item(s) ${itemIds.join(", ")} (source: ${handles.join(", ")}); captions cover the transcribed items only.`,
+      `Transcribe the rest ('cuthol speech transcribe --handle <h>') and re-run captions for full coverage.`,
+      itemIds[0]
     ),
 
   // ---------------------------------------------------------------------------------------------------

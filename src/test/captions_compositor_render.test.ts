@@ -904,7 +904,7 @@ test("7. Regression suite", () => {
 
   // Verify crop and rotate are applied
   assert.match(plan.filterComplex, /crop=w=iw\*0\.9000:h=ih\*0\.9000/);
-  assert.match(plan.filterComplex, /rotate=0\.0873:ow='rotw\(0\.0873\)':oh='roth\(0\.0873\)':c=none/);
+  assert.match(plan.filterComplex, /rotate=0\.0873:ow='rotw\(0\.0873\)':oh='roth\(0\.0873\)':c=black@0/);
 
   // Verify alimiter has level=disabled
   assert.match(plan.filterComplex, /alimiter=limit=0\.891:level=disabled/);

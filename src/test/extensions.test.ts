@@ -15,6 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { rmRetrySync } from "./fs_cleanup.js";
 import vm from "node:vm";
 import { syncCompositionBridgeFiles } from "../compositor/bridge_exporter.js";
 import { loadSequence } from "../core/workspace.js";
@@ -50,7 +51,7 @@ function makeTestAudioWav(outPath: string, durationSec = 3.0): void {
 
 function safeRm(dir: string): void {
   try {
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 80 });
+    rmRetrySync(dir);
   } catch {
     // ignore transient Windows handle cleanup
   }

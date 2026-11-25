@@ -8,6 +8,7 @@ import "./test_setup.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { rmRetrySync } from "./b_helpers.js";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -56,7 +57,7 @@ function withEnv(vars: Record<string, string | undefined>, fn: () => void): void
 
 function makeProject(name: string): string {
   const dir = path.join(ROOT, name);
-  fs.rmSync(dir, { recursive: true, force: true });
+  rmRetrySync(dir);
   initWorkspace({ dir, title: name, aspect: "16:9", fps: 30 });
   WORKSPACES.push(dir);
   return dir;

@@ -125,6 +125,91 @@ export function shaderPassPixFmt(receivedPixFmt: string | null): "rgba" | "rgba6
 export const SPINE_FX_ENTRY_CONVERTER = "scale=in_color_matrix=bt709:out_color_matrix=bt709:flags=bicubic+accurate_rnd+full_chroma_int";
 
 /**
+ * Entry bridge for a YUV-only filter on an RGB input: the stage receives
+ * RGBA, but the filter only takes YUV, so ffmpeg would absorb a
+ * default-precision RGB→YUV conversion into the bare entry converter (and pick
+ * a full-range format there, measured ~53 dB against the no-fx render on a
+ * neutral `eq`). Converting explicitly to limited-range `yuv444p` with the
+ * same accuracy keeps luma bit-exact and chroma at the 8-bit round-trip floor.
+ */
+export const SPINE_FX_YUV444_ENTRY = `${SPINE_FX_ENTRY_CONVERTER}:out_range=tv,format=yuv444p`;
+
+/** RGB input families that need the `SPINE_FX_YUV444_ENTRY` bridge before a YUV-only filter. */
+const RGB_FAMILY_RE = /^(rgba|argb|bgra|abgr|rgb0|bgr0|0rgb|0bgr|rgb24|bgr24|gbrp|gbrap)$/i;
+
+/**
+ * YUV-only entry rule. A comma-separated segment of the built-in raw chain is
+ * YUV-only when its filter name (leading token before `=`/`:`) is in
+ * `YUV_ONLY_FILTER_NAMES`: that set is measured from ffmpeg 8.1 negotiation
+ * probes (feed 16-bit YUV and planar RGB into the filter, read the
+ * auto-inserted scaler target): `eq` forces 8-bit YUV (`yuv444p16le`→`yuv444p`,
+ * `gbrp`→`yuv444p`, `yuva420p10le`→`yuva420p`, `gray10le`→`gray`), `hue` forces
+ * YUV at up to 10 bit (`yuv444p16le`→`yuv444p10le`, `yuv420p10le` stays,
+ * `yuv444p12le`→`yuv444p10le`). Every other probed filter (`colorbalance`,
+ * `curves`, `selectivecolor`, `colorchannelmixer`, `vignette`, `unsharp`,
+ * `negate`) takes RGB or any format and keeps the bare converter.
+ */
+const YUV_ONLY_FILTER_NAMES = new Set(["eq", "hue"]);
+
+/** Leading filter name of one raw-chain segment, lower-cased (`""` when none). */
+function builtinSegmentFilterName(segment: string): string {
+  const m = /^[a-zA-Z0-9_]+/.exec(segment.trim());
+  return m ? m[0].toLowerCase() : "";
+}
+
+/**
+ * Deep planar YUV (or gray) split into plane kind, subsampling and bit depth,
+ * or null when the format is 8-bit-or-less or not planar YUV (`rgba`, …).
+ * `yuv420p10le` → `{ kind: "yuv", sub: "420", depth: 10 }`.
+ */
+function splitDeepYuvPixFmt(pixFmt: string): { kind: "yuv" | "yuva" | "gray"; sub: string; depth: number } | null {
+  const m = /^(yuva|yuv|gray)(420|422|444|440|411|410)?p(9|10|12|14|16)(le|be)?$/.exec(
+    pixFmt.trim().toLowerCase()
+  );
+  if (!m) return null;
+  return { kind: m[1] as "yuv" | "yuva" | "gray", sub: m[2] ?? "", depth: Number(m[3]) };
+}
+
+/**
+ * Depth bridge without resampling or range change: plain `scale` with the
+ * stage's accuracy flags, so the reduction truncates exactly like the
+ * auto-inserted converters and the downstream canvas quantizers do. Truncating
+ * twice to the same grid composes to the single truncation (opaque 10-bit
+ * stays bit-exact), while a rounding bridge would differ from the downstream
+ * truncation by ±1 (measured 54.1 dB). Same subsampling/alpha/gray as the
+ * input, limited range, bt709 matrix.
+ */
+function deepDepthBridge(targetPixFmt: string): string {
+  return `${SPINE_FX_ENTRY_CONVERTER}:out_range=tv,format=${targetPixFmt}`;
+}
+
+/**
+ * Precise entry converter for one raw-chain segment, whatever its parameters
+ * (no parameter inspection): YUV-only filters get an explicit bridge so ffmpeg
+ * never auto-inserts a default-precision conversion, every other filter keeps
+ * the historical bare converter bit-exactly. `eq` only takes 8-bit YUV, so a
+ * deeper-than-8-bit input converts precisely to its 8-bit twin (same
+ * subsampling and alpha, so no resampling, only the unavoidable depth
+ * rounding); `hue` keeps up to 10 bit, so only deeper inputs bridge down.
+ */
+function yuvOnlyEntryConverter(filterName: string, receivedPixFmt: string | null): string {
+  if (!YUV_ONLY_FILTER_NAMES.has(filterName)) return SPINE_FX_ENTRY_CONVERTER;
+  const rx = (receivedPixFmt ?? "").trim();
+  if (RGB_FAMILY_RE.test(rx)) return SPINE_FX_YUV444_ENTRY;
+  const deep = splitDeepYuvPixFmt(rx);
+  if (!deep) return SPINE_FX_ENTRY_CONVERTER;
+  if (filterName === "hue") {
+    if (deep.depth <= 10) return SPINE_FX_ENTRY_CONVERTER;
+    const sub = deep.kind === "gray" ? "" : deep.sub || "444";
+    return deepDepthBridge(`${deep.kind}${sub}p10le`);
+  }
+  // `eq`: 8-bit twin of the received format (same subsampling/alpha/gray).
+  if (deep.kind === "gray") return deepDepthBridge("gray");
+  const sub = deep.sub || "444";
+  return deepDepthBridge(`${deep.kind}${sub}p`);
+}
+
+/**
  * Exit converter used when every stage after fx works on RGBA (mask, opacity, rotation,
  * transitions…): going back to the received YUV and then to RGBA would resample chroma twice,
  * so the fx stage hands over RGBA directly, converted with the same accuracy as the tail's
@@ -450,6 +535,41 @@ function alphaKeepPinPixFmt(receivedPixFmt: string | null): string {
 }
 
 /**
+ * Emits G267 when a composition cue with a temporal fx (tmix, motion blur, frame
+ * history) is compiled for a single frame: the single-frame compile feeds one
+ * repeated frame, so `monitor frame` differs from `render` there. Spine clips and
+ * non-composition cues never warn; full renders (no `singleFrameAtMs`) never warn.
+ */
+function maybeEmitCompositionTemporalSingleFrameWarning(
+  ctx: VideoGraphCompileContext,
+  owner: FxStageOwnerSpec,
+  filters: string[]
+): void {
+  if (ctx?.compileOptions?.singleFrameAtMs === undefined) return;
+  if (!fxStageHasTemporalFilter(filters)) return;
+  let isCompositionCue = false;
+  try {
+    for (const lane of ctx.seq?.lanes ?? []) {
+      for (const cue of lane.cues ?? []) {
+        if (cue.id === owner.id && cue.kind === "composition" && cue.composition) {
+          isCompositionCue = true;
+          break;
+        }
+      }
+      if (isCompositionCue) break;
+    }
+  } catch {
+    return;
+  }
+  if (!isCompositionCue) return;
+  const hit = filters.find((f) => TEMPORAL_FX_FILTER_RE.test(f)) ?? "temporal fx";
+  const holder = ctx as unknown as { compileWarnings?: import("../core/diagnostics.js").CutholDiagnostic[] };
+  if (!Array.isArray(holder.compileWarnings)) holder.compileWarnings = [];
+  if (holder.compileWarnings.some((d) => d.code === "CUTHOL-G267" && d.subject_id === owner.id)) return;
+  holder.compileWarnings.push(DIAGNOSTICS.COMPOSITION_TEMPORAL_FX_SINGLEFRAME(owner.id, hit.trim()));
+}
+
+/**
  * Builds the one fx stage of an item (spine clip or lane cue). Every active entry becomes its
  * filter list; an entry whose definition is `keep` becomes (part of) an `alpha_keep` part only
  * when `itemHasAlpha` is true; consecutive `keep` entries share one part. `process` entries,
@@ -542,9 +662,13 @@ export function buildItemFxStage(
       }
       const problem = checkBuiltinFxFilterChain(supplied.filter);
       if (problem) throw fail(problem);
+      // The YUV-only entry rule picks the converter per segment (a chain can
+      // mix YUV-only and any-format filters), whatever each segment's
+      // parameters are: no parameter inspection, the filter is never skipped.
       const filters: string[] = [];
       for (const segment of splitTopLevel((supplied.filter as string).trim(), ",")) {
-        filters.push(SPINE_FX_ENTRY_CONVERTER, segment.trim());
+        const name = builtinSegmentFilterName(segment);
+        filters.push(yuvOnlyEntryConverter(name, params.receivedPixFmt), segment.trim());
       }
       entries.push({ kind: "pixel", alpha: "keep", filters });
       continue;
@@ -718,13 +842,13 @@ export function buildItemFxStage(
       }
     }
   }
+  const pixelFilters = entries.flatMap((e) => (e.kind === "pixel" ? e.filters : []));
+  maybeEmitCompositionTemporalSingleFrameWarning(ctx, owner, pixelFilters);
   if (cut === undefined) {
     // No cut: keep the exact historical part shape (one merged chain when
     // there is no live alpha, exit converter included).
     if (!params.itemHasAlpha) {
-      return entries.length > 0
-        ? [{ type: "chain", filters: [...entries.flatMap((e) => (e.kind === "pixel" ? e.filters : [])), ...exit.filters] }]
-        : [];
+      return entries.length > 0 ? [{ type: "chain", filters: [...pixelFilters, ...exit.filters] }] : [];
     }
     return [...assemble(entries), exit];
   }

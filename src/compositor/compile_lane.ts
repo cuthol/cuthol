@@ -30,6 +30,7 @@ import {
   extractStaticBackdropPngSlice,
 } from "./compile_backdrop.js";
 import { compileSpineClip } from "./compile_spine.js";
+import { videoLeadingGapSec } from "./compile_spine_timing.js";
 import {
   BT709_TO_YUV420P,
   buildSourceScaleFilter,
@@ -608,10 +609,10 @@ function compileCompositionLaneCue(
   }
   if (hfRotExpr) {
     const radExpr = `((${hfRotExpr})*PI/180)`;
-    hfFilters.push(`rotate=a='${radExpr}':ow='rotw(${radExpr})':oh='roth(${radExpr})':c=none`);
+    hfFilters.push(`rotate=a='${radExpr}':ow='rotw(${radExpr})':oh='roth(${radExpr})':c=black@0`);
   } else if (Math.abs(placementStaticValue(cue, "rotation_deg")) > 0.01) {
     const rad = ((placementStaticValue(cue, "rotation_deg") * Math.PI) / 180).toFixed(4);
-    hfFilters.push(`rotate=${rad}:ow='rotw(${rad})':oh='roth(${rad})':c=none`);
+    hfFilters.push(`rotate=${rad}:ow='rotw(${rad})':oh='roth(${rad})':c=black@0`);
   }
   if (hfOpExpr) {
     const opExprT = hfOpExpr.replace(/\bt\b/g, "T");
@@ -777,10 +778,10 @@ export function buildMovingPlacementChain(
   const rotExpr = compilePlacementChannelExpr(cue, "rotation_deg", { timeBaseOffsetMs: 0, mode: "raw" });
   if (rotExpr) {
     const radExpr = `((${rotExpr})*PI/180)`;
-    vFilters.push(`rotate=a='${radExpr}':ow='rotw(${radExpr})':oh='roth(${radExpr})':c=none`);
+    vFilters.push(`rotate=a='${radExpr}':ow='rotw(${radExpr})':oh='roth(${radExpr})':c=black@0`);
   } else if (Math.abs(placementStaticValue(cue, "rotation_deg")) > 0.01) {
     const rad = ((placementStaticValue(cue, "rotation_deg") * Math.PI) / 180).toFixed(4);
-    vFilters.push(`rotate=${rad}:ow='rotw(${rad})':oh='roth(${rad})':c=none`);
+    vFilters.push(`rotate=${rad}:ow='rotw(${rad})':oh='roth(${rad})':c=black@0`);
   }
   const opExpr = compilePlacementChannelExpr(cue, "opacity", { timeBaseOffsetMs: 0, mode: "raw" });
   if (opExpr) {
@@ -855,6 +856,8 @@ function buildVisualAssetCueFilterChain(
     cueStartMs: number;
     cueEndMs: number;
     cueStartSec: string;
+    /** Input `-ss` offset (seconds); the trim points are local to the seeked input. */
+    seekSec?: number;
   }
 ): {
   vFilters: string[];
@@ -886,6 +889,7 @@ function buildVisualAssetCueFilterChain(
     cueEndMs,
     cueStartSec,
   } = params;
+  const cueSeekSec = params.seekSec ?? 0;
 
   const cropWRatio = cue.placement.crop
     ? Math.max(0.05, 1 - (cue.placement.crop.left_pct + cue.placement.crop.right_pct) / 100)
@@ -937,18 +941,53 @@ function buildVisualAssetCueFilterChain(
     asset.probe.duration_ms > 0 &&
     srcOutMs >= Math.max(0, asset.probe.duration_ms - 5000);
   const cueStillPadSec = (cueDurSec + 2 / fps).toFixed(3);
+  // Container-clock rebase (same rule as the spine clip chain): hold the first
+  // available frame over a leading stream-start gap; 0 (no filter) unless the
+  // probed video start is more than 1 ms after the requested cue start.
+  // Neither `tpad=start` (shifts the originals) nor `fps` (drops the gap) can
+  // do this linearly, so the gap branch splits, loops the first frame for the
+  // held prefix, and concats it with the exactly-mapped main segment.
+  const cueLeadGapSec = isStill ? 0 : videoLeadingGapSec(srcInMs / 1000, asset.probe.video_start_sec);
+  const cueMainSetpts =
+    cueRate === 1.0
+      ? `setpts=PTS-STARTPTS`
+      : `setpts=(PTS-STARTPTS)/${cueRate.toFixed(4)}`;
+  const cueHoldOutSec = cueLeadGapSec > 0 ? cueLeadGapSec / cueRate : 0;
   const vFilters: string[] = isStill
     ? [`fps=${fps}:eof_action=pass`, `tpad=stop_mode=clone:stop_duration=${cueStillPadSec}`]
-    : [
-        `settb=AVTB`,
-        ...(needsPreTrimEofPad ? [`tpad=stop_mode=clone:stop_duration=3.000`] : []),
-        `trim=start=${srcInSec}:end=${srcOutSec}`,
-        cueRate === 1.0
-          ? `setpts=PTS-STARTPTS`
-          : `setpts=(PTS-STARTPTS)/${cueRate.toFixed(4)}`,
-        `fps=${fps}:eof_action=pass`,
-        `tpad=stop_mode=clone:stop_duration=${cueTailPadSec}`,
-      ];
+    : cueLeadGapSec <= 0
+      ? [
+          `settb=AVTB`,
+          ...(needsPreTrimEofPad ? [`tpad=stop_mode=clone:stop_duration=3.000`] : []),
+          `trim=start=${srcInSec}:end=${srcOutSec}`,
+          cueMainSetpts,
+          `fps=${fps}:eof_action=pass`,
+          `tpad=stop_mode=clone:stop_duration=${cueTailPadSec}`,
+        ]
+      : (() => {
+          const localV = Math.max(
+            0,
+            (asset.probe.video_start_sec ?? srcInMs / 1000) - cueSeekSec
+          );
+          const localVStr = localV.toFixed(6).replace(/\.?0+$/, "");
+          const holdStr = Math.max(1 / fps, cueHoldOutSec)
+            .toFixed(6)
+            .replace(/\.?0+$/, "");
+          const holdFrames = Math.max(1, Math.round(cueHoldOutSec * fps));
+          return [
+            `settb=AVTB`,
+            ...(needsPreTrimEofPad ? [`tpad=stop_mode=clone:stop_duration=3.000`] : []),
+            `split=2[vgap_h][vgap_m];` +
+              `[vgap_h]trim=start=${localVStr}:end=${(localV + 1).toFixed(6).replace(/\.?0+$/, "")}` +
+              `,setpts=PTS-STARTPTS,loop=loop=-1:size=1,trim=start=0:end=${holdStr}` +
+              `,fps=${fps}:eof_action=pass,trim=start_frame=0:end_frame=${holdFrames},settb=AVTB[vgap_he];` +
+              `[vgap_m]trim=start=${localVStr}:end=${srcOutSec},${cueMainSetpts}` +
+              `,fps=${fps}:eof_action=pass,settb=AVTB[vgap_me];` +
+              `[vgap_he][vgap_me]concat=n=2:v=1:a=0` +
+              `,setpts=N/${fps}/TB`,
+            `tpad=stop_mode=clone:stop_duration=${cueTailPadSec}`,
+          ];
+        })();
   const cueSpatialFilterStartIdx = vFilters.length;
 
   // Colour hook: HDR input transform first (SDR BT.709 before any colour block), then the
@@ -1056,11 +1095,12 @@ function buildVisualAssetCueFilterChain(
       : BT709_TO_YUV420P
   );
   const cueSpatialFilters = vFilters.slice(cueSpatialFilterStartIdx);
-  vFilters.push(`settb=AVTB`, `setpts=PTS-STARTPTS+${cueStartSec}/TB`);
+  vFilters.push(`settb=AVTB`, `setpts=PTS+${cueStartSec}/TB`);
   // Early window trim on the finished chain (before the chain's own end-of-chain
-  // window trim below, which is never examined or moved). The trailing
-  // PTS-anchoring `setpts` rejects the trim: dropping frames before it would
-  // shift every later timestamp, so footage/still cues keep today's path.
+  // window trim below, which is never examined or moved). The trailing anchor
+  // is a constant offset (`setpts=PTS+cueStart/TB`): the timing block already
+  // starts the cue at 0, so STARTPTS is 0 and the constant form is identical
+  // while letting the trim sit before it.
   if (
     ctx.compileOptions?.singleFrameAtMs !== undefined &&
     ctx.compileOptions?.singleFrameEarlyTrim !== false
@@ -1247,6 +1287,7 @@ function compileAssetLaneCue(
       cueStartMs,
       cueEndMs,
       cueStartSec,
+      seekSec: cueSeek?.seekSec ?? 0,
     });
 
     const cuePad = `[v_cue_${cue.id}]`;

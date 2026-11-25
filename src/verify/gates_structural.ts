@@ -375,6 +375,9 @@ function cachedClipHasSpeechAboveFloor(seq: CutholSequence, clip: SpineClip): bo
 /** Alpha bbox fill below this counts as "mostly empty" for the G316 check. */
 const SPARSE_TRANSPARENT_FILL_THRESHOLD = 0.5;
 
+/** Untouched stage backdrop color (mirrors the workspace default in `core/schema.ts`): G316 is WARN below it, INFO once the agent picked a color. */
+const DEFAULT_STAGE_BACKDROP_COLOR = "#0D0F12";
+
 /**
  * Cached alpha fill ratio (bbox area over frame area) of a composition, or
  * null when no measurement sidecar was recorded yet (preview/monitor/render
@@ -558,11 +561,16 @@ export function verifyG3Timing(
   if (sparseTransparentCueIds.size > 0) {
     const bareSpans = findSpansCoveredOnlyByCues(seq, sparseTransparentCueIds);
     if (bareSpans.length > 0) {
+      // A backdrop the agent chose (any non-default color) is a deliberate
+      // choice: INFO. The untouched default backdrop is likely an oversight: WARN.
+      const backdropIsDefault =
+        seq.stage.backdrop.color.trim().toUpperCase() === DEFAULT_STAGE_BACKDROP_COLOR;
       diagnostics.push(
         DIAGNOSTICS.BARE_BACKDROP_UNDER_TRANSPARENT_COMPOSITION(
           bareSpans,
           seq.stage.backdrop.color,
-          [...sparseTransparentCueIds].sort()
+          [...sparseTransparentCueIds].sort(),
+          backdropIsDefault ? "WARN" : "INFO"
         )
       );
     }

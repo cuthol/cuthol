@@ -38,6 +38,9 @@ re-rendered, and total overlay time. Reasons: `new` (no saved state),
 `slice_changed`, `global_used_changed`, `props_changed`, `backdrop_changed`,
 `blob_missing` (state matches, blob file gone). Finish extension/kit edits
 before taking drafts: one changed rule re-renders every composition using it.
+Cost detail is opt-in: `render --profile` adds `composition_profile`
+(per composition cue: frames captured, capture ms, ms/frame, reason); without
+the flag the result keeps its old shape and no profiling work runs.
 
 Resolution handoff: `draft_480p` captures overlays at 480p under a separate
 key without touching master blobs — and reuses an already-cached master blob

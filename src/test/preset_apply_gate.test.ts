@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { rmRetrySync } from "./fs_cleanup.js";
 import { addEnvelopePointsFromFile, runSpineFxCheck } from "../cli_cmd_spine.js";
 import { commitSequenceMutation, initWorkspace, loadSequence } from "../core/workspace.js";
 import { applyPresetSpineFx, reapplyPresetEntries } from "../effects/preset_apply.js";
@@ -76,7 +77,7 @@ function withPresetWorkspace(fn: (wsDir: string) => void): void {
     let lastErr: unknown = null;
     for (let attempt = 0; attempt < 6; attempt++) {
       try {
-        fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+        rmRetrySync(tmp);
         lastErr = null;
         break;
       } catch (err) {

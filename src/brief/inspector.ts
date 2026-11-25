@@ -34,6 +34,11 @@ export interface BriefOptions {
   /** Prepended verbatim as the top line when set (external-change notice). */
   noticeLine?: string;
   /**
+   * When false, queued Live notes are left in the inbox (the JSON envelope
+   * path delivers them as `live_notes` instead). Defaults to true.
+   */
+  includeLiveNotes?: boolean;
+  /**
    * Project root the cue `composition_dir` values resolve against. When set,
    * a default (absent) `composition_audio` switch is shown only for
    * compositions that actually hold audible elements; without it the
@@ -176,6 +181,7 @@ export function renderSequenceBrief(seq: CutholSequence, options: BriefOptions =
       break;
   }
   const out = options.noticeLine ? `${options.noticeLine}\n${md}` : md;
+  if (options.includeLiveNotes === false) return out;
   return appendLiveNotesIfCliBrief(out);
 }
 

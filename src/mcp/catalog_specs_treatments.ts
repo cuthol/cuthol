@@ -16,8 +16,8 @@ export const TREATMENT_ACTION_SPECS: ActionSpec[] = [
     params: [
       clip(),
       s("shape", "Mask shape: rect|ellipse|split (split keeps the left half through the center)."),
-      n("center-x", "Center x in percent of the clip frame (50 = middle)."),
-      n("center-y", "Center y in percent of the clip frame (50 = middle)."),
+      n("center_x", "Center x in percent of the clip frame (50 = middle).", { flag: "center-x" }),
+      n("center_y", "Center y in percent of the clip frame (50 = middle).", { flag: "center-y" }),
       n("width", "Mask width in percent of the clip frame."),
       n("height", "Mask height in percent of the clip frame."),
       n("feather", "Soft edge in pixels at render size (0 = hard)."),

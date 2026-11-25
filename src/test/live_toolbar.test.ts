@@ -14,6 +14,7 @@ import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { resolveCoordsChromePath } from "../compositor/coords_extract.js";
 import { initWorkspace } from "../core/workspace.js";
 import { waitFor } from "./b_helpers.js";
+import { rmRetrySync } from "./fs_cleanup.js";
 
 process.env.CUTHOL_SKILLS_AUTO = "0";
 
@@ -76,7 +77,7 @@ after(async () => {
     browser = null;
   }
   try {
-    fs.rmSync(SHOTS, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(SHOTS);
   } catch {
     // best effort
   }
@@ -150,6 +151,6 @@ test("narrow window toolbar: every control inside toolbar and viewport down to 6
     console.log("toolbar boxes: " + JSON.stringify(boxes));
   } finally {
     await stopLive(fx);
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(dir);
   }
 });

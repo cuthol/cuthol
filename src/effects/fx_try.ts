@@ -8,6 +8,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { rmRetrySync } from "../core/fs_retry.js";
 import { loadSequence } from "../core/workspace.js";
 import { substituteFxTemplateValues } from "../compositor/compile_fx_stage.js";
 import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
@@ -201,7 +202,7 @@ export function runFxTry(req: FxTryRequest): FxTryResult {
   } finally {
     untrackTmp();
     try {
-      fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      rmRetrySync(tmp);
     } catch {
       // best effort
     }

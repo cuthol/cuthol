@@ -277,6 +277,16 @@ export function setOverlayRenderExecutionMeta(meta: { concurrency: number; worke
   activeOverlayConcurrencyMeta = { ...meta };
 }
 
+/**
+ * Live overlay items rendered or reused so far (shallow copies, keyed blobs
+ * included). Read before `finishOverlayRenderTracking` consumes the map; used
+ * only for the opt-in render cost profile, so unflagged renders pay nothing.
+ */
+export function snapshotOverlayRenderItems(): OverlayRenderItemSummary[] {
+  if (!activeOverlayTrackingMap) return [];
+  return [...activeOverlayTrackingMap.values()].map((item) => ({ ...item }));
+}
+
 export function finishOverlayRenderTracking(): RenderOverlaySummary {
   const items = activeOverlayTrackingMap ? [...activeOverlayTrackingMap.values()] : [];
   const wallPrepassMs = activeOverlayPrepassWallMs;

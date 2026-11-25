@@ -10,6 +10,8 @@ import os from "node:os";
 import path from "node:path";
 import { CutholError, DIAGNOSTICS } from "./diagnostics.js";
 import { settingsProjectDir, storedSetting, type SettingKey } from "./settings.js";
+import { installedFfmpegBinDir } from "./ffmpeg_install.js";
+import { getFfmpegVersionInfo } from "./ffmpeg_version.js";
 
 /** Stored (project/user file) value for a key; undefined keeps the built-in default path. */
 function storedSettingValue(key: SettingKey): unknown {
@@ -634,6 +636,58 @@ export function loadDotEnvIfNeeded(startDir = process.cwd()): void {
     if (parent === dir) break;
     dir = parent;
   }
+}
+
+let ffmpegPreferenceApplied = false;
+
+/**
+ * Prefers the `cuthol setup --ffmpeg` install on PATH for this process and
+ * every child it spawns (including HyperFrames). Prepends the installed
+ * `bin` folder only when PATH has no `ffmpeg`, or its major version is below
+ * 8 (cached per-process probe in `ffmpeg_version.ts`). `CUTHOL_FFMPEG_DIR`
+ * with an explicit folder wins; `CUTHOL_FFMPEG_DIR=off` disables the
+ * preference entirely. Runs once per process; PATH edits are idempotent.
+ */
+export function preferCutholFfmpeg(): void {
+  if (ffmpegPreferenceApplied) return;
+  ffmpegPreferenceApplied = true;
+  const rawOverride = process.env.CUTHOL_FFMPEG_DIR;
+  if (rawOverride !== undefined && rawOverride.trim().toLowerCase() === "off") return;
+  const explicit = (rawOverride ?? "").trim();
+  if (explicit) {
+    prependToPath(explicit);
+    return;
+  }
+  // Filesystem check first (no spawn): without an install there is nothing to
+  // prefer, so PATH ffmpeg is never probed and startup pays nothing.
+  let binDir: string | null;
+  try {
+    binDir = installedFfmpegBinDir();
+  } catch {
+    return;
+  }
+  if (!binDir) return;
+  let major: number | null;
+  try {
+    major = getFfmpegVersionInfo().ffmpeg?.major ?? null;
+  } catch {
+    return;
+  }
+  if (major !== null && major >= 8) return;
+  prependToPath(binDir);
+}
+
+function prependToPath(dir: string): void {
+  const current = process.env.PATH ?? "";
+  const parts = current.split(path.delimiter).filter((p) => p.length > 0);
+  const lower = dir.toLowerCase();
+  if (parts.some((p) => p.toLowerCase() === lower)) return;
+  process.env.PATH = [dir, ...parts].join(path.delimiter);
+}
+
+/** Test-only reset for the once-per-process guard. */
+export function clearFfmpegPreferenceForTest(): void {
+  ffmpegPreferenceApplied = false;
 }
 
 export function requireApiKey(envVarName: string, serviceName: string, startDir?: string): string {

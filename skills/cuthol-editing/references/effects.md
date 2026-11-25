@@ -38,8 +38,13 @@ filter graph after colour (source asset untouched, transcript bindings stay).
 `kind="ext:<ext>/<fx>"` (enable the extension first) or raw
 `filter="gblur=sigma=3"` (no `[` `]` `;`, no file-reading/command filters).
 Params merge on set; ids are `fx_XX` per clip. Animate only manifest-declared
-`animatable` params via `envelope(clip, param="fx.<id>.<param>", ...)` (G119
-otherwise). Unknown kinds/params are G118, drifted extensions warn G411.
+`animatable` params via `envelope(clip, param="fx.<id>.<param>", ...)` —
+any other envelope is refused at write time with nothing written (no such fx
+on the item: G380 with the item's fx ids; not an `animatable` param: G381 with
+the effect's `animatable` list; G119 otherwise). Unknown kinds/params are
+G118, drifted extensions warn G411. An envelope on a disabled entry stays
+dormant (accepted, no effect); orphaned envelopes from older builds warn G382
+in `verify`.
 `fx_set(clip, fx, enabled=false)` disables an entry without removing it
 (`true` re-enables); `fx_list` groups `motion` layers separately.
 

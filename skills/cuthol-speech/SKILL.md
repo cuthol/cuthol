@@ -172,3 +172,8 @@ all_spine?, max_words?, max_chars?, lang?, replace?)` builds caption cues on
   language (19 CPS Turkish, 17 CPS English); fast groups give G402 — lower
   `max_words`. Captions sit at `y=26`; move them with `lane.update_cue` on
   collision (G403 warns about occlusion).
+- Items without a transcript are skipped: with no transcribed item at all the
+  run writes no revision and warns G384 naming the untranscribed items
+  (transcribe first with `speech.transcribe --handle <h>`); with some
+  transcribed it captions those and warns G385 for the rest. Video-only
+  items (no audio stream) never warn.

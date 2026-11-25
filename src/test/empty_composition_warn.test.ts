@@ -1,4 +1,5 @@
 import test from "node:test";
+import { rmRetrySync } from "./fs_cleanup.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -60,7 +61,7 @@ test("empty composition diagnostics exist and verify gate warns once per cue", (
     const got2 = verifyEmptyCompositions(seq, { rootDir: dir } as never);
     assert.equal(got2.length, 0);
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(dir);
   }
 });
 
@@ -91,7 +92,7 @@ test("every-frame probe: a short pop is not empty, fully transparent is", () => 
     assert.ok(flat, "probe returns a result");
     assert.equal(flat.allEmpty, true, "all transparent frames are empty");
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(dir);
   }
 });
 
@@ -114,7 +115,7 @@ test("sheet rule: G723 only when the sidecar says empty:true", () => {
     assert.equal(isEmptyCompositionSidecar(root, cueFor(partial)), false);
     assert.equal(isEmptyCompositionSidecar(root, cueFor(missing)), false);
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(dir);
   }
 });
 
@@ -154,6 +155,6 @@ test("sidecar box equals the middle frame box plus empty_ranges", () => {
       "box is the middle frame, not the union with frame 0"
     );
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(dir);
   }
 });

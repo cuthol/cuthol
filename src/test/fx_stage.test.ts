@@ -6,6 +6,7 @@
  * `alphaextract` while the effect runs, and merge it back with `alphamerge`.
  */
 import "./test_setup.js";
+import { rmRetrySync } from "./fs_cleanup.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -35,7 +36,7 @@ process.env.CUTHOL_SKILLS_AUTO = "0";
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-fxstage-"));
 
-test.after(() => fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+test.after(() => rmRetrySync(TMP));
 
 function ffmpeg(args: string[], cwd?: string): { status: number; stderr: string } {
   const proc = spawnSync("ffmpeg", args, { encoding: "utf8", windowsHide: true, cwd, timeout: 300_000 });

@@ -27,6 +27,7 @@ function fxEnvelopePreCheck(
   const m = /^fx\.([^.]+)\.(.+)$/.exec(parameter);
   if (!m) return;
   const { sequence } = loadSequence(workspaceDir);
+  assertFxEnvelopeWritable(sequence, workspaceDir, targetId, parameter);
   const clip = sequence.spine.clips.find((c) => c.id === targetId);
   const cue = sequence.lanes.flatMap((l) => l.cues).find((c) => c.id === targetId);
   const owner = clip ?? cue;
@@ -37,10 +38,73 @@ function fxEnvelopePreCheck(
     .concat([{ parameter, points: wouldBePoints as never[] }] as never);
   probeEntryOrThrow(sequence, workspaceDir, targetId, fx, envelopes as never);
 }
+
+/**
+ * [ed G380–G381] write-time guard for `fx.<id>.<param>` envelopes: rejects
+ * orphan envelopes (no fx with that id on the item) and envelopes on params
+ * the fx did not declare envelopable, with a suggestion naming the item's fx
+ * ids and that fx's animatable params. Uses the same definition source the
+ * stage compiler reads (extension registry / motion definition / builtin
+ * chain rule). A disabled fx's envelope stays dormant (accepted, like the
+ * compiler); dotted sub-paths (`fx.<id>.<param>.<sub>`) validate the head
+ * param. Unknown owners or unresolvable extension kinds are left to the
+ * commit path (G118/G119), which already owns those errors.
+ */
+export function assertFxEnvelopeWritable(
+  seq: CutholSequence, workspaceDir: string, targetId: string, parameter: string
+): void {
+  const m = /^fx\.([^.]+)\.(.+)$/.exec(parameter);
+  if (!m) return;
+  const fxId = m[1];
+  const paramName = m[2].split(".")[0];
+  const clip = seq.spine.clips.find((c) => c.id === targetId);
+  const cue = seq.lanes.flatMap((l) => l.cues).find((c) => c.id === targetId);
+  const owner = clip ?? cue;
+  if (!owner) return;
+  const fx = (owner.fx ?? []).find((f) => f.id === fxId);
+  if (!fx) {
+    throw new CutholError(
+      DIAGNOSTICS.ENVELOPE_FX_ORPHAN(targetId, parameter, fxId, (owner.fx ?? []).map((f) => f.id))
+    );
+  }
+  if (fx.enabled === false) return;
+  if (fx.kind === MOTION_FX_KIND) {
+    const animatable = MOTION_EFFECT_DEFINITION.animatable ?? [];
+    const declared = (MOTION_EFFECT_DEFINITION.params as Record<string, unknown>)[paramName];
+    if (!declared || !animatable.includes(paramName)) {
+      throw new CutholError(
+        DIAGNOSTICS.ENVELOPE_FX_PARAM_NOT_ANIMATABLE(targetId, parameter, fxId, fx.kind, [...animatable])
+      );
+    }
+    return;
+  }
+  if (fx.kind === BUILTIN_FX_KIND) {
+    throw new CutholError(
+      DIAGNOSTICS.ENVELOPE_FX_PARAM_NOT_ANIMATABLE(targetId, parameter, fxId, fx.kind, [])
+    );
+  }
+  let def: { params?: Record<string, unknown>; animatable?: string[] } | undefined;
+  try {
+    const found = listEffectDefinitions(seq, { rootDir: workspaceDir }).find((d) => d.kind === fx.kind);
+    if (found) def = { params: found.params, animatable: found.animatable };
+  } catch {
+    return;
+  }
+  if (!def) return;
+  const animatable = def.animatable ?? [];
+  const declared = (def.params ?? {})[paramName];
+  if (!declared || !animatable.includes(paramName)) {
+    throw new CutholError(
+      DIAGNOSTICS.ENVELOPE_FX_PARAM_NOT_ANIMATABLE(targetId, parameter, fxId, fx.kind, [...animatable])
+    );
+  }
+}
 import { evaluateEnvelopeAt } from "./spine_envelope.js";
 import { PLACEMENT_CHANNELS, placementBaseEnvelope, placementLayers, placementValueAt } from "./placement_resolve.js";
 import { MOTION_FX_KIND, PLACEMENT_LAYER_COMBINE, placementLayerIdentity } from "../effects/effect_types.js";
+import { MOTION_EFFECT_DEFINITION } from "../effects/effect_types.js";
 import { outToSeqMs, tempoOf } from "./tempo.js";
+import { BUILTIN_FX_KIND } from "../compositor/compile_fx_stage.js";
 
 export type EnvelopeOwner = SpineClip | LaneCue;
 

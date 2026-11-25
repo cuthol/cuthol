@@ -3,6 +3,7 @@
 // nothing: the server sleeps on fs.watch plus a 1 s fallback poll.
 import fs from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import path from "node:path";
 import crypto from "node:crypto";
 import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
@@ -94,37 +95,146 @@ function writeJsonAtomically(filePath: string, data: unknown): void {
   fs.renameSync(tmp, filePath);
 }
 
+/** True when something answers TCP on the recorded port (the recorded pid alone may be recycled). */
+function portAnswers(port: number, timeoutMs = 750): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (!Number.isInteger(port) || port <= 0) {
+      resolve(false);
+      return;
+    }
+    const socket = net.connect({ host: "127.0.0.1", port });
+    const done = (ok: boolean): void => {
+      try {
+        socket.destroy();
+      } catch {
+        // ignore
+      }
+      resolve(ok);
+    };
+    socket.on("connect", () => done(true));
+    socket.on("error", () => done(false));
+    socket.setTimeout(timeoutMs, () => done(false));
+  });
+}
+
+/** Server info only when the recorded pid is alive and answers on its port; otherwise the stale file is removed. */
+async function readVerifiedServerInfo(root: string): Promise<LiveServerInfo | null> {
+  const file = resolveLivePaths(root).serverFile;
+  let info: LiveServerInfo;
+  try {
+    info = JSON.parse(fs.readFileSync(file, "utf8")) as LiveServerInfo;
+  } catch {
+    return null;
+  }
+  if (!info || !pidAlive(info.pid) || !(await portAnswers(info.port))) {
+    try {
+      fs.unlinkSync(file);
+    } catch {
+      // already gone
+    }
+    return null;
+  }
+  return info;
+}
+
+/** Cross-process start claim: only the holder may spawn; waiters read the file the holder writes. */
+function claimFileFor(root: string): string {
+  return path.join(resolveLivePaths(root).dir, "server.starting");
+}
+
+function takeStartClaim(root: string): boolean {
+  try {
+    fs.mkdirSync(resolveLivePaths(root).dir, { recursive: true });
+    const fd = fs.openSync(claimFileFor(root), "wx");
+    fs.writeSync(fd, String(process.pid));
+    fs.closeSync(fd);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function dropStartClaim(root: string): void {
+  try {
+    fs.unlinkSync(claimFileFor(root));
+  } catch {
+    // already gone
+  }
+}
+
+function startClaimFresh(root: string, maxAgeMs = 20000): boolean {
+  try {
+    const age = Date.now() - fs.statSync(claimFileFor(root)).mtimeMs;
+    return age < maxAgeMs;
+  } catch {
+    return false;
+  }
+}
+
+/** In-process guard so concurrent `ensureLiveServer` calls share one start. */
+const pendingStarts = new Map<string, Promise<LiveServerInfo>>();
+
 /** Starts the live server for a project as a detached process (or reuses a running one). */
 export async function ensureLiveServer(projectDir: string): Promise<LiveServerInfo> {
   const root = path.resolve(projectDir);
-  const running = readServerInfo(root);
-  if (running) return running;
-  const { spawn } = await import("node:child_process");
-  const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
-  const cli = path.resolve(here, "../cli.js");
-  const logFile = resolveLivePaths(root).logFile;
-  fs.mkdirSync(path.dirname(logFile), { recursive: true });
-  const logFd = fs.openSync(logFile, "a");
-  const child = spawn(process.execPath, [cli, "live", "serve", "--dir", root], {
-    detached: true,
-    stdio: ["ignore", logFd, logFd],
-    env: { ...process.env, CUTHOL_SKILLS_AUTO: "0" },
-    windowsHide: true,
-  });
-  child.unref();
+  const verified = await readVerifiedServerInfo(root);
+  if (verified) return verified;
+  const pending = pendingStarts.get(root);
+  if (pending) return pending;
+  const started = (async (): Promise<LiveServerInfo> => {
+    // Another process may be starting right now: wait for its file instead of spawning a second server.
+    if (!takeStartClaim(root)) {
+      if (startClaimFresh(root)) {
+        const deadline = Date.now() + 15000;
+        while (Date.now() < deadline) {
+          const info = await readVerifiedServerInfo(root);
+          if (info) return info;
+          await new Promise((r) => setTimeout(r, 150));
+        }
+      }
+      if (!takeStartClaim(root)) {
+        const info = await readVerifiedServerInfo(root);
+        if (info) return info;
+        throw new CutholError(DIAGNOSTICS.LIVE_SERVER_START_FAILED(root));
+      }
+    }
+    try {
+      const { spawn } = await import("node:child_process");
+      const here = path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1"));
+      const cli = path.resolve(here, "../cli.js");
+      const logFile = resolveLivePaths(root).logFile;
+      fs.mkdirSync(path.dirname(logFile), { recursive: true });
+      const logFd = fs.openSync(logFile, "a");
+      const child = spawn(process.execPath, [cli, "live", "serve", "--dir", root], {
+        detached: true,
+        stdio: ["ignore", logFd, logFd],
+        env: { ...process.env, CUTHOL_SKILLS_AUTO: "0" },
+        windowsHide: true,
+      });
+      child.unref();
+      try {
+        fs.closeSync(logFd);
+      } catch {
+        // the child keeps its own copy
+      }
+      const deadline = Date.now() + 10000;
+      while (Date.now() < deadline) {
+        const info = await readVerifiedServerInfo(root);
+        if (info) return info;
+        if (child.exitCode !== null) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      throw new CutholError(DIAGNOSTICS.LIVE_SERVER_START_FAILED(root));
+    } finally {
+      dropStartClaim(root);
+    }
+  })();
+  pendingStarts.set(root, started);
   try {
-    fs.closeSync(logFd);
-  } catch {
-    // the child keeps its own copy
+    return await started;
+  } finally {
+    if (pendingStarts.get(root) === started) pendingStarts.delete(root);
   }
-  const deadline = Date.now() + 10000;
-  while (Date.now() < deadline) {
-    const info = readServerInfo(root);
-    if (info) return info;
-    if (child.exitCode !== null) break;
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  throw new CutholError(DIAGNOSTICS.LIVE_SERVER_START_FAILED(root));
 }
 
 /** Runs the server in the current process until stopped. */
@@ -133,10 +243,31 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
   const lp = resolveLivePaths(root);
   fs.mkdirSync(lp.dir, { recursive: true });
   fs.mkdirSync(lp.inboxDir, { recursive: true });
+  // Single scheduler per project: a previous server that is still alive and
+  // answering owns this project; a second process must not overwrite its
+  // file or run its own prewarm scheduler.
+  try {
+    const prev = JSON.parse(fs.readFileSync(lp.serverFile, "utf8")) as LiveServerInfo;
+    if (prev && Number.isInteger(prev.pid) && prev.pid !== process.pid && pidAlive(prev.pid) && (await portAnswers(prev.port))) {
+      fs.appendFileSync(lp.logFile, `[${new Date().toISOString()}] another live server answers for ${root} (pid ${prev.pid}, port ${prev.port}); not starting a second one\n`);
+      process.exit(0);
+    }
+  } catch (e) {
+    if (e instanceof Error && (e as NodeJS.ErrnoException).code === "ENOENT") {
+      // no previous file: this process owns the project
+    } else if ((e as { code?: string }).code !== undefined) {
+      throw e;
+    }
+  }
+  dropStartClaim(root);
   const token = crypto.randomBytes(16).toString("hex");
   const clients = new Set<http.ServerResponse>();
   let lastDisconnectAt = Date.now();
   let shuttingDown = false;
+  const watchers: fs.FSWatcher[] = [];
+  let pollTimer: NodeJS.Timeout | null = null;
+  let prewarmTimer: NodeJS.Timeout | null = null;
+  let idleTimer: NodeJS.Timeout | null = null;
 
   const log = (msg: string): void => {
     try {
@@ -898,16 +1029,7 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
   };
   log(`live server up on 127.0.0.1:${port} for ${root}`);
 
-  const shutdown = (): void => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    try {
-      prewarmer.stop();
-    } catch {
-      // already gone
-    }
-    unregisterLiveServer(process.pid, root);
-    log("live server stopping");
+  const removeOwnFiles = (): void => {
     try {
       const cur = JSON.parse(fs.readFileSync(lp.serverFile, "utf8")) as LiveServerInfo;
       if (cur.pid === process.pid) fs.unlinkSync(lp.serverFile);
@@ -920,6 +1042,42 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
     } catch {
       // ignore
     }
+    unregisterLiveServer(process.pid, root);
+    dropStartClaim(root);
+  };
+
+  const shutdown = (code = 0): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try {
+      prewarmer.stop();
+    } catch {
+      // already gone
+    }
+    removeOwnFiles();
+    try {
+      if (pollTimer) clearInterval(pollTimer);
+    } catch {
+      // ignore
+    }
+    try {
+      if (prewarmTimer) clearInterval(prewarmTimer);
+    } catch {
+      // ignore
+    }
+    try {
+      if (idleTimer) clearInterval(idleTimer);
+    } catch {
+      // ignore
+    }
+    for (const w of watchers) {
+      try {
+        w.close();
+      } catch {
+        // ignore
+      }
+    }
+    log("live server stopping");
     for (const c of clients) {
       try {
         c.end();
@@ -927,11 +1085,39 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
         // ignore
       }
     }
-    server.close(() => process.exit(0));
-    setTimeout(() => process.exit(0), 2000).unref();
+    server.close(() => process.exit(code));
+    setTimeout(() => process.exit(code), 2000).unref();
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => shutdown(0));
+  process.on("SIGTERM", () => shutdown(0));
+  process.on("uncaughtException", (e) => {
+    try {
+      log(`uncaught: ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`);
+    } catch {
+      // ignore
+    }
+    shutdown(1);
+  });
+  process.on("unhandledRejection", (e) => {
+    try {
+      log(`unhandled rejection: ${e instanceof Error ? ((e.stack ?? e.message) as string) : String(e)}`);
+    } catch {
+      // ignore
+    }
+    shutdown(1);
+  });
+  // Test-only crash hook: `CUTHOL_LIVE_CRASH_TEST=throw` throws after the
+  // handlers above are registered, so a server child can prove the crash path
+  // (non-zero exit, stack in the log). Never set in production.
+  if (process.env.CUTHOL_LIVE_CRASH_TEST === "throw") {
+    setImmediate(() => {
+      throw new Error("CUTHOL_LIVE_CRASH_TEST injected crash");
+    });
+  }
+  // Last resort for exit paths the handlers above cannot finish (sync only here).
+  process.on("exit", () => {
+    if (!shuttingDown) removeOwnFiles();
+  });
 
   // Baseline without broadcasting: the window gets full state via snapshot.
   try {
@@ -951,7 +1137,6 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
 
   // Prompt path: fs.watch with debounce. Atomic file replaces show up as
   // `rename` on the watched directories, so directories are watched, not files.
-  const watchers: fs.FSWatcher[] = [];
   const watchDir = (dir: string): void => {
     try {
       const w = fs.watch(dir, scheduleCheck);
@@ -999,11 +1184,11 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
   watchSequenceFile();
 
   // Fallback path: 1 s poll of the same cheap check (one small manifest read).
-  const pollTimer = setInterval(checkAll, FALLBACK_POLL_MS);
+  pollTimer = setInterval(checkAll, FALLBACK_POLL_MS);
   pollTimer.unref?.();
 
   // Pre-production path: every second, start one child when idle long enough.
-  const prewarmTimer = setInterval(() => {
+  prewarmTimer = setInterval(() => {
     try {
       prewarmer.maybeStart(Date.now(), {
         revision: lastCursor,
@@ -1021,7 +1206,7 @@ export async function runLiveServer(projectDir: string, opts: { port?: number } 
   prewarmTimer.unref?.();
 
   // Idle path: no window connected for a while -> stop (the window reopens via `live open`).
-  const idleTimer = setInterval(() => {
+  idleTimer = setInterval(() => {
     if (clients.size === 0 && Date.now() - lastDisconnectAt > idleSeconds() * 1000) {
       log("idle timeout, stopping");
       shutdown();

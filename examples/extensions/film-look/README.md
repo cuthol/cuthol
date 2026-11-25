@@ -41,7 +41,7 @@ quotes the animated expression itself), and the ffmpeg option must
 accept per-frame expressions (`eq` needs `:eval=frame`; `gblur`'s
 `sigma` rejects expressions, so `soft_focus` stays static).
 
-Envelopes on any other effect param fail with `CUTHOL-G119` instead of
+Envelopes on any other effect param fail with `CUTHOL-G381` instead of
 silently doing nothing.
 
 ## Known limits

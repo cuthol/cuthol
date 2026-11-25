@@ -31,8 +31,10 @@ export function resolvePackageRootDir(): string {
 }
 
 /**
- * The MCP command to register: `node <pkg>/dist/cli.js mcp`, or `npx -y cuthol mcp` from an npx cache.
+ * The MCP command to register: `node <pkg>/dist/mcp_bin.js`, or `npx -y cuthol mcp` from an npx cache.
  * On Windows `npx` is a `.cmd` shim that MCP clients cannot start without a shell, so it is wrapped in `cmd /c`.
+ * Older registrations pointing at `node <pkg>/dist/cli.js mcp` still work and
+ * are treated as up to date (see `isSameOrLegacyMcpEntry`).
  */
 export function resolveSetupCommand(
   packageRootDir?: string,
@@ -44,7 +46,7 @@ export function resolveSetupCommand(
       ? { command: "cmd", args: ["/c", "npx", "-y", "cuthol", "mcp"] }
       : { command: "npx", args: ["-y", "cuthol", "mcp"] };
   }
-  return { command: "node", args: [path.join(root, "dist", "cli.js"), "mcp"] };
+  return { command: "node", args: [path.join(root, "dist", "mcp_bin.js")] };
 }
 
 export function resolveSetupHomeDir(): string {
@@ -135,6 +137,24 @@ export function readCodexEntry(fileText: string): SetupCommand | null | "broken"
 
 function commandsEqual(a: SetupCommand, b: SetupCommand): boolean {
   return a.command === b.command && JSON.stringify(a.args) === JSON.stringify(b.args);
+}
+
+/**
+ * The pre-`mcp_bin.js` registration shape (`node <root>/dist/cli.js mcp`)
+ * starts the same server and is never rewritten, but `setup` must not report
+ * it as wrong either: it counts as up to date when it points at the same
+ * package root as the current `node <root>/dist/mcp_bin.js` entry.
+ */
+export function isSameOrLegacyMcpEntry(current: SetupCommand, command: SetupCommand): boolean {
+  if (commandsEqual(current, command)) return true;
+  if (current.command !== "node" || command.command !== "node") return false;
+  if (current.args.length !== 2 || current.args[1] !== "mcp") return false;
+  if (command.args.length !== 1) return false;
+  const legacyBin = current.args[0] ?? "";
+  const freshBin = command.args[0] ?? "";
+  const legacyRoot = legacyBin.replace(/[\\/]dist[\\/]cli\.js$/, "");
+  const freshRoot = freshBin.replace(/[\\/]dist[\\/]mcp_bin\.js$/, "");
+  return legacyRoot.length < legacyBin.length && legacyRoot === freshRoot;
 }
 
 /** Replace or append the `[mcp_servers.cuthol]` table; every other byte is kept. */
@@ -255,7 +275,11 @@ export function planSetup(options?: PlanSetupOptions): PlannedSetup {
         const got = run(["mcp", "get", "cuthol"], { windowsHide: true });
         const combined = `${got.stdout}\n${got.stderr}`;
         if (got.status === 0) {
-          state = combined.includes(command.args[0] ?? "") && combined.includes("mcp") ? "registered-same" : "registered-different";
+          const legacyBin = (command.args[0] ?? "").replace(/[\\/]dist[\\/]mcp_bin\.js$/, `${path.sep}dist${path.sep}cli.js`);
+          state =
+            (combined.includes(command.args[0] ?? "") || combined.includes(legacyBin)) && combined.includes("mcp")
+              ? "registered-same"
+              : "registered-different";
         } else {
           const list = run(["mcp", "list"], { windowsHide: true });
           state = `${list.stdout}\n${list.stderr}`.includes("cuthol") ? "registered-different" : "not-registered";
@@ -289,7 +313,7 @@ export function planSetup(options?: PlanSetupOptions): PlannedSetup {
         continue;
       }
       tools.push(
-        commandsEqual(current, command)
+        isSameOrLegacyMcpEntry(current, command)
           ? { id, state: "registered-same", file, entry: null, manual: null }
           : { id, state: "registered-different", file, entry: command, manual: null }
       );

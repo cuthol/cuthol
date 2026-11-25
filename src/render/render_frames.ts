@@ -22,7 +22,7 @@ import {
   requirePlanPrePasses,
 } from "./pre_pass.js";
 import {
-  createSubprocessFailureDiagnostic, CutholError, DIAGNOSTICS, estimateCommandLineLength,
+  createSubprocessFailureDiagnostic, CutholDiagnostic, CutholError, DIAGNOSTICS, estimateCommandLineLength,
   type VerificationGateId
 } from "../core/diagnostics.js";
 import { CutholSequence } from "../core/schema.js";
@@ -290,6 +290,7 @@ export function renderMultipleCompositeFramesRgb24(
   durationMs: number;
   clampedMs: number;
   bboxUpdates: CellBboxSidecarUpdate[];
+  diagnostics: CutholDiagnostic[];
 }> {
   if (timestampsMs.length === 0) return [];
 
@@ -318,6 +319,7 @@ export function renderMultipleCompositeFramesRgb24(
   // process deletes a file this batch still reads.
   const batchShaderJobs: PrePassJob[] = [];
   const releaseReadLocks: Array<() => void> = [];
+  const planWarnings: CutholDiagnostic[][] = [];
   const plans: SingleFrameFfmpegPlan[] = timestampsMs.map((atMs) => {
     // Snap from the raw request, not the rounded clamp: rounding first can
     // push a timestamp inside frame N onto frame N+1 across a cue boundary.
@@ -330,6 +332,11 @@ export function renderMultipleCompositeFramesRgb24(
       singleFrameAtMs: exactFrameMs,
       includeAudio: false,
       singleFrameEarlyTrim: options?.singleFrameEarlyTrim,
+      // The single-frame extract below bounds the output with `-t` and
+      // `-frames:v 1`, so the window needs no `end=`. (With singleFrameAtMs
+      // set the compiler emits no window trim at all; the flag documents the
+      // bound and applies if that ever changes.)
+      windowEndByFrameCount: true,
     });
     // Read locks go on before the pre-pass, not after it: the window
     // between a producer finishing (rename, producer lock released) and this
@@ -372,6 +379,7 @@ export function renderMultipleCompositeFramesRgb24(
     // The label time must be the drawn frame-grid instant, not the rounded
     // request: `annotateRgb24BufferToCanvas` derives `active_handles` from it,
     // so a rounded label could name the cue on the other side of a boundary.
+    planWarnings.push([...(compiledPlan.compileWarnings ?? [])]);
     const singlePlan = buildSingleFrameFfmpegPlanFromCompiledPlan(
       compiledPlan,
       paths,
@@ -497,6 +505,7 @@ export function renderMultipleCompositeFramesRgb24(
     durationMs: number;
     clampedMs: number;
     bboxUpdates: CellBboxSidecarUpdate[];
+    diagnostics: CutholDiagnostic[];
   }>;
   try {
     mapped = plans.map((p, idx) => {
@@ -554,6 +563,7 @@ export function renderMultipleCompositeFramesRgb24(
         durationMs: p.durationMs,
         clampedMs: p.clampedMs,
         bboxUpdates,
+        diagnostics: planWarnings[idx] ?? [],
       };
     }
 
@@ -623,6 +633,7 @@ export function renderMultipleCompositeFramesRgb24(
       durationMs: p.durationMs,
       clampedMs: p.clampedMs,
       bboxUpdates,
+      diagnostics: planWarnings[idx] ?? [],
     };
     });
   } finally {
@@ -663,7 +674,7 @@ export function renderSingleCompositeFrameRgb24(
   atMs: number,
   preset: RenderPreset = "draft_480p",
   options?: { skipGates?: VerificationGateId[] }
-): { rgbBuf: Buffer; width: number; height: number; durationMs: number; clampedMs: number } {
+): { rgbBuf: Buffer; width: number; height: number; durationMs: number; clampedMs: number; diagnostics: CutholDiagnostic[] } {
   const res = renderMultipleCompositeFramesRgb24(seq, paths, [atMs], preset, options)[0];
   return {
     rgbBuf: res.rgbBuf,
@@ -671,5 +682,6 @@ export function renderSingleCompositeFrameRgb24(
     height: res.height,
     durationMs: res.durationMs,
     clampedMs: res.clampedMs,
+    diagnostics: res.diagnostics ?? [],
   };
 }

@@ -15,6 +15,7 @@
  * +/- 1 ms), never by comparing two extractions.
  */
 import "./test_setup.js";
+import { rmRetrySync } from "./fs_cleanup.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -151,7 +152,7 @@ test("audio offset start: clip at in 0 plays source time (beep at container 1.0 
     assert.ok(Math.sqrt(sumSq / head) < 0.01, "first 150 ms must be silence (source has no audio there)");
     console.log(`in0 beep at ${atMs.toFixed(2)} ms`);
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(tmp);
   }
 });
 
@@ -171,7 +172,7 @@ test("audio offset start: clip at in 0.5 plays source time (beep at 0.5 s)", { t
     assert.ok(Math.abs(atMs - 500) <= 1, `beep at ${atMs.toFixed(2)} ms, expected 500 ms`);
     console.log(`in0.5 beep at ${atMs.toFixed(2)} ms`);
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(tmp);
   }
 });
 
@@ -198,7 +199,7 @@ test("audio offset start: 1.5x speed clip from in 0 maps source time / rate", { 
     assert.ok(Math.abs(atMs - expected) <= 20, `beep at ${atMs.toFixed(2)} ms, expected ${expected.toFixed(2)} ms`);
     console.log(`1.5x beep at ${atMs.toFixed(2)} ms`);
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(tmp);
   }
 });
 
@@ -223,7 +224,7 @@ test("audio offset start: 1.5x asetrate (preserve_pitch=false) clip from in 0", 
     assert.ok(Math.abs(atMs - expected) <= 1, `beep at ${atMs.toFixed(2)} ms, expected ${expected.toFixed(2)} ms`);
     console.log(`1.5x asetrate beep at ${atMs.toFixed(2)} ms`);
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(tmp);
   }
 });
 
@@ -254,7 +255,7 @@ test("audio offset start: lane music cue on offset media plays source time", { t
     assert.ok(Math.abs(atMs - 1000) <= 1, `cue beep at ${atMs.toFixed(2)} ms, expected 1000 ms`);
     console.log(`cue beep at ${atMs.toFixed(2)} ms`);
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(tmp);
   }
 });
 
@@ -289,7 +290,7 @@ test("audio offset start: speed-ramped clip on offset media follows the ramp int
     assert.ok(Math.abs(atMs - expected * 1000) <= 1000 / 30, `ramp beep at ${atMs.toFixed(2)} ms, expected ${(expected * 1000).toFixed(2)} ms`);
     console.log(`ramp beep at ${atMs.toFixed(2)} ms, expected ${(expected * 1000).toFixed(2)} ms`);
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(tmp);
   }
 });
 
@@ -324,6 +325,6 @@ test("audio offset start: >24-clip spine (input-seek branch) keeps first clip al
     );
     console.log(`25-clip: first tick ${((onset0 / SR) * 1000).toFixed(2)} ms, seek tick ${((onset20 / SR) * 1000).toFixed(2)} ms`);
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(tmp);
   }
 });

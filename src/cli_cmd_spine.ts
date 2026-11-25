@@ -582,6 +582,13 @@ export function runSpineFxTry(
     }
     extDir = { name: ref.extension, dir: ext.dir };
   }
+  // Like every other `--out`, a relative path resolves against the project
+  // folder, never the cwd.
+  const out = args.out
+    ? path.isAbsolute(args.out)
+      ? args.out
+      : path.resolve(workspaceDir, args.out)
+    : undefined;
   try {
     const res = runFxTry({
       kind,
@@ -590,7 +597,7 @@ export function runSpineFxTry(
       ...(sweep ? { sweep } : {}),
       ...(at ? { at } : {}),
       ...(args.on ? { on } : {}),
-      ...(args.out ? { out: args.out } : {}),
+      ...(out ? { out } : {}),
       ...(onSourceFile ? { onSourceFile } : {}),
       ...(extDir ? { extDir } : {}),
     });

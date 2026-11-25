@@ -25,15 +25,17 @@ You can drive it two ways. They are the same commands:
 | `color(action="set", clip="sp_01", patch={...})` | `cuthol color set --clip sp_01 --patch '{...}'` |
 
 MCP names use `_` where the CLI uses `-` (`add_cue` ↔ `add-cue`,
-`comp_dir` ↔ `--comp-dir`). Error suggestions match your interface. If a tool seems missing (no ffmpeg, no browser, no speech key), run `cuthol doctor` first: one line per check, each with its fix.
+`comp_dir` ↔ `--comp-dir`). Error suggestions match your interface. Requirements: Node.js ≥ 22.5, `ffmpeg`/`ffprobe` 8.x (`cuthol setup --ffmpeg --apply` installs a pinned 8.1). If a tool seems missing (no ffmpeg, no browser, no speech key), run `cuthol doctor` first: one line per check, each with its fix.
 
 ## MCP or CLI
 
 - MCP remembers the project after `workspace.init`/`workspace.open`, resolves
   relative paths against the project folder, and returns monitor images inline.
   Use it for interactive work: inspecting, checking frames, verifying, mixing.
-- The CLI resolves relative file paths against the current working directory
-  and prints PNG paths for monitor calls (open them with your image reader).
+- The CLI resolves relative input file paths against the current working
+  directory; `--out` (and `--png`) resolve against the project folder, on the
+  CLI and over MCP. Monitor calls print PNG paths (open them with your image
+  reader).
   It suits bulk work: setup scripts, shell loops, cue sheets. Pass `--compact`
   for the same short text MCP returns (default CLI output is JSON).
 - After a Cuthol upgrade, new MCP arguments appear in tool schemas only once

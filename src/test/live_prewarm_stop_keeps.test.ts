@@ -6,6 +6,7 @@
  * contract); the sort case covers nearest-to-playhead-first ordering.
  */
 import "./test_setup.js";
+import { rmRetrySync } from "./fs_cleanup.js";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -36,7 +37,7 @@ test.after(() => {
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000);
     }
   }
-  fs.rmSync(ROOT, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  rmRetrySync(ROOT);
 });
 
 test("collected overlays sort nearest-to-playhead first, forward before backward", () => {

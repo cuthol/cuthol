@@ -15,6 +15,7 @@
  * `notExported` (one line per kind); nothing is silently dropped.
  */
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { CutholSequence, LaneCue } from "../core/schema.js";
@@ -141,12 +142,36 @@ function mapLaneCues(
   return out.sort((a, b) => a.tlInF - b.tlInF);
 }
 
-/** Overlay cache lookup for a composition cue; null when nothing cached. */
-function findCachedOverlay(paths: WorkspacePaths, cueId: string): string | null {
+/**
+ * Overlay cache lookup for a composition cue; null when nothing cached.
+ * Render writes `blobs/hf_comp_<hash>.<ext>` (hash-named, never containing the
+ * cue id) plus a per-composition state file (`hf_state_<sha256(absCompDir)[0:16]>.json`,
+ * see `getCompositionStateFilePath` in compositor/hf_cache_state.ts), so the
+ * state record's `cachedBlobs` is the lookup — never the blob file name.
+ */
+function findCachedOverlay(paths: WorkspacePaths, cue: LaneCue): string | null {
+  const compDir = cue.composition?.composition_dir;
+  if (compDir) {
+    try {
+      const absCompDir = path.isAbsolute(compDir) ? compDir : path.resolve(paths.rootDir, compDir);
+      const compKey = crypto.createHash("sha256").update(path.resolve(absCompDir)).digest("hex").slice(0, 16);
+      const statePath = path.join(paths.blobsDir, `hf_state_${compKey}.json`);
+      if (fs.existsSync(statePath)) {
+        const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as { cachedBlobs?: Record<string, string> };
+        const scored = Object.values(state.cachedBlobs ?? {})
+          .filter((b) => typeof b === "string" && fs.existsSync(b))
+          .map((b) => ({ b: b as string, mp4: (b as string).endsWith(".mp4") ? 0 : 1 }))
+          .sort((x, y) => x.mp4 - y.mp4 || x.b.localeCompare(y.b));
+        if (scored.length > 0) return scored[0].b;
+      }
+    } catch {
+      // fall through to the legacy name heuristic below
+    }
+  }
   try {
     const dir = paths.blobsDir;
     if (!fs.existsSync(dir)) return null;
-    const names = fs.readdirSync(dir).filter((n) => n.includes(cueId));
+    const names = fs.readdirSync(dir).filter((n) => n.includes(cue.id));
     if (names.length === 0) return null;
     const scored = names
       .map((n) => ({ n, mp4: n.endsWith(".mp4") ? 0 : 1 }))
@@ -169,7 +194,7 @@ function collectCueRefs(
     for (const cue of lane.cues) {
       if (cue.kind !== "composition" && cue.kind !== "caption" && cue.kind !== "title") continue;
       if (cue.kind === "composition") {
-        const overlay = findCachedOverlay(paths, cue.id);
+        const overlay = findCachedOverlay(paths, cue);
         cueRefs.push({
           cueId: cue.id,
           kind: cue.kind,

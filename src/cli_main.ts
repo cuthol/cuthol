@@ -9,7 +9,7 @@
 
 import path from "node:path";
 import { CutholError, DIAGNOSTICS } from "./core/diagnostics.js";
-import { loadDotEnvIfNeeded } from "./core/env.js";
+import { loadDotEnvIfNeeded, preferCutholFfmpeg } from "./core/env.js";
 import {
   CUTHOL_MCP_TOOLS,
   formatEnvelopeCompact,
@@ -109,11 +109,17 @@ export async function runCli(argv: string[] = process.argv.slice(2), invokedPath
     formatFlag !== "compact" &&
     !(isLibraryQuery && formatFlag === "default")
   ) {
+    // `--format` is the reserved global output flag (text|json|compact): its value is never a
+    // command-specific format, so the suggestion must not propose `--format text` for one.
+    const formatHint =
+      group === "export" && action === "timeline"
+        ? "cuthol export timeline fcpxml|xmeml|edl|otio (the interchange format is a positional or --as, not --format)"
+        : `cuthol ${group ?? ""}${action ? ` ${action}` : ""} --format text|json`;
     throw new CutholError(
       DIAGNOSTICS.UNKNOWN_FLAG(
         `--format ${String(flags["format"])}`,
         `${group ?? "cuthol"}${action ? `.${action}` : ""}`,
-        `cuthol ${group ?? ""}${action ? ` ${action}` : ""} --format text`
+        formatHint
       )
     );
   }
@@ -129,6 +135,7 @@ export async function runCli(argv: string[] = process.argv.slice(2), invokedPath
     limit: numFlag(flags, "limit"),
   });
   loadDotEnvIfNeeded(workspaceDir);
+  preferCutholFfmpeg();
   if (!process.env.CUTHOL_PROJECT_DIR) process.env.CUTHOL_PROJECT_DIR = workspaceDir;
 
   if (!group || group === "help" || flags["help"]) {

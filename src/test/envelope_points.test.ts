@@ -9,6 +9,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { rmRetrySync } from "./fs_cleanup.js";
 import { CutholError } from "../core/diagnostics.js";
 import { commitSequenceMutation, initWorkspace, loadSequence } from "../core/workspace.js";
 import { MediaLedger } from "../library/ledger.js";
@@ -35,7 +36,7 @@ function withWs(fn: (wsDir: string) => void): void {
     initWorkspace({ dir: wsDir, title: "envpt", aspect: "16:9", fps: 30 });
     fn(wsDir);
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(tmp);
   }
 }
 

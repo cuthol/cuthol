@@ -177,13 +177,6 @@ export interface PresetPointRecord {
   bezier?: [number, number, number, number];
 }
 
-/** Kept for source compatibility; presets now record per-point anchors on the provenance itself. */
-export type PresetBinding =
-  | { to: "clip_start"; offset_ms: number }
-  | { to: "clip_end"; offset_ms: number }
-  | { to: "beats"; asset_handle: string; beat_grid_hash: string }
-  | { to: "none" };
-
 /**
  * Recorded on an fx entry written by a preset. Informational: render never
  * reads it. `verify` recomputes the expected envelope points from `points`

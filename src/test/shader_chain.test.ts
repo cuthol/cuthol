@@ -10,6 +10,7 @@
  */
 
 import "./test_setup.js";
+import { rmRetrySync } from "./fs_cleanup.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -28,7 +29,7 @@ process.env.CUTHOL_SKILLS_AUTO = "0";
 process.env.CI = "1";
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-shadchain-"));
-test.after(() => fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+test.after(() => rmRetrySync(TMP));
 
 const INVERT_GLSL = `precision highp float;
 uniform float time;

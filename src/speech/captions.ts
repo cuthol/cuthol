@@ -30,6 +30,7 @@ import { loadSequence } from "../core/workspace.js";
 import { projectTranscriptAcrossSequence, projectTranscriptWordsToClip } from "../sequence/spine.js";
 import { commitVerifiedMutation, VerificationReport } from "../verify/gates.js";
 import { loadCachedTranscriptForAsset } from "./transcribe.js";
+import type { TranscriptDocument } from "./providers.js";
 
 export type CaptionStylePreset = "active_word" | "sentence" | "boxed";
 
@@ -78,6 +79,14 @@ export function generateSequenceCaptions(options: {
   const allProjectedWords: TimedWordToken[] = [];
   let skippedExcisedCount = 0;
   let targetClipWindow: { startMs: number; endMs: number } | null = null;
+  // [ed G384–G385] spine items (and vo cues) that carry audio but have no
+  // transcript: named in the warning, never in the silent path.
+  const untranscribedItems: string[] = [];
+  const untranscribedHandles: string[] = [];
+  const noteUntranscribed = (itemId: string, handle: string): void => {
+    if (!untranscribedHandles.includes(handle)) untranscribedHandles.push(handle);
+    if (!untranscribedItems.includes(itemId)) untranscribedItems.push(itemId);
+  };
 
   if (options.clipId) {
     const targetClip = initialSeq.spine.clips.find((c) => c.id === options.clipId);
@@ -86,17 +95,24 @@ export function generateSequenceCaptions(options: {
         startMs: targetClip.timeline_in_ms,
         endMs: targetClip.timeline_in_ms + targetClip.duration_ms,
       };
-      const doc = loadCachedTranscriptForAsset(options.workspaceDir, targetClip.asset_handle, lang);
-      if (!detectedTranscriptLang && doc.language) detectedTranscriptLang = doc.language;
-      const activeWords = doc.words.map((w) => ({
-        word: w.punctuated_word || w.word,
-        source_start_ms: w.source_start_ms,
-        source_end_ms: w.source_end_ms,
-        confidence: w.confidence,
-      }));
-      const projectedForClip = projectTranscriptWordsToClip(targetClip, activeWords);
-      skippedExcisedCount += Math.max(0, activeWords.length - projectedForClip.length);
-      allProjectedWords.push(...projectedForClip);
+      try {
+        const doc = loadCachedTranscriptForAsset(options.workspaceDir, targetClip.asset_handle, lang);
+        if (!detectedTranscriptLang && doc.language) detectedTranscriptLang = doc.language;
+        const activeWords = doc.words.map((w) => ({
+          word: w.punctuated_word || w.word,
+          source_start_ms: w.source_start_ms,
+          source_end_ms: w.source_end_ms,
+          confidence: w.confidence,
+        }));
+        const projectedForClip = projectTranscriptWordsToClip(targetClip, activeWords);
+        skippedExcisedCount += Math.max(0, activeWords.length - projectedForClip.length);
+        allProjectedWords.push(...projectedForClip);
+      } catch {
+        // No transcript: warn only when the item actually carries audio
+        // (b-roll without an audio stream never warns).
+        const asset = initialSeq.library.find((a) => a.handle === targetClip.asset_handle);
+        if (asset?.probe?.has_audio) noteUntranscribed(targetClip.id, targetClip.asset_handle);
+      }
     } else {
       const voCue = initialSeq.lanes
         .flatMap((l) => l.cues)
@@ -104,7 +120,13 @@ export function generateSequenceCaptions(options: {
       if (!voCue || !voCue.asset_handle) {
         throw new CutholError(DIAGNOSTICS.UNKNOWN_HANDLE(options.clipId));
       }
-      const doc = loadCachedTranscriptForAsset(options.workspaceDir, voCue.asset_handle, lang);
+      let doc: TranscriptDocument;
+      try {
+        doc = loadCachedTranscriptForAsset(options.workspaceDir, voCue.asset_handle, lang);
+      } catch {
+        noteUntranscribed(voCue.id, voCue.asset_handle);
+        doc = { words: [] } as unknown as TranscriptDocument;
+      }
       if (!detectedTranscriptLang && doc.language) detectedTranscriptLang = doc.language;
       const cueStart = resolveCueStartMs(initialSeq, voCue);
       targetClipWindow = { startMs: cueStart, endMs: cueStart + voCue.duration_ms };
@@ -180,7 +202,16 @@ export function generateSequenceCaptions(options: {
           }
         }
       } catch {
-        // Skip assets without transcripts
+        // No transcript for this asset: warn later, but only for items that
+        // actually carry audio (b-roll without an audio stream never warns).
+        const asset = initialSeq.library.find((a) => a.handle === clip.asset_handle);
+        if (asset?.probe?.has_audio) {
+          for (const c of initialSeq.spine.clips) {
+            if (c.asset_handle === clip.asset_handle && !c.audio_chain.muted) {
+              noteUntranscribed(c.id, clip.asset_handle);
+            }
+          }
+        }
       }
     }
 
@@ -218,7 +249,8 @@ export function generateSequenceCaptions(options: {
               }
             }
           } catch {
-            // Ignore if no transcript
+            // Voice cue without a transcript: it carries audio by definition.
+            noteUntranscribed(voCue.id, voCue.asset_handle);
           }
         }
       }
@@ -298,6 +330,61 @@ export function generateSequenceCaptions(options: {
   }
   if (currentGroup.length > 0) {
     groups.push(currentGroup);
+  }
+
+  // [ed G384] nothing to caption: no empty undoable revision. WARN names the
+  // untranscribed audio items and the next step; without audio items there is
+  // simply nothing to do.
+  if (groups.length === 0) {
+    const warn =
+      untranscribedItems.length > 0
+        ? [DIAGNOSTICS.CAPTIONS_NO_TRANSCRIPT(untranscribedItems, untranscribedHandles)]
+        : [];
+    const revision = initialSeq.meta.revision;
+    const verification: VerificationReport = {
+      ok: true,
+      revision,
+      gates_run: [],
+      error_count: 0,
+      warning_count: warn.length,
+      diagnostics: warn,
+    };
+    const decisionTrace: DecisionTrace = {
+      trace_id: `tr_cap_r${revision}`,
+      feature: "auto_caption",
+      algorithm: { id: "caption.dual-clock-grouper", version: "2.0.0" },
+      revision,
+      params: {
+        style: { value: style, default: "active_word", source: options.style !== undefined ? "user" : "default" },
+        max_words_per_group: { value: maxWords, default: defaultMaxWords, source: options.maxWordsPerGroup !== undefined ? "user" : "default" },
+        max_chars_per_line: { value: maxChars, default: maxChars, source: "preset" },
+        max_cps: { value: 0, default: 0, unit: "char/s", source: "default" },
+      },
+      rules: [
+        "R1: Excised words are skipped; active words are projected onto the sequence clock (sequence_ms) via the speed_ramp integral",
+        "R2: Split into a new caption group at punctuation ends, >= 350ms gaps, or the max_words_per_group / max_chars_per_line limit",
+        "R3: The gap up to the neighboring caption is used to keep CPS <= max_cps readable",
+      ],
+      summary: {
+        text: `0 active words -> 0 caption items; ${skippedExcisedCount} excised words skipped`,
+        candidates: 0,
+        accepted: 0,
+        rejected: 0,
+        by_reason: {},
+        effect: { cues_created: 0, active_words: 0, mean_cps: 0, skipped_excised_words: skippedExcisedCount },
+      },
+      decisions: [],
+      near_misses: [],
+    };
+    return {
+      style,
+      cues_created: 0,
+      skipped_excised_words: skippedExcisedCount,
+      cues: [],
+      decision_trace: decisionTrace,
+      revision,
+      verification,
+    };
   }
 
   const { result: createdCues, revision, verification } = commitVerifiedMutation(
@@ -468,6 +555,14 @@ export function generateSequenceCaptions(options: {
     decisions: capDecisions,
     near_misses: capNearMisses,
   };
+
+  // [ed G385] some items transcribed, others not: captions cover the
+  // transcribed ones, the rest are named in a warning on the same revision.
+  if (untranscribedItems.length > 0) {
+    const partial = DIAGNOSTICS.CAPTIONS_PARTIAL_TRANSCRIPT(untranscribedItems, untranscribedHandles);
+    verification.diagnostics.push(partial);
+    verification.warning_count += 1;
+  }
 
   return {
     style,

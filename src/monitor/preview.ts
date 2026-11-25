@@ -622,7 +622,7 @@ export function captureMonitorFrame(options: {
   const showBoxes = options.showBoxes ?? true;
   const showHud = !(options.hideHud ?? false);
 
-  const { rgbBuf, width, height, clampedMs } = renderSingleCompositeFrameRgb24(
+  const { rgbBuf, width, height, clampedMs, diagnostics: frameDiagnostics } = renderSingleCompositeFrameRgb24(
     sequence,
     paths,
     options.atMs,
@@ -686,7 +686,7 @@ export function captureMonitorFrame(options: {
     width,
     height,
     metrics,
-    diagnostics: [...baseDiagnostics, ...scriptDiagnostics, ...emptyDiagnostics],
+    diagnostics: [...baseDiagnostics, ...scriptDiagnostics, ...emptyDiagnostics, ...(frameDiagnostics ?? [])],
   };
 }
 
@@ -710,6 +710,7 @@ export function captureMonitorSheet(options: {
   cols?: number;
   rows?: number;
   showBoxes?: boolean;
+  hideHud?: boolean;
   outputPath?: string;
 }): MonitorSheetResult {
   const { paths, sequence } = loadSequence(options.workspaceDir);
@@ -820,7 +821,8 @@ export function captureMonitorSheet(options: {
       clampedMs,
       sequence,
       showBoxes,
-      paths.rootDir
+      paths.rootDir,
+      !(options.hideHud ?? false)
     );
 
     frames.push(metrics);

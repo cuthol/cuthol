@@ -17,6 +17,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { CutholDiagnostic, CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
+import { rmRetrySync } from "../core/fs_retry.js";
 import type { CutholSequence } from "../core/schema.js";
 import type { WorkspacePaths } from "../core/workspace.js";
 import { compileSequenceRenderPlan } from "../compositor/compiler.js";
@@ -268,7 +269,7 @@ export function checkExtTransitionBackstop(
     writeBackstopCache(cache);
     return { status: "ok" };
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(tmp);
   }
 }
 

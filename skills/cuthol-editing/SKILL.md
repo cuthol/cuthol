@@ -56,7 +56,7 @@ the media are rejected (G202).
 |---|---|
 | `append(asset, in?, out?)` | Add a source range at the end. `in`/`out` are **source** times. |
 | `trim(clip, in?, out?)` | New source in/out. Later clips ripple. |
-| `split(clip, at=[...], sequence_time?)` | Split at source times (or timeline times with `sequence_time=true`). Envelopes and anchored cues carry over to the right pieces. |
+| `split(clip, at=[...], sequence_time?)` | Split at clip-local times (or timeline times with `sequence_time=true`). Every point must fall strictly inside the clip, else nothing is written (G383 names the clip-local and sequence ranges). Envelopes and anchored cues carry over to the right pieces. |
 | `excise(clip, ranges, coord?)` | Remove `ranges=["a..b", …]` (**comma-separated**) and close the gaps. `coord`: `clip_local` (default), `source`, `sequence`. |
 | `remove(clips, cascade_cues?)` | Delete clips; anchored cues go too, unless `cascade_cues=false` (they detach, keep absolute time). |
 | `reorder(clip, before\|after\|index)` | Move a clip. |

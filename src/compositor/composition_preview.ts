@@ -335,6 +335,9 @@ export function previewAndCheckComposition(options: {
     const underneathPlan = compileSequenceRenderPlan(underneathSeq, paths, "draft_480p", {
       minDurationMs: cueEndMs + 500,
       activeWindowMs: [cueStartMs, cueEndMs],
+      // The backdrop encode below bounds the output with `-t durationSec`
+      // (the window length), so the final trim keeps `start=` but no `end=`.
+      windowEndByFrameCount: true,
       includeAudio: false,
     });
     requirePlanPrePasses(underneathPlan, { cwd: paths.rootDir, step: "ffmpeg pre-pass" }, "composition preview");

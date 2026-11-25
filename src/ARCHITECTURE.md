@@ -38,7 +38,8 @@ sequence/    spine (facade), lanes, cue sheet, stage
 speech/      transcribe, synthesize, providers, cleanup (facade), repetitions, captions
 mix/         audio_mix (facade): normalize, duck, beat align
 compositor/  compiler (facade + video graph), HyperFrames bridge (facade), bridge exporter (facade),
-             runtime injected into compositions, composition preview, .ass captions
+             runtime injected into compositions, composition preview, .ass captions, fx stage
+color/       block colour model, 3D LUT compile, measurement map, prediction/solve/check
 render/      renderer (facade): render, segments, scans, preview, frames; encoder (facade)
 monitor/     frame / sheet / timeline images
 verify/      the five gates
@@ -53,6 +54,7 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 | File | Responsibility |
 |---|---|
 | `cli.ts` | `main()`: argument validation, help, context setup, and dispatch `switch` over command groups. |
+| `cli_main.ts` | Command dispatcher (`runCli` runs one command for an argv; tests drive the real dispatcher in-process). |
 | `cli_output.ts` | CLI output state (`activeCli*`), `CliCommandContext`, and `emitEnvelopeObject` / `emitEnvelopeJson`. |
 | `cli_cmd_*.ts` | Per-group CLI command handlers (`workspace`, `library`, `spine`, `lane`, `composition`/`cue`, `speech`, `mix`, `verify`/`monitor`/`render`/`brief`, `extension`, `skills`). |
 | `cli_args.ts` | Flag lexicon (`KNOWN_CLI_FLAGS`, `BOOLEAN_FLAGS`), typo suggestions, `parseArgv`, `strFlag`/`numFlag`/`boolFlag`. |
@@ -60,6 +62,7 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 | `mcp/server.ts` | `CutholMcpServer` (stdio JSON-RPC), session project, progress/cancel, `guide`. |
 | `mcp/mcp_format.ts` | CLI envelope → short MCP text: hints, diagnostics, compact tables. |
 | `mcp/catalog.ts` | Tool specs, JSON schemas, argument validation, MCP call → CLI argv. |
+| `mcp/mcp_reload.ts` | Keeps a long-lived stdio MCP session in step with the build on disk. |
 | `mcp/catalog_types.ts` | `ParamSpec` / `ActionSpec` / `ToolSpec` and shared parameter builders. |
 | `mcp/catalog_specs_*.ts` | The action specs per area (project, timeline, media, output). Order matters. |
 
@@ -71,6 +74,12 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 | `workspace.ts` | Project paths, load/save, journal (undo/redo/tag), open summary. |
 | `diagnostics.ts` | All diagnostic codes and texts. |
 | `envelope.ts`, `decision_trace.ts` | CLI/MCP response envelope, state delta, explainable decisions. |
+| `doctor.ts`, `ffmpeg_version.ts` | Environment checks behind `cuthol doctor`; ffmpeg/ffprobe major-version probe with per-process caching. |
+| `easing.ts`, `frame_time.ts` | Shared cubic-bezier easing math; the one definition of cue visibility on the frame grid. |
+| `external_changes.ts` | Out-of-journal project change tracking (composition folders) and adoption. |
+| `local_speech_setup.ts`, `settings.ts` | Keyless local-speech installation; user + project settings layer with per-key records. |
+| `mcp_register.ts`, `package_resolve.ts` | MCP registration planning for `cuthol setup`; package-local dependency resolution. |
+| `progress.ts` | Stderr progress lines for a running render. |
 | `subprocess.ts` | Spawning with the progress watchdog (stall → kill tree). |
 | `standards.ts` | Default parameters and their sources. |
 | `env.ts`, `png_canvas.ts` | `.env` loader; dependency-free PNG canvas. |
@@ -84,6 +93,9 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 | `spine_envelope.ts` | Envelope evaluation/slicing, reframe focal points. |
 | `envelope_points.ts` | One keyframe at a time (add/move/remove) and clock conversion (sequence time with tempo, beat of a placed asset) into item-local ms. |
 | `spine_treatments.ts` | Mask and motion blur mutations on spine clips. |
+| `envelope_params.ts`, `tempo.ts` | Envelope parameter validation (names the compiler applies); sequence↔output clock tempo mapping. |
+| `spine_fx.ts`, `spine_grade.ts` | Effect-chain operations (`spine fx` add/set/remove/list); colour grade edits. |
+| `color_edit.ts`, `stage_adopt.ts`, `stage_resize.ts` | Journaled colour edits; first-source stage adoption; journaled stage resize with layout rescale. |
 | `placement_resolve.ts` | Effective placement of a clip or cue (base value, envelope; motion layers later). Every placement reader goes through it; ffmpeg expressions via `compilePlacementChannelExpr` in `compositor/compile_filters.ts`. |
 | `spine_edit.ts` | append, split, trim, excise, remove, reorder, transform, speed, transition, envelope, mute. |
 | `spine_reframe.ts` | Subject-tracking reframe. |
@@ -102,6 +114,8 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 | `speech/cleanup_trace.ts`, `speech/cleanup_apply.ts` | Cleanup decision trace builder; single-clip and multi-clip atomic spine excision. |
 | `speech/repetitions.ts` | Repetition and restart candidates (listed, never auto-cut). |
 | `speech/captions.ts` | Caption generation. |
+| `speech/cleanup_cue.ts`, `speech/verify_cleanup.ts` | Audio-cue adapter for the dialogue-cleanup engine; post-cleanup re-transcribe comparison. |
+| `speech/local_engine.ts`, `speech/provider_ext.ts`, `speech/provider_select.ts` | Built-in keyless local speech; extension ASR/TTS adapters; provider selection order. |
 | `mix/audio_mix.ts` | Facade. |
 | `mix/mix_normalize.ts` | Loudness normalization with master calibration; voice polish. |
 | `mix/mix_duck.ts`, `mix/mix_beat_align.ts` | Ducking; beat alignment. |
@@ -114,6 +128,11 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 | `compile_spine_timing.ts`, `compile_spine_color.ts`, `compile_spine_fx.ts`, `compile_spine_mask.ts`, `compile_spine_transition.ts`, `compile_spine_edge.ts` | Stages of the spine clip filter chain: timing / speed ramp, colour, per-clip fx, mask and motion blur, transitions (chain filters + overlay position), edge mode. Stage order is documented at the top of `compile_spine.ts`. |
 | `compile_audio.ts` | The audio graph shared by render and loudness measurement. |
 | `compile_filters.ts`, `compile_color.ts`, `compile_backdrop.ts` | Filter helpers; explicit BT.709 conversions; backdrop slices under compositions. |
+| `compile_fx_stage.ts` | The one fx stage shared by spine clips and lane cues (`clip.fx`, `cue.fx`); envelopes on non-animatable params are G119. |
+| `compile_lane_typography.ts` | Lane text cues rendered to an ASS subtitle file and overlaid at the lane's `z_index`. |
+| `composition_audio.ts`, `composition_audio_hf.ts` | Engine-neutral composition-audio (stem) contract; the HyperFrames adapter. |
+| `hf_script_errors.ts`, `hf_script_probe_child.ts` | Composition page script-error records and severity classification; the sync browser-probe child. |
+| `hf_transparent.ts`, `scaffold_guard.ts` | Legacy green-background staging helper; scaffold never silently overwrites edited files. |
 | `single_frame_trim.ts` | Pure helper inserting a frame-number early window trim into a finished single-frame clip/cue chain (with `((in-1)/fps)` counter rewrite). |
 | `hyperframes_bridge.ts` | Facade for everything HyperFrames: |
 | `hf_common.ts` | Package root, local HyperFrames CLI / GSAP lookup, shared types. |
@@ -152,6 +171,17 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 | `encoder_args.ts` | Encoder types, BT.709 output args, codec arguments. |
 | `monitor/preview.ts`, `monitor/timeline_view.ts` | `monitor frame/sheet` images; timeline image. |
 
+### color/
+
+| File | Responsibility |
+|---|---|
+| `types.ts`, `math.ts` | Colour data model (sequence JSON) and shared API shapes; the single definition of what a colour block does (pure BT.709 functions baked into LUTs). |
+| `blocks.ts`, `cli_parse.ts` | Stage helpers shared by compiler, measurement, CLI and Live; short CLI flag syntax → stage patch. |
+| `compile.ts`, `lut.ts`, `pair_lut.ts` | Stage (+ Look, + envelopes) to ffmpeg filters via one baked 3D LUT; LUT baking/self-test/`.cube` I/O; before/after pair → LUT. |
+| `map.ts`, `frames.ts`, `diff.ts` | Text-first colour map of a frame set; frame sampling for measurement; difference of two maps in block units. |
+| `input_transform.ts`, `source_kind.ts` | HLG/PQ-to-SDR input transform as filters; camera/screen/graphic detection from pixels. |
+| `predict.ts`, `render_check.ts`, `solve.ts`, `variants.ts`, `cluster.ts` | Render-free grade prediction; post-render check against the prediction; block-patch solver (never applies); side-by-side variant sheet; same-setup item clusters. |
+
 ### effects/
 
 | File | Responsibility |
@@ -161,6 +191,7 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 | `effects/fx_check.ts` | Pre-render fx probe: runs one item's compiled stage (or one definition) on a lavfi card with a sentinel filter, plus the frozen-envelope triple-render (`spine fx check`, write-time and `verify` wiring); definition cache keys include the template text, and G322 carries `:`-vs-`,` / nested-quote rule hints. |
 | `effects/fx_sandbox.ts`, `effects/fx_try.ts`, `effects/fx_check_full.ts` | Throw-away one-clip sandbox project through the product path; `spine fx try` PNG grid and `spine fx check --full` delivery check (variants, neutral, stacked, Bezier envelopes, cost class). |
 | `effects/preset_apply.ts`, `extensions/presets.ts`, `extensions/fx_new.ts`, `verify/gates_preset.ts` | Motion presets: anchored keyframe templates (`spine fx preset`, one revision, provenance record), drift gate with `--reapply`, `extension fx-new` skeletons. |
+| `effects/shader_def.ts`, `effects/shader_compile_child.ts` | Shader effect definitions (GLSL uniform parsing); the sync browser-compile child for `extension enable`. |
 
 ### verify/, brief/, library/, extensions/
 | File | Responsibility |
@@ -168,8 +199,16 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 | `verify/gates.ts` | Facade: `verifySequence`, `measureCuePixelBox`, verified commits. |
 | `verify/gates_structural.ts`, `verify/gates_stage_signal.ts` | Gates 1–3 (`G1_SCHEMA`, `G2_ASSETS`, `G3_TIMING`) and Gates 4–5 (`G4_STAGE`, `G5_SIGNAL`). |
 | `verify/gates_transitions.ts` | Encoder-free backstop: one short windowed render per `ext:` transition (G331/G332). |
+| `verify/gates_fx.ts` | `spine fx` verification (G118/G119/G411) reusing the real stage compiler per clip, plus orphan-envelope and frozen-param checks. |
+| `verify/gates_color.ts`, `verify/gates_easing.ts`, `verify/gates_edge.ts` | Colour-stage, easing (G120), and edge-mode verification passes. |
+| `verify/gates_motion.ts`, `verify/gates_transition.ts` | Motion-layer and extension-transition verification passes. |
+| `verify/gates_boundary.ts`, `verify/gates_empty_composition.ts` | Composition-boundary continuity; empty-composition findings. |
+| `verify/gates_hf_audio.ts`, `verify/gates_script_errors.ts` | Composition-audio stem gate (G416); composition page script-error records (G430–G432). |
 | `brief/inspector.ts` | `brief` lenses. |
 | `library/*` | probe/ingest, ledger, loudness, waveform, beats, scenes, subject tracking, paginated query. |
+| `library/probe.ts`, `library/media_source.ts` | Asset probing and ingest; media source resolution. |
+| `library/ledger.ts`, `library/query.ts` | SQLite ledger (transcripts, beats, waveform, scenes); paginated query. |
+| `library/loudness.ts`, `library/waveform.ts`, `library/beats.ts`, `library/scenes.ts`, `library/subject.ts` | Loudness, waveform peaks, beat grid, scene cuts, subject tracking analyses. |
 | `extensions/manager.ts` | Facade. |
 | `extensions/ext_manifest.ts` | Manifest types and closed-schema validation, path/network safety. |
 | `extensions/ext_registry.ts` | Find, load, hash, list, show. |
@@ -178,6 +217,7 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 | `extensions/ext_lifecycle.ts` | create, promote, remove, enable/disable per project. |
 | `extensions/ext_processor.ts`, `ext_recipe.ts` | Processors (ffmpeg / node, cached); recipes (atomic). |
 | `extensions/ext_events.ts`, `ext_planner.ts` | Composition events and planner snapshot; planners and patch validation. |
+| `extensions/ext_providers.ts` | Extension speech/media providers: manifest `providers` runtime (resolve, sandbox, env isolation). |
 
 ## Where to start
 
@@ -204,4 +244,11 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 | `live_waveform.ts` (+ worker) | `GET /api/waveform/<handle>`: per-asset cached waveform peaks for the timeline, analyzed in a worker thread. |
 | `live_config.ts` | Open mode `ask|on|off` (env > project > user). |
 | `live_prewarm.ts` | Idle overlay pre-production: one background child runs the render's overlay stage around the playhead. |
+| `live_edit_api.ts`, `live_edit_worker.ts` | Human edits via the same CLI handlers (async child, human actor); the long-lived worker thread. |
+| `live_state.ts`, `live_instances.ts`, `live_incidents.ts` | Server sequence state and diffing; running-server records; incident reports. |
+| `live_thumbs.ts`, `live_thumbs_worker.ts`, `live_proxy.ts` | Scene thumbnails through `monitor frame`, cached by content hash; scrubbing proxies per spine asset. |
+| `live_frame.ts`, `live_frame_worker.ts` | Single-frame fetch for the Live window; its worker thread. |
+| `live_comp_serve.ts`, `live_color_api.ts`, `live_browsers.ts` | Composition file server for the preview; Live colour endpoints; installed/default browser lookup. |
+| `live_coords_worker.ts`, `live_waveform_worker.ts`, `live_frame_worker.ts` | Worker threads for coords, waveform peaks, and frames. |
+| `live_settings_api.ts`, `live_shader_api.ts`, `live_notes_api.ts`, `live_progress.ts` | Settings, shader, and notes endpoints; long-operation progress feed. |
 | `ui/` | The window: `app.js` shell + store, one `<region>.js/.css` per panel, `live_client.js` connection. |

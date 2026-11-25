@@ -12,6 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { rmRetrySync } from "./fs_cleanup.js";
 import { initWorkspace } from "../core/workspace.js";
 import { createExtension, enableExtensionInWorkspace } from "../extensions/manager.js";
 import { CutholMcpServer } from "../mcp/server.js";
@@ -59,6 +60,6 @@ test("MCP workspace open shows both extensions with enabled state", async () => 
     else process.env.CUTHOL_EXTENSIONS_DIR = prevExtDir;
     if (prevCacheDir === undefined) delete process.env.CUTHOL_CACHE_DIR;
     else process.env.CUTHOL_CACHE_DIR = prevCacheDir;
-    fs.rmSync(tmpRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(tmpRoot);
   }
 });

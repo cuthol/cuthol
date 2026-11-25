@@ -13,6 +13,11 @@ import {
   describeLocalSpeechSetup,
   planLocalSpeechSetup,
 } from "./core/local_speech_setup.js";
+import {
+  applyFfmpegSetup,
+  describeFfmpegSetup,
+  planFfmpegSetup,
+} from "./core/ffmpeg_install.js";
 import { boolFlag, strFlag } from "./cli_args.js";
 import {
   CLI_NOT_HANDLED,
@@ -24,6 +29,43 @@ import {
 export async function runSetupCommand(ctx: CliCommandContext): Promise<CliCommandResult> {
   const { flags, workspaceDir } = ctx;
   if (ctx.group !== "setup" || ctx.action !== undefined) return CLI_NOT_HANDLED;
+
+  if (boolFlag(flags, "ffmpeg", false)) {
+    const plan = planFfmpegSetup();
+    const wantsFfmpegJson = Boolean(flags["json"]);
+    if (!boolFlag(flags, "apply", false)) {
+      const lines = describeFfmpegSetup(plan);
+      if (wantsFfmpegJson) {
+        emitEnvelopeJson(workspaceDir, "setup.ffmpeg", {
+          action: "setup.ffmpeg",
+          dry_run: true,
+          ...plan,
+        });
+        return;
+      }
+      for (const line of lines) console.log(line);
+      if (!plan.supported) process.exitCode = 1;
+      return;
+    }
+    const startedAt = Date.now();
+    const { noop, seconds } = await applyFfmpegSetup(startedAt);
+    if (wantsFfmpegJson) {
+      emitEnvelopeJson(workspaceDir, "setup.ffmpeg", {
+        action: "setup.ffmpeg",
+        dry_run: false,
+        noop,
+        seconds,
+        ...plan,
+      });
+      return;
+    }
+    if (noop) {
+      console.log(`ffmpeg already installed in '${plan.targetDir}'; nothing to do.`);
+      return;
+    }
+    console.log(`ffmpeg installed in '${plan.targetDir}' in ${seconds}s.`);
+    return;
+  }
 
   if (boolFlag(flags, "local-speech", false)) {
     const plan = planLocalSpeechSetup({

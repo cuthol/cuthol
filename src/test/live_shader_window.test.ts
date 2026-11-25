@@ -21,7 +21,7 @@ import { ingestAssetsIntoWorkspace } from "../library/probe.js";
 import { appendSpineClip } from "../sequence/spine_edit.js";
 import { addSpineFx } from "../sequence/spine_fx.js";
 import { enableExtensionInWorkspace } from "../extensions/ext_lifecycle.js";
-import { waitFor } from "./b_helpers.js";
+import { rmRetrySync, waitFor } from "./b_helpers.js";
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "../..");
 const CLI = path.join(REPO, "dist", "cli.js");
@@ -30,7 +30,7 @@ process.env.CUTHOL_SKILLS_AUTO = "0";
 process.env.CI = "1";
 
 const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-live-shader-win-"));
-after(() => fs.rmSync(ROOT, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+after(() => rmRetrySync(ROOT));
 
 const GRAD = `vec4 getInput(vec2 uv);
 vec4 effect(vec2 uv) { return vec4(uv.x, uv.y, 0.0, 1.0); }
@@ -61,7 +61,7 @@ function cli(dir: string, args: string[]): { status: number; stdout: string; std
 
 function makeWs(name: string): { wsDir: string; clipA: string; clipB: string; extDir: string } {
   const wsDir = path.join(ROOT, name);
-  fs.rmSync(wsDir, { recursive: true, force: true });
+  rmRetrySync(wsDir);
   const src = path.join(ROOT, "src.mp4");
   media(src);
   initWorkspace({ dir: wsDir, title: name, aspect: "16:9", fps: 30 });
@@ -164,7 +164,7 @@ vec4 effect(vec2 uv) { return mix(getInput(uv), vec4(0.0, 0.0, 1.0, 1.0), 0.5); 
 
 function makeOrderWs(name: string): { wsDir: string; clip: string } {
   const wsDir = path.join(ROOT, name);
-  fs.rmSync(wsDir, { recursive: true, force: true });
+  rmRetrySync(wsDir);
   const src = path.join(ROOT, "src.mp4");
   media(src);
   initWorkspace({ dir: wsDir, title: name, aspect: "16:9", fps: 30 });

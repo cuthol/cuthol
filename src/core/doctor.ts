@@ -10,6 +10,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { FFMPEG_TESTED_MAJOR, getFfmpegVersionInfo } from "./ffmpeg_version.js";
 import { listInstalledBrowsers } from "../live/live_browsers.js";
+import { installedFfmpegBinDir } from "./ffmpeg_install.js";
 import { findLocalHyperFramesCliMjs } from "../compositor/hf_common.js";
 import { listSkillsStatus, skillsWarningIds } from "./skills_install.js";
 import { resolveBundledGsapMinJs } from "./package_resolve.js";
@@ -31,6 +32,10 @@ export interface DoctorProbes {
   ffmpegToken?: string | null;
   ffprobeMajor?: number | null;
   ffprobeToken?: string | null;
+  ffmpegPath?: string | null;
+  ffprobePath?: string | null;
+  /** True when the reported ffmpeg/ffprobe come from `cuthol setup --ffmpeg`. */
+  ffmpegFromSetup?: boolean;
   chromiumBrowsers?: string[];
   hyperframesResolved?: boolean;
   hyperframesVersion?: string | null;
@@ -100,13 +105,15 @@ export function checkFfmpeg(probes: DoctorProbes = {}): DoctorCheck {
   const ffprobeMajor = probes.ffprobeMajor ?? null;
   const ffmpegToken = probes.ffmpegToken ?? null;
   const ffprobeToken = probes.ffprobeToken ?? null;
+  const source = probes.ffmpegFromSetup === true ? "installed by cuthol setup" : "from PATH";
+  const where = (p: string | null | undefined): string => (p ? ` at ${p}` : "");
   if (ffmpegMajor === null || ffprobeMajor === null) {
     const missing = ffmpegMajor === null ? "ffmpeg" : "ffprobe";
     return {
       id: "ffmpeg",
       status: "fail",
       found: `${missing} not found on PATH`,
-      fix: "Install ffmpeg 8.x (ffmpeg and ffprobe) and put it on PATH. [CUTHOL-G625]",
+      fix: "Run 'cuthol setup --ffmpeg --apply' to install ffmpeg 8.1, or install ffmpeg 8.x (ffmpeg and ffprobe) and put it on PATH. [CUTHOL-G625]",
     };
   }
   const short = (toolMajor: number, token: string | null): string =>
@@ -115,14 +122,14 @@ export function checkFfmpeg(probes: DoctorProbes = {}): DoctorCheck {
     return {
       id: "ffmpeg",
       status: "warn",
-      found: `ffmpeg ${short(ffmpegMajor, ffmpegToken)} / ffprobe ${short(ffprobeMajor, ffprobeToken)} (tested: ${FFMPEG_TESTED_MAJOR}.x)`,
-      fix: `Install ffmpeg ${FFMPEG_TESTED_MAJOR}.x on PATH. [CUTHOL-G212]`,
+      found: `ffmpeg ${short(ffmpegMajor, ffmpegToken)}${where(probes.ffmpegPath)} / ffprobe ${short(ffprobeMajor, ffprobeToken)}${where(probes.ffprobePath)} (${source}; tested: ${FFMPEG_TESTED_MAJOR}.x)`,
+      fix: `Run 'cuthol setup --ffmpeg --apply' to install ffmpeg ${FFMPEG_TESTED_MAJOR}.x, or put ffmpeg ${FFMPEG_TESTED_MAJOR}.x on PATH. [CUTHOL-G212]`,
     };
   }
   return {
     id: "ffmpeg",
     status: "ok",
-    found: `ffmpeg ${short(ffmpegMajor, ffmpegToken)} / ffprobe ${short(ffprobeMajor, ffprobeToken)}`,
+    found: `ffmpeg ${short(ffmpegMajor, ffmpegToken)}${where(probes.ffmpegPath)} / ffprobe ${short(ffprobeMajor, ffprobeToken)}${where(probes.ffprobePath)} (${source})`,
     fix: "none",
   };
 }
@@ -273,8 +280,42 @@ export function summarizeSkillsStatus(report: ReturnType<typeof listSkillsStatus
   return parts.join("; ");
 }
 
+/** Resolves a tool against PATH without spawning (honors PATHEXT on Windows). */
+function resolveToolOnPath(tool: string): string | null {
+  const dirs = (process.env.PATH ?? "").split(path.delimiter).filter((p) => p.length > 0);
+  const names =
+    process.platform === "win32"
+      ? (process.env.PATHEXT ?? ".EXE;.CMD;.BAT")
+          .split(";")
+          .filter((e) => e.length > 0)
+          .map((ext) => `${tool}${ext.toLowerCase()}`)
+      : [tool];
+  for (const dir of dirs) {
+    for (const name of names) {
+      const cand = path.join(dir, name);
+      try {
+        if (fs.statSync(cand).isFile()) return cand;
+      } catch {
+        // not here: keep looking
+      }
+    }
+  }
+  return null;
+}
+
 function defaultProbes(): DoctorProbes {
   const info = getFfmpegVersionInfo();
+  const ffmpegPath = resolveToolOnPath("ffmpeg");
+  const ffprobePath = resolveToolOnPath("ffprobe");
+  let ffmpegFromSetup = false;
+  try {
+    const binDir = installedFfmpegBinDir();
+    if (binDir && ffmpegPath) {
+      ffmpegFromSetup = ffmpegPath.toLowerCase().startsWith(binDir.toLowerCase() + path.sep);
+    }
+  } catch {
+    ffmpegFromSetup = false;
+  }
   const inventory = listInstalledBrowsers();
   const chromium = inventory.browsers.filter((b) => b.chromium).map((b) => b.name);
   const hfCli = findLocalHyperFramesCliMjs();
@@ -308,6 +349,9 @@ function defaultProbes(): DoctorProbes {
     ffmpegToken: info.ffmpeg?.token ?? null,
     ffprobeMajor: info.ffprobe?.major ?? null,
     ffprobeToken: info.ffprobe?.token ?? null,
+    ffmpegPath,
+    ffprobePath,
+    ffmpegFromSetup,
     chromiumBrowsers: chromium,
     hyperframesResolved: hfResolved,
     hyperframesVersion: hfVersion,

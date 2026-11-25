@@ -11,6 +11,7 @@
  *   the uncut render.
  */
 import "./test_setup.js";
+import { rmRetrySync } from "./fs_cleanup.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import crypto from "node:crypto";
@@ -34,7 +35,7 @@ process.env.CUTHOL_SKILLS_AUTO = "0";
 process.env.CI = "1";
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-fxpre-"));
-test.after(() => fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+test.after(() => rmRetrySync(TMP));
 
 function ffmpeg(args: string[], cwd?: string): void {
   const proc = spawnSync("ffmpeg", args, { encoding: "utf8", windowsHide: true, cwd, timeout: 300_000 });

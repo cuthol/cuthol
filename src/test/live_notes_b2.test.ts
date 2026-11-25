@@ -2,6 +2,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { rmRetrySync } from "./b_helpers.js";
 import os from "node:os";
 import path from "node:path";
 import { initWorkspace } from "../core/workspace.js";
@@ -15,7 +16,7 @@ const TEST_ROOT = path.resolve(process.cwd(), "test-workspace");
 
 function makeProject(name: string): string {
   const dir = path.join(TEST_ROOT, name);
-  fs.rmSync(dir, { recursive: true, force: true });
+  rmRetrySync(dir);
   initWorkspace({ dir, title: name, aspect: "16:9", fps: 30 });
   return dir;
 }

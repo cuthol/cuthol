@@ -141,7 +141,7 @@ test("spine-less spans under a mostly-empty transparent composition get one aggr
   assert.ok(verify.ok, verify.raw);
   const notices = (verify.result.diagnostics ?? []).filter((d: any) => d.code === "CUTHOL-G316");
   assert.equal(notices.length, 1, `expected a single aggregate notice, got: ${verify.raw}`);
-  assert.equal(notices[0].severity, "INFO", verify.raw);
+  assert.equal(notices[0].severity, "WARN", verify.raw);
   assert.match(notices[0].what, /0\.\.2000ms/, verify.raw);
   assert.match(notices[0].what, /3000\.\.4000ms/, verify.raw);
   assert.match(notices[0].what, new RegExp(readSequence(wsDir).stage.backdrop.color.replace("#", "#?")), verify.raw);
@@ -150,6 +150,32 @@ test("spine-less spans under a mostly-empty transparent composition get one aggr
   const gap = (verify.result.diagnostics ?? []).find((d: any) => d.code === "CUTHOL-G308");
   assert.ok(gap, verify.raw);
   assert.match(gap.what, /2000\.\.3000ms/, verify.raw);
+});
+
+test("default backdrop warns; an explicitly chosen backdrop colour stays informational", () => {
+  const wsDir = path.join(TEST_ROOT, "bare_backdrop_severity");
+  fs.rmSync(wsDir, { recursive: true, force: true });
+  initWorkspace({ dir: wsDir, aspect: "16:9", fps: 30, stageExplicit: true });
+  const compDir = scaffoldSparseBoxComposition(wsDir, "badge");
+  mountComposition(wsDir, compDir, 0, 2000);
+
+  const frame = cli(["monitor", "frame", "--at", "1000ms", "--boxes", "false", "--dir", wsDir]);
+  assert.ok(frame.ok, frame.raw);
+
+  const before = cli(["verify", "--dir", wsDir]);
+  assert.ok(before.ok, before.raw);
+  const warn = (before.result.diagnostics ?? []).filter((d: any) => d.code === "CUTHOL-G316");
+  assert.equal(warn.length, 1, `expected one G316 notice, got: ${before.raw}`);
+  assert.equal(warn[0].severity, "WARN", before.raw);
+
+  const backdrop = cli(["workspace", "backdrop", "--color", "#FFFFFF", "--dir", wsDir]);
+  assert.ok(backdrop.ok, backdrop.raw);
+
+  const after = cli(["verify", "--dir", wsDir]);
+  assert.ok(after.ok, after.raw);
+  const info = (after.result.diagnostics ?? []).filter((d: any) => d.code === "CUTHOL-G316");
+  assert.equal(info.length, 1, `expected one G316 notice, got: ${after.raw}`);
+  assert.equal(info[0].severity, "INFO", after.raw);
 });
 
 test("no notice when a spine is present", () => {

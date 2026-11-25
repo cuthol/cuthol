@@ -8,6 +8,7 @@
 import "./test_setup.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { rmRetrySync } from "./b_helpers.js";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -37,7 +38,7 @@ test("live: cold thumbnail answers at once, real JPEG follows on retry", async (
   try {
     fs.cpSync(DEMO, dir, { recursive: true });
     const thumbsDir = resolveLivePaths(dir).thumbsDir;
-    fs.rmSync(thumbsDir, { recursive: true, force: true });
+    rmRetrySync(thumbsDir);
 
     const info = await ensureLiveServer(dir);
     try {
@@ -46,7 +47,7 @@ test("live: cold thumbnail answers at once, real JPEG follows on retry", async (
       const scenes = (JSON.parse(snap.body.toString("utf8")) as { scenes: { id: string; thumb?: string }[] }).scenes;
       assert.ok(scenes.length > 0, "demo has scenes");
       // Keep the cache cold: the snapshot-triggered background pass may have started.
-      fs.rmSync(thumbsDir, { recursive: true, force: true });
+      rmRetrySync(thumbsDir);
 
       const thumbPaths = scenes.map((s) => {
         const base = s.thumb ?? `/api/thumb/${s.id}`;
@@ -87,7 +88,7 @@ test("live: cold thumbnail answers at once, real JPEG follows on retry", async (
   } finally {
     for (let i = 0; i < 10; i++) {
       try {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmRetrySync(dir);
         break;
       } catch {
         await new Promise((res) => setTimeout(res, 500));
@@ -101,7 +102,7 @@ test("live: the window learns when pending thumbnails are ready (thumbs event, s
   let sse: http.ClientRequest | null = null;
   try {
     fs.cpSync(DEMO, dir, { recursive: true });
-    fs.rmSync(resolveLivePaths(dir).thumbsDir, { recursive: true, force: true });
+    rmRetrySync(resolveLivePaths(dir).thumbsDir);
     const info = await ensureLiveServer(dir);
     try {
       // Listen like the window does, then read the snapshot's scene URLs.
@@ -157,7 +158,7 @@ test("live: the window learns when pending thumbnails are ready (thumbs event, s
   } finally {
     for (let i = 0; i < 10; i++) {
       try {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmRetrySync(dir);
         break;
       } catch {
         await new Promise((res) => setTimeout(res, 500));
@@ -175,7 +176,7 @@ test("live: missing media still gets the placeholder once the pass finished", as
     const seq = JSON.parse(fs.readFileSync(seqFile, "utf8")) as { library: { uri: string }[] };
     for (const item of seq.library) item.uri = "media/gone-missing.mp4";
     fs.writeFileSync(seqFile, JSON.stringify(seq, null, 2));
-    fs.rmSync(resolveLivePaths(dir).thumbsDir, { recursive: true, force: true });
+    rmRetrySync(resolveLivePaths(dir).thumbsDir);
 
     const info = await ensureLiveServer(dir);
     try {
@@ -207,7 +208,7 @@ test("live: missing media still gets the placeholder once the pass finished", as
   } finally {
     for (let i = 0; i < 10; i++) {
       try {
-        fs.rmSync(dir, { recursive: true, force: true });
+        rmRetrySync(dir);
         break;
       } catch {
         await new Promise((res) => setTimeout(res, 500));

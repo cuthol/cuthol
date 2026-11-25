@@ -20,7 +20,7 @@ import path from "node:path";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { resolveCoordsChromePath } from "../compositor/coords_extract.js";
 import { LiveProxyManager } from "../live/live_proxy.js";
-import { waitFor } from "./b_helpers.js";
+import { rmRetrySync, waitFor } from "./b_helpers.js";
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "../..");
 const CLI = path.join(REPO, "dist", "cli.js");
@@ -109,7 +109,7 @@ async function stopServer(srv: Served): Promise<void> {
   } catch {}
   await new Promise((r) => setTimeout(r, 800));
   try {
-    fs.rmSync(srv.dir, { recursive: true, force: true });
+    rmRetrySync(srv.dir);
   } catch {}
 }
 
@@ -226,7 +226,7 @@ test("proxy: audio-only assets report terminal missing without spawning an encod
     }
   } catch (e) {
     try {
-      fs.rmSync(dir, { recursive: true, force: true });
+      rmRetrySync(dir);
     } catch {}
     throw e;
   }
@@ -277,7 +277,7 @@ test("proxy: failed encodes are remembered per content hash, a changed source re
   } finally {
     mgr.shutdown();
     try {
-      fs.rmSync(dir, { recursive: true, force: true });
+      rmRetrySync(dir);
     } catch {}
   }
 });

@@ -67,6 +67,12 @@ import { probeUncachedCompositionScripts } from "../verify/gates_script_errors.j
 import { PostRenderAudioHealthResult, scanRenderedMp4AudioHealth } from "./render_audio_health.js";
 import { PostRenderBlankScanResult, scanRenderedMp4ForBlankFrames, scanRenderedMp4ForEdgeStrips } from "./render_scan.js";
 import { outputDurationMs, outputFrameAtSeqMs, tempoOf, tempoOutputSegments } from "../sequence/tempo.js";
+import { spawnWatchedSync } from "../core/subprocess.js";
+import { inspectPngSequenceDir, isPngSequenceBlobDir } from "../compositor/hf_blobs.js";
+import {
+  snapshotOverlayRenderItems,
+  type OverlayRenderItemSummary,
+} from "../compositor/hf_overlay_tracking.js";
 import { computeRenderTimeSegments } from "./render_segments.js";
 import {
   PreparedSequenceRender,
@@ -91,6 +97,24 @@ export interface ShaderCacheSummary {
   deleted_count: number;
 }
 
+/** Per-composition capture cost, present only with the opt-in `--profile` render flag. */
+export interface RenderCompositionCost {
+  composition: string;
+  cue_ids: string[];
+  cached: boolean;
+  reason: string;
+  frames_captured: number | null;
+  frames_source: "measured" | "expected" | "unknown";
+  capture_ms: number;
+  ms_per_frame: number | null;
+}
+
+/** Opt-in render cost profile: capture ms per frame and frames captured, per composition cue. */
+export interface RenderCompositionProfile {
+  compositions: RenderCompositionCost[];
+  summary: string;
+}
+
 export interface RenderOutputSummary {
   ok: boolean;
   output_path: string;
@@ -106,6 +130,8 @@ export interface RenderOutputSummary {
   single_stage: boolean;
   /** Present only when the project holds shader intermediates. */
   shader_cache?: ShaderCacheSummary;
+  /** Present only with `--profile` (profiling cost is never paid on unflagged renders). */
+  composition_profile?: RenderCompositionProfile;
   overlays?: RenderOverlaySummary;
   timings_ms: RenderStageTimingsMs;
   verification: VerificationReport;
@@ -409,6 +435,126 @@ function runPostRenderChecks(params: {
   };
 }
 
+/**
+ * Frames actually captured for one overlay blob: exact count for PNG-sequence
+ * blobs, ffprobe stream metadata for video blobs, otherwise the mounted cue
+ * window (duration x stage fps) labelled "expected".
+ */
+function profileFramesForBlob(
+  blobPath: string | undefined,
+  expectedFromCues: number | null
+): { frames: number | null; source: RenderCompositionCost["frames_source"] } {
+  try {
+    if (blobPath && isPngSequenceBlobDir(blobPath)) {
+      const info = inspectPngSequenceDir(blobPath);
+      if (info.valid && info.frameCount > 0) {
+        return { frames: info.frameCount, source: "measured" };
+      }
+    } else if (blobPath && fs.existsSync(blobPath) && fs.statSync(blobPath).isFile()) {
+      const proc = spawnWatchedSync(
+        "ffprobe",
+        [
+          "-v",
+          "error",
+          "-select_streams",
+          "v:0",
+          "-show_entries",
+          "stream=nb_frames,avg_frame_rate,duration",
+          "-show_entries",
+          "format=duration",
+          "-of",
+          "json",
+          blobPath,
+        ],
+        { encoding: "utf8", maxBuffer: 4 * 1024 * 1024, step: "ffprobe-frames" }
+      );
+      const parsed = JSON.parse(String(proc.stdout ?? "{}")) as {
+        streams?: Array<{ nb_frames?: string; avg_frame_rate?: string; duration?: string }>;
+        format?: { duration?: string };
+      };
+      const stream = parsed.streams?.[0];
+      const nb = Number(stream?.nb_frames);
+      if (Number.isFinite(nb) && nb > 0) {
+        return { frames: Math.round(nb), source: "measured" };
+      }
+      const durSec = Number(stream?.duration ?? parsed.format?.duration);
+      const fpsParts = String(stream?.avg_frame_rate ?? "0/1").split("/");
+      const fps = Number(fpsParts[0]) / Math.max(1, Number(fpsParts[1] ?? 1));
+      if (Number.isFinite(durSec) && durSec > 0 && Number.isFinite(fps) && fps > 0) {
+        return { frames: Math.max(1, Math.round(durSec * fps)), source: "measured" };
+      }
+    }
+  } catch {
+    // fall through to the cue-window estimate below
+  }
+  if (typeof expectedFromCues === "number" && Number.isFinite(expectedFromCues) && expectedFromCues > 0) {
+    return { frames: Math.round(expectedFromCues), source: "expected" };
+  }
+  return { frames: null, source: "unknown" };
+}
+
+/**
+ * Opt-in per-composition cost profile, built from the live overlay items before
+ * the tracking map is consumed. Only called with `--profile`; without the flag
+ * the render result keeps exactly its old shape.
+ */
+function buildCompositionProfile(
+  sequence: CutholSequence,
+  rootDir: string,
+  items: OverlayRenderItemSummary[]
+): RenderCompositionProfile {
+  const fps = Math.max(1, sequence.stage.fps);
+  const cuesByDir = new Map<string, { cueId: string; durationMs: number }[]>();
+  for (const lane of sequence.lanes) {
+    if (lane.muted) continue;
+    for (const cue of lane.cues) {
+      if (cue.kind !== "composition" || !cue.composition?.composition_dir) continue;
+      const abs = path.isAbsolute(cue.composition.composition_dir)
+        ? path.resolve(cue.composition.composition_dir)
+        : path.resolve(rootDir, cue.composition.composition_dir);
+      const list = cuesByDir.get(abs) ?? [];
+      list.push({ cueId: cue.id, durationMs: cue.duration_ms });
+      cuesByDir.set(abs, list);
+    }
+  }
+  const compositions: RenderCompositionCost[] = items.map((item) => {
+    const key = path.resolve(item.composition_dir);
+    const cues = cuesByDir.get(key) ?? [];
+    const expectedFromCues =
+      cues.length > 0 ? Math.max(...cues.map((c) => (c.durationMs / 1000) * fps)) : null;
+    const { frames, source } = profileFramesForBlob(item.blob_path, expectedFromCues);
+    const captureMs = item.cached ? 0 : Math.max(0, Math.round(item.elapsed_ms));
+    const msPerFrame =
+      !item.cached && frames !== null && frames > 0 && captureMs > 0
+        ? Number((captureMs / frames).toFixed(1))
+        : null;
+    return {
+      composition: item.composition,
+      cue_ids: cues.map((c) => c.cueId).sort(),
+      cached: item.cached,
+      reason: item.cached ? "cached" : item.reason,
+      frames_captured: frames,
+      frames_source: source,
+      capture_ms: captureMs,
+      ms_per_frame: msPerFrame,
+    };
+  });
+  compositions.sort((a, b) => a.composition.localeCompare(b.composition));
+  const summary =
+    compositions.length === 0
+      ? "profile: no composition overlays"
+      : `profile: ${compositions
+          .map((c) =>
+            c.cached
+              ? `${c.composition}: cached (${c.frames_captured ?? "?"} frames, no capture this render)`
+              : `${c.composition}: ${c.frames_captured ?? "?"} frames in ${c.capture_ms}ms` +
+                (c.ms_per_frame !== null ? ` (${c.ms_per_frame}ms/frame)` : "") +
+                `, reason ${c.reason}`
+          )
+          .join("; ")}`;
+  return { compositions, summary };
+}
+
 function buildRenderOutputSummary(params: {
   prep: PreparedSequenceRender;
   encodeResult: RenderEncodeStageResult;
@@ -418,6 +564,7 @@ function buildRenderOutputSummary(params: {
   edgeStripScanMs: number;
   audioHealth: PostRenderAudioHealthResult;
   audioHealthMs: number;
+  withProfile: boolean;
 }): RenderOutputSummary {
   const {
     prep,
@@ -428,7 +575,10 @@ function buildRenderOutputSummary(params: {
     edgeStripScanMs,
     audioHealth,
     audioHealthMs,
+    withProfile,
   } = params;
+  // Snapshot before finish consumes the map; without the flag nothing is read.
+  const profileItems = withProfile ? snapshotOverlayRenderItems() : [];
   const overlaySummary = finishOverlayRenderTracking();
   const totalMs = Date.now() - prep.tTotal0;
 
@@ -445,6 +595,15 @@ function buildRenderOutputSummary(params: {
     encoder_fallback: encodeResult.encoderFallback,
     workers: prep.workers,
     single_stage: encodeResult.singleStageUsed,
+    ...(withProfile
+      ? {
+          composition_profile: buildCompositionProfile(
+            prep.sequence,
+            prep.paths.rootDir,
+            profileItems
+          ),
+        }
+      : {}),
     overlays: overlaySummary,
     timings_ms: {
       verify_ms: prep.verifyMs,
@@ -541,6 +700,7 @@ export function renderSequenceToMp4(options: {
   workers?: number;
   encoder?: string;
   overlayRes?: string;
+  profile?: boolean;
 }): RenderOutputSummary {
   let prep: PreparedSequenceRender | null = null;
   try {
@@ -582,6 +742,7 @@ export function renderSequenceToMp4(options: {
       edgeStripScanMs,
       audioHealth,
       audioHealthMs,
+      withProfile: options.profile === true,
     });
     const shaderCache = finishShaderCacheCap(prep);
     if (shaderCache) summary.shader_cache = shaderCache;

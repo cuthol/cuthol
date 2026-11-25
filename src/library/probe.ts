@@ -31,6 +31,19 @@ function parseRationalFpsExact(raw?: string | null): number | null {
   return Number.isFinite(direct) && direct > 0 ? direct : null;
 }
 
+/**
+ * Container-clock start offset of a stream (`start_time` in seconds): how far
+ * after the file start the stream's first sample sits. Returns `null` when
+ * ffprobe reports no (numeric) start time.
+ */
+export function streamStartTimeSec(stream?: Record<string, unknown> | null): number | null {
+  if (!stream) return null;
+  const raw = stream.start_time;
+  if (raw === undefined || raw === null || String(raw).trim() === "") return null;
+  const n = Number(String(raw).trim());
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
 function parseRationalFps(raw?: string): number {
   const exact = parseRationalFpsExact(raw);
   if (exact === null || exact > 240) return 30;
@@ -294,6 +307,44 @@ export function probeStandaloneVideoColorMetadata(filePath: string): Partial<Pro
   }
 }
 
+function hasStreamStartFields(probe?: Partial<ProbeMetadata> | null): boolean {
+  if (!probe) return false;
+  return probe.video_start_sec !== undefined && probe.audio_start_sec !== undefined;
+}
+
+function backfillStreamStartFields(
+  absPath: string,
+  base: ProbeMetadata | null | undefined
+): ProbeMetadata | null {
+  if (!base || hasStreamStartFields(base)) return base ?? null;
+  try {
+    const proc = spawnWatchedSync(
+      "ffprobe",
+      [
+        "-v", "error",
+        "-show_entries", "stream=codec_type,start_time",
+        "-of", "json",
+        absPath,
+      ],
+      { encoding: "utf8", maxBuffer: 1 * 1024 * 1024, step: "ffprobe start_time" }
+    );
+    if (proc.status !== 0 || proc.error) return null;
+    const parsed = JSON.parse(proc.stdout) as { streams?: Array<Record<string, unknown>> };
+    const streams = parsed.streams ?? [];
+    return {
+      ...base,
+      video_start_sec: streamStartTimeSec(
+        (streams.find((s) => s.codec_type === "video") ?? null) as Record<string, unknown> | null
+      ),
+      audio_start_sec: streamStartTimeSec(
+        (streams.find((s) => s.codec_type === "audio") ?? null) as Record<string, unknown> | null
+      ),
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function probeLocalMediaFile(
   filePath: string,
   ledger: MediaLedger,
@@ -322,7 +373,7 @@ export function probeLocalMediaFile(
   }
 
   const memCached = probeMemoryCacheBySha.get(sha256);
-  if (memCached && isProbeMetadataComplete(memCached)) {
+  if (memCached && isProbeMetadataComplete(memCached) && hasStreamStartFields(memCached)) {
     return {
       sha256,
       probe: memCached,
@@ -331,12 +382,26 @@ export function probeLocalMediaFile(
   }
 
   const cached = ledger.getProbe<ProbeMetadata>(sha256);
-  if (cached && isProbeMetadataComplete(cached)) {
+  if (cached && isProbeMetadataComplete(cached) && hasStreamStartFields(cached)) {
     probeMemoryCacheBySha.set(sha256, cached);
     return {
       sha256,
       probe: cached,
       kind: inferAssetKind(absPath, cached),
+    };
+  }
+  // Ledgers written before the stream-start fields existed stay valid, but a
+  // missing field is "unknown", not 0: backfill it lazily with a cheap
+  // start_time-only ffprobe (pure file read, keyed by the same sha256), so
+  // old entries converge without invalidating anything.
+  const backfilled = backfillStreamStartFields(absPath, memCached ?? cached);
+  if (backfilled && isProbeMetadataComplete(backfilled)) {
+    ledger.setProbe(sha256, backfilled);
+    probeMemoryCacheBySha.set(sha256, backfilled);
+    return {
+      sha256,
+      probe: backfilled,
+      kind: inferAssetKind(absPath, backfilled),
     };
   }
 
@@ -437,6 +502,12 @@ export function probeLocalMediaFile(
       : {}),
     has_video: Boolean(videoStream),
     has_audio: Boolean(audioStream),
+    video_start_sec: streamStartTimeSec(
+      (videoStream ?? null) as Record<string, unknown> | null
+    ),
+    audio_start_sec: streamStartTimeSec(
+      (audioStream ?? null) as Record<string, unknown> | null
+    ),
     video_codec: videoStream ? String(videoStream.codec_name ?? null) : null,
     audio_codec: audioStream ? String(audioStream.codec_name ?? null) : null,
     sample_rate: audioStream ? Number(audioStream.sample_rate ?? 48000) : null,
@@ -468,6 +539,8 @@ export function ensureLibraryItemVideoProbe(
       if (src.r_frame_rate !== undefined) item.probe.r_frame_rate = src.r_frame_rate;
       if (src.avg_frame_rate !== undefined) item.probe.avg_frame_rate = src.avg_frame_rate;
     }
+    if (src.video_start_sec !== undefined) item.probe.video_start_sec = src.video_start_sec;
+    if (src.audio_start_sec !== undefined) item.probe.audio_start_sec = src.audio_start_sec;
     if (src.pix_fmt !== undefined) item.probe.pix_fmt = src.pix_fmt;
     if (src.color_space !== undefined) item.probe.color_space = src.color_space;
     if (src.color_range !== undefined) item.probe.color_range = src.color_range;
@@ -667,7 +740,9 @@ export function detachAudioFromLibraryAsset(options: {
   const outWavPath = path.join(paths.blobsDir, `detached_${srcItem.handle}_${srcItem.digest_sha256.slice(0, 12)}.wav`);
 
   if (!fs.existsSync(outWavPath)) {
-    const detachArgs = ["-y", "-v", "error", "-i", srcAbsPath, "-vn", "-acodec", "pcm_s16le", "-ar", "48000", "-ac", "2", outWavPath];
+    // Container-clock rebase (same as the analyses' `extractMono16kPcm`): pad the
+    // leading stream-start gap so detached sample t is container time t.
+    const detachArgs = ["-y", "-v", "error", "-i", srcAbsPath, "-vn", "-af", "aresample=async=1:first_pts=0", "-acodec", "pcm_s16le", "-ar", "48000", "-ac", "2", outWavPath];
     const proc = spawnWatchedSync("ffmpeg", detachArgs, {
       encoding: "utf8",
       step: "ffmpeg detach audio",

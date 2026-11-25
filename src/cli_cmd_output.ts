@@ -103,6 +103,11 @@ function withAdoptNotice<T extends object>(
   return { ...result, diagnostics: [...list, adopted.diagnostic] };
 }
 
+/** `--no-hud` (CLI) or `--hud=false` (MCP `hud: false`) hides the top HUD telemetry strip. */
+function hideHud(flags: Record<string, string | boolean>): boolean {
+  return (boolFlag(flags, "no-hud", false) ?? false) || ((boolFlag(flags, "hud", true) ?? true) === false);
+}
+
 export function runMonitorCommand(ctx: CliCommandContext): CliCommandResult {
   const { action, rest, flags, workspaceDir } = ctx;
   const adopted = action === "frame" || action === "sheet" || action === "timeline"
@@ -114,6 +119,7 @@ export function runMonitorCommand(ctx: CliCommandContext): CliCommandResult {
       workspaceDir,
       atMs: parseMonitorAtMs(atRaw),
       showBoxes: boolFlag(flags, "boxes", true),
+      hideHud: hideHud(flags),
       outputPath: strFlag(flags, "out"),
     });
     emitEnvelopeJson(workspaceDir, "monitor.frame", {
@@ -163,6 +169,7 @@ export function runMonitorCommand(ctx: CliCommandContext): CliCommandResult {
       cols: atMs && !hasExplicitGrid ? undefined : cols,
       rows: atMs && !hasExplicitGrid ? undefined : rows,
       showBoxes: boolFlag(flags, "boxes", true),
+      hideHud: hideHud(flags),
       outputPath: strFlag(flags, "out"),
     });
     const warned = withAdoptNotice(attachAtWarning(workspaceDir, atRaw, res), adopted);
@@ -200,6 +207,7 @@ export function runRenderCommand(ctx: CliCommandContext): CliCommandResult {
   const workers = numFlag(flags, "workers");
   const encoderRaw = strFlag(flags, "encoder") as "auto" | "nvenc" | "libx264" | undefined;
   const overlayRes = strFlag(flags, "overlay-res");
+  const profile = boolFlag(flags, "profile", false) ?? false;
   const adopted = autoAdoptCompositionEdits(workspaceDir);
   const res = renderSequenceToMp4({
     workspaceDir,
@@ -208,6 +216,7 @@ export function runRenderCommand(ctx: CliCommandContext): CliCommandResult {
     workers,
     encoder: encoderRaw,
     overlayRes,
+    profile,
   });
   emitEnvelopeJson(workspaceDir, "render", { ...withAdoptNotice(res, adopted) });
   return;
@@ -226,7 +235,20 @@ export function runBriefCommand(ctx: CliCommandContext): CliCommandResult {
   } catch {
     extChanges = null;
     extNotice = null;
-  }  const lens = (strFlag(flags, "lens", (action as BriefLens) || "overview") as BriefLens) ?? "overview";
+  }
+  const LENSES: BriefLens[] = ["overview", "flow", "canvas", "detail"];
+  const lensRaw = strFlag(flags, "lens") ?? (action || undefined);
+  const lensExplicit = lensRaw !== undefined;
+  if (lensRaw !== undefined && !(LENSES as string[]).includes(lensRaw)) {
+    throw new CutholError(
+      DIAGNOSTICS.UNKNOWN_FLAG(
+        `--lens ${lensRaw}`,
+        "brief",
+        "cuthol brief --lens overview|flow|canvas|detail"
+      )
+    );
+  }
+  const lens = (lensRaw as BriefLens | undefined) ?? "overview";
   const idRaw = strFlag(flags, "id");
   const targetIds = idRaw ? idRaw.split(",").map((s) => s.trim()).filter(Boolean) : [];
 
@@ -240,6 +262,28 @@ export function runBriefCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (flags["json"] || formatFlag === "json") {
+    if (lensExplicit) {
+      // A lens is token-efficient text: with --json return exactly that markdown, not the whole sequence.
+      // Render without draining: emitEnvelopeJson attaches the notes as live_notes exactly once.
+      const md = renderSequenceBrief(sequence, {
+        lens,
+        targetIds,
+        windowStartMs,
+        windowEndMs,
+        ...(extNotice ? { noticeLine: extNotice } : {}),
+        includeLiveNotes: false,
+      });
+      emitEnvelopeJson(workspaceDir, "brief", {
+        lens,
+        markdown: md,
+        ...(windowStartMs !== undefined || windowEndMs !== undefined
+          ? { window_ms: [windowStartMs ?? null, windowEndMs ?? null] }
+          : {}),
+        ...(targetIds.length ? { target_ids: targetIds } : {}),
+        ...(extChanges && extNotice ? { external_changes: toExternalChangesSummary(extChanges, extNotice) } : {}),
+      });
+      return;
+    }
     emitEnvelopeJson(workspaceDir, "brief", {
       lens,
       sequence,

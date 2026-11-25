@@ -7,6 +7,7 @@
  * - an extension without shader fx pays no compile cost (`none`).
  */
 import "./test_setup.js";
+import { rmRetrySync } from "./fs_cleanup.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -38,7 +39,7 @@ function withWs(fn: (wsDir: string) => void | Promise<void>): Promise<void> {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-shadenable-"));
   const wsDir = path.join(tmp, "proj");
   const done = async (): Promise<void> => {
-    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(tmp);
   };
   return (async () => {
     try {

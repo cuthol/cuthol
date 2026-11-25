@@ -1,4 +1,5 @@
 import test from "node:test";
+import { rmRetrySync } from "./fs_cleanup.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -19,8 +20,8 @@ test("speech cache isolation helper copies a dir to temp and removes cleanly", (
     fs.writeFileSync(path.join(copy, "ledger.sqlite"), "mutated");
     assert.equal(fs.readFileSync(path.join(src, "ledger.sqlite"), "utf8"), "fake-ledger-bytes");
   } finally {
-    fs.rmSync(copy, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(copy);
   }
   assert.ok(!fs.existsSync(copy));
-  fs.rmSync(src, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  rmRetrySync(src);
 });

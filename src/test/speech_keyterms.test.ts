@@ -18,6 +18,7 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
+import { rmRetrySync } from "./fs_cleanup.js";
 import { initWorkspace } from "../core/workspace.js";
 import { MediaLedger } from "../library/ledger.js";
 import { ingestAssetsIntoWorkspace } from "../library/probe.js";
@@ -33,7 +34,7 @@ const TEST_ROOT = path.resolve(process.cwd(), "test-workspace/speech_keyterms");
 const CLI = path.resolve(process.cwd(), "dist/cli.js");
 
 test.after(() => {
-  fs.rmSync(TEST_ROOT, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  rmRetrySync(TEST_ROOT);
 });
 
 // The fake provider answers with one word per received keyterm (plus a base

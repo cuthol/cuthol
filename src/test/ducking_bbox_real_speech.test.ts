@@ -12,6 +12,7 @@
  */
 
 import test from "node:test";
+import { rmRetrySync } from "./fs_cleanup.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -269,7 +270,7 @@ test("Real neural Turkish speech recording with real pause & filler excision + m
   t.after(() => {
     if (prevCacheDir === undefined) delete process.env.CUTHOL_CACHE_DIR;
     else process.env.CUTHOL_CACHE_DIR = prevCacheDir;
-    fs.rmSync(isolatedCacheDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(isolatedCacheDir);
   });
   const wsDir = path.join(TEST_ROOT, "real_speech_media");
   fs.rmSync(wsDir, { recursive: true, force: true });

@@ -13,6 +13,7 @@ import test, { after } from "node:test";
 import puppeteer, { type Browser } from "puppeteer-core";
 import { resolveCoordsChromePath } from "../compositor/coords_extract.js";
 import { waitFor } from "./b_helpers.js";
+import { rmRetrySync } from "./fs_cleanup.js";
 
 process.env.CUTHOL_SKILLS_AUTO = "0";
 
@@ -129,6 +130,6 @@ test("a 404 waveform is fetched once and never retried; backoff policy is 5 s, 3
       await stopLive(fx);
     }
   } finally {
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(dir);
   }
 });

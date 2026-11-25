@@ -7,6 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { rmRetrySync } from "./fs_cleanup.js";
 import { fxTemplateQuoteState } from "../compositor/compile_fx_stage.js";
 import { initWorkspace } from "../core/workspace.js";
 import { enableExtensionInWorkspace } from "../extensions/ext_lifecycle.js";
@@ -15,13 +16,14 @@ import { checkEffectDefinition } from "../effects/fx_check.js";
 import { runFxCheckFull } from "../effects/fx_check_full.js";
 import { openFxSandbox, renderSandboxFramesAtTimes, renderSandboxPngs } from "../effects/fx_sandbox.js";
 import { parseSweep, runFxTry } from "../effects/fx_try.js";
+import { runSpineFxTry } from "../cli_cmd_spine.js";
 
 function withTmp(fn: (tmp: string) => void): void {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-fxd-"));
   try {
     fn(tmp);
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(tmp);
   }
 }
 
@@ -81,6 +83,24 @@ test("try renders a grid with the layout JSON on a tiny sweep", () => {
     assert.equal(res.cells.length, 4);
     assert.ok(res.costMsPerFrame1080p >= 0);
   });
+});
+
+test("fx try --out resolves a relative path against the project folder, not the cwd", () => {
+  const proj = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-fxtry-proj-"));
+  const elsewhere = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-fxtry-cwd-"));
+  const prevCwd = process.cwd();
+  try {
+    initWorkspace({ dir: proj, title: "fxtry-out", aspect: "16:9", fps: 30 });
+    process.chdir(elsewhere);
+    runSpineFxTry(proj, { filter: "gblur=sigma=2", at: "0.5,1.5", out: "try-grid.png" });
+    assert.ok(fs.statSync(path.join(proj, "try-grid.png")).isFile(), "relative --out lands in the project folder");
+    assert.ok(!fs.existsSync(path.join(elsewhere, "try-grid.png")), "relative --out must not land in the cwd");
+    assert.ok(!fs.existsSync(path.join(elsewhere, "fxtry-proj-grid.png")));
+  } finally {
+    process.chdir(prevCwd);
+    rmRetrySync(proj);
+    rmRetrySync(elsewhere);
+  }
 });
 
 test("try sweep parsing rejects garbage", () => {
@@ -250,6 +270,23 @@ test("full envelope check reaches the end value (brightness margin)", () => {
     assert.match(row.detail, /start\/mid\/end sampled/);
     const m = /luma \+([0-9.]+) end-vs-start/.exec(row.detail);
     assert.ok(m && Number(m[1]) > 5, `expected a measured brightness margin, got: ${row.detail}`);
+  });
+});
+
+test("sandbox render failure names exit code, signal, elapsed, timeout and stderr tail", () => {
+  withTmp((tmp) => {
+    // A bad filter is rejected at add time (G322 probe), so force the render
+    // child to fail by removing the card media after the sandbox is built.
+    const sb = openFxSandbox({ filter: "gblur=sigma=2" });
+    try {
+      fs.rmSync(path.join(sb.dir, `${sb.card}.mp4`));
+      assert.throws(
+        () => renderSandboxPngs(sb, path.join(tmp, "frames"), { frames: 2 }),
+        /sandbox render failed: exit=.*signal=.*elapsed=.*timeout=120000ms stderr=.+/s
+      );
+    } finally {
+      sb.dispose();
+    }
   });
 });
 

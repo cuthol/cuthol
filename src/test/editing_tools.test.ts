@@ -24,6 +24,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { rmRetrySync } from "./fs_cleanup.js";
 import { loadSequence } from "../core/workspace.js";
 import { CutholMcpServer } from "../mcp/server.js";
 import { normalizeSequenceAudio } from "../mix/audio_mix.js";
@@ -38,7 +39,7 @@ import { projectTranscriptAcrossSequence } from "../sequence/spine.js";
 
 function safeRm(dir: string): void {
   try {
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 80 });
+    rmRetrySync(dir);
   } catch {
     // ignore transient Windows cleanup lock
   }

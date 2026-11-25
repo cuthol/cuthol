@@ -97,11 +97,24 @@ test("spine envelope rejects unknown params, accepts real ones", { timeout: 300_
   ]);
   assert.equal(good.status, 0, good.stderr || good.stdout);
 
+  const seqBefore = JSON.parse(
+    fs.readFileSync(path.join(dir, "cuthol.sequence.json"), "utf8")
+  ) as { meta: { revision: number }; spine: { clips: Array<{ envelopes: unknown[] }> } };
+  const envCountBefore = seqBefore.spine.clips[0].envelopes.length;
   const fxParam = runCli([
     "spine", "envelope", "--clip", "sp_01", "--param", "fx.fx_01.sigma",
     "--points", "0ms:1.0", "--dir", dir,
   ]);
-  assert.equal(fxParam.status, 0, fxParam.stderr || fxParam.stdout);
+  assert.notEqual(fxParam.status, 0, "envelope on an fx-less clip must fail");
+  const fxEnv = parseEnvelope(fxParam.stdout, fxParam.stderr);
+  const fxDiag = fxEnv.diagnostic as { code?: string; formatted?: string };
+  assert.equal(fxDiag.code, "CUTHOL-G380");
+  assert.match(fxDiag.formatted ?? "", /Suggestion/);
+  const seqAfter = JSON.parse(
+    fs.readFileSync(path.join(dir, "cuthol.sequence.json"), "utf8")
+  ) as { meta: { revision: number }; spine: { clips: Array<{ envelopes: unknown[] }> } };
+  assert.equal(seqAfter.meta.revision, seqBefore.meta.revision, "nothing written");
+  assert.equal(seqAfter.spine.clips[0].envelopes.length, envCountBefore, "nothing written");
 
   const colorParam = runCli([
     "spine", "envelope", "--clip", "sp_01", "--param", "color.block.amount",

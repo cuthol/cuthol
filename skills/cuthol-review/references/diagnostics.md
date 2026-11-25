@@ -21,8 +21,14 @@ and never reused; they may appear in old projects and logs.
 | G115 | — WARN | `library query` cut the page at the token budget (`truncated_by=max_tokens`). The message gives the returned count and `next_cursor` → continue with `--cursor`, or raise `--max-tokens`. |
 | G116 | G1 ERROR | Invalid `--ramp` → `'--ramp "0s:1,1s:1,2.5s:4"'` (source offset:rate pairs, strictly increasing offsets, rate 0.1..16, ≥ 2 points); `'--ramp none'` removes it; never combine with `--rate`. |
 | G117 | G4 WARN | Ramp offset beyond the source range → clamped; bring offsets into range. |
-| G118 | G1 ERROR | Clip effect invalid → fix params or remove it (`spine fx remove`). |
+| G118 | G1 ERROR | Clip or cue (`cue_XX`) effect invalid → fix params or remove it (`spine fx remove --item <id>`); the two share one fx stage, so the same codes serve spine clips and lane cues. |
 | G119 | G1 ERROR | Envelope on a non-animatable param → move it to an envelopable parameter; the extension declares `animatable`. |
+| G380 | G1 ERROR | `fx.<id>.<param>` envelope cannot be written: no effect with that id on the item → envelope one of the item's listed fx, or add the effect first (`spine fx add --item <id>`). |
+| G381 | G1 ERROR | `fx.<id>.<param>` envelope cannot be written: the param is not envelopable → envelope one of the listed `animatable` params of that effect. |
+| G382 | G1 WARN | Orphaned `fx.*` envelope already in the project (written by an older build; the item carries no fx, so the envelope has no effect) → remove it or re-add the effect it belonged to. |
+| G383 | G1 ERROR | `spine split` wrote nothing: no split point falls strictly inside the clip → use a clip-local point (or a sequence time in the named range with `--sequence-time`). |
+| G384 | G2 WARN | Caption run wrote nothing: the audio-carrying spine items have no transcript → `speech transcribe --handle <h>`, then re-run captions. |
+| G385 | G2 WARN | Caption run skipped untranscribed items; captions cover the transcribed ones → transcribe the rest and re-run for full coverage. |
 | G120 | G1 ERROR | Invalid easing name or cubic-bezier curve → `linear`, `ease_in`, `ease_out`, `ease_in_out`, `hold` (envelopes only), or `cubic-bezier(x1,y1,x2,y2)` with x1,x2 in 0..1. |
 | G121 | G1 ERROR | `edge` on a lane cue (mirrored/extended fill is spine-only) → drop it; fill the spine clip underneath instead. |
 | G122 | G1 ERROR | Extension transition unavailable, or its easing unsupported → check install, manifest `transitions`, and enabled state. |
@@ -78,7 +84,7 @@ and never reused; they may appear in old projects and logs.
 | G313 | G3 ERROR | `speech.cleanup` on a non-audio cue → voiceover/music/sfx cues only. |
 | G314 | G3 ERROR | Cleanup taking a spine clip and an audio cue in one call → one target per call. |
 | G315 | G3 ERROR | Invalid `--across` → `lane`, `all_lanes`, `all`, `spine`, `none`. |
-| G316 | G3 INFO | Spine-less stretch whose only picture is a transparent composition with mostly-empty alpha (bare backdrop shows through) → `workspace backdrop --color` or an opaque background layer. Only reported with a cached alpha measurement. |
+| G316 | G3 WARN / INFO | Spine-less stretch whose only picture is a transparent composition with mostly-empty alpha (bare backdrop shows through) → `workspace backdrop --color` or an opaque background layer. Only reported with a cached alpha measurement. WARN while the backdrop is still the default colour, INFO once a colour was chosen. |
 | G401 | G4 WARN | Outside the title-safe area by N px → move / shrink / `max_width`. |
 | G402 | G4 WARN | Caption reading speed too high → fewer words per caption. |
 | G403 | G4 WARN | Text covered by a higher layer. |

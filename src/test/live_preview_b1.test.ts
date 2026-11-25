@@ -22,7 +22,7 @@ import { applyDelta } from "../../src/live/ui/live_client.js";
 import { resolveLiveComp } from "../live/live_comp_serve.js";
 import { ensureLiveServer, stopLiveServer } from "../live/live_server.js";
 import { resolveLivePaths } from "../live/live_paths.js";
-import { waitFor } from "./b_helpers.js";
+import { rmRetrySync, waitFor } from "./b_helpers.js";
 
 process.env.CUTHOL_SKILLS_AUTO = "0";
 
@@ -88,7 +88,7 @@ test("live b1: delta with a newly added composition cue applies to the client co
 
 test("live b1: composition cue added after start resolves to its directory", () => {
   const dir = path.join(ROOT, "ws_comp_resolve");
-  fs.rmSync(dir, { recursive: true, force: true });
+  rmRetrySync(dir);
   initWorkspace({ dir, title: "resolve", aspect: "16:9", fps: 30 });
   // No composition cues yet: unknown ids do not resolve.
   assert.equal(resolveLiveComp(dir, "cue_99"), null);
@@ -174,7 +174,7 @@ test("live b1: outside lane.add appears, boundary preloads, first frame seeks, w
     return;
   }
   const dir = path.join(ROOT, "ws_b1_window");
-  fs.rmSync(dir, { recursive: true, force: true });
+  rmRetrySync(dir);
   initWorkspace({ dir, title: "b1win", aspect: "16:9", fps: 30 });
   cli(dir, ["composition", "scaffold", "--comp-dir", "comps/c1"]);
   cli(dir, ["composition", "scaffold", "--comp-dir", "comps/c2"]);
@@ -231,19 +231,27 @@ test("live b1: outside lane.add appears, boundary preloads, first frame seeks, w
     assert.equal(mark, 1, "window was not reloaded");
     assert.deepEqual(s1.revisions.seen, s1.revisions.applied);
     // Finding 2: preload the next composition while playing toward the boundary.
+    const tSeekPlay = Date.now();
     await page.evaluate(() => (window as unknown as { __livePreview: { seek: (ms: number) => void } }).__livePreview.seek(2500));
     await page.evaluate(() => (window as unknown as { __livePreview: { play: () => void } }).__livePreview.play());
     const s2 = await waitFor(async () => {
       const s = await page.evaluate(() => (window as unknown as { __livePreview: { state: () => PreviewState } }).__livePreview.state());
       return s.preloads.includes("cue_02") ? s : null;
     }, 30000, "next composition preloaded ahead of the boundary");
+    const tPreloadSeen = Date.now();
     assert.ok(s2.preloads.includes("cue_02"));
     // Play across the boundary; the new frame must be visible, never the backdrop.
+    // The frame's first paint can lag the playhead under load, so wait for the
+    // asserted event itself (frame loaded and visible past the boundary),
+    // not for the playhead time alone.
     const crossed = await waitFor(async () => {
       const s = await page.evaluate(() => (window as unknown as { __livePreview: { state: () => PreviewState } }).__livePreview.state());
-      return s.t > 4200 && s.comps.includes("cue_02") ? s : null;
-    }, 30000, "playhead crosses into cue_02");
+      const f = s.frames.find((x) => x.id === "cue_02");
+      return s.t > 4200 && s.comps.includes("cue_02") && f?.loaded && f.visible === "visible" ? s : null;
+    }, 30000, "cue_02 frame up after the boundary");
     const vis = crossed.frames.find((f) => f.id === "cue_02");
+    const tFrameUp = Date.now();
+    console.log(`b1 preload timings: seek+play=${tSeekPlay} preload_seen=+${tPreloadSeen - tSeekPlay}ms frame_up=+${tFrameUp - tSeekPlay}ms post_boundary_lag=+${tFrameUp - tPreloadSeen}ms`);
     assert.ok(vis && vis.loaded && vis.visible === "visible", `cue_02 frame up after the boundary: ${JSON.stringify(crossed.frames)}`);
     await page.screenshot({ path: path.join(ROOT, "b1_boundary.png") });
     // Finding 4: force a stuck clock (drop the timeline registry in the visible iframe).
@@ -283,7 +291,7 @@ test("live b1: outside lane.add appears, boundary preloads, first frame seeks, w
     await browser.close().catch(() => {});
     await stopLiveServer(dir).catch(() => {});
     try {
-      fs.rmSync(path.join(dir, ".cuthol", "live"), { recursive: true, force: true });
+      rmRetrySync(path.join(dir, ".cuthol", "live"));
     } catch {}
   }
 });

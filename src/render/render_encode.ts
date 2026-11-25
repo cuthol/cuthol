@@ -882,6 +882,8 @@ export function renderMultiSegmentPath(prep: PreparedSequenceRender): RenderEnco
   for (const seg of segments) {
     const segPlan = compileSequenceRenderPlan(sequence, paths, preset, {
       activeWindowMs: [seg.startMs, seg.endMs],
+      // Segment encodes bound the output with `-frames:v <seg.frameCount>`.
+      windowEndByFrameCount: true,
       includeAudio: false,
       workers,
     });

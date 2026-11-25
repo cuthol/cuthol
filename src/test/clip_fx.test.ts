@@ -410,7 +410,7 @@ test("extension params validate type, range, enum, required and default (G118)",
   });
 });
 
-test("only manifest-declared animatable params accept envelopes (G119 otherwise)", () => {
+test("only manifest-declared animatable params accept envelopes (G381/G380 at write time)", () => {
   withFxWorkspace((ws) => {
     writeExtension(ws, FXDEMO_MANIFEST);
     enableExtensionInWorkspace({ workspaceDir: ws, name: "fxdemo" });
@@ -448,6 +448,7 @@ test("only manifest-declared animatable params accept envelopes (G119 otherwise)
       0
     );
     assert.ok(chain.includes("eq=brightness='if(lt(t"), chain);
+    const revBefore = loadSequence(ws).sequence.meta.revision;
     assert.throws(
       () =>
         setItemEnvelope({
@@ -456,7 +457,12 @@ test("only manifest-declared animatable params accept envelopes (G119 otherwise)
           parameter: "fx.fx_02.amount",
           points: [{ offset_ms: 0, value: 1, easing: "linear" }],
         }),
-      /CUTHOL-G119/
+      (err: unknown) => {
+        assert.ok(err instanceof CutholError);
+        assert.match(err.diagnostic.formatted, /CUTHOL-G381/);
+        assert.match(err.diagnostic.formatted, /Suggestion/);
+        return true;
+      }
     );
     assert.throws(
       () =>
@@ -466,7 +472,12 @@ test("only manifest-declared animatable params accept envelopes (G119 otherwise)
           parameter: "fx.fx_03.filter",
           points: [{ offset_ms: 0, value: 1, easing: "linear" }],
         }),
-      /CUTHOL-G119/
+      (err: unknown) => {
+        assert.ok(err instanceof CutholError);
+        assert.match(err.diagnostic.formatted, /CUTHOL-G381/);
+        assert.match(err.diagnostic.formatted, /Suggestion/);
+        return true;
+      }
     );
     assert.throws(
       () =>
@@ -476,8 +487,15 @@ test("only manifest-declared animatable params accept envelopes (G119 otherwise)
           parameter: "fx.fx_99.sigma",
           points: [{ offset_ms: 0, value: 1, easing: "linear" }],
         }),
-      /CUTHOL-G119/
+      (err: unknown) => {
+        assert.ok(err instanceof CutholError);
+        assert.match(err.diagnostic.formatted, /CUTHOL-G380/);
+        assert.match(err.diagnostic.formatted, /fx_01, fx_02, fx_03/);
+        assert.match(err.diagnostic.formatted, /Suggestion/);
+        return true;
+      }
     );
+    assert.equal(loadSequence(ws).sequence.meta.revision, revBefore, "nothing written");
   });
 });
 

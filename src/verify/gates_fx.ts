@@ -36,6 +36,19 @@ export function verifySpineFx(
   const cueIds = new Set(seq.lanes.flatMap((lane) => lane.cues.map((cue) => cue.id)));
   for (const owner of owners) {
     if (!itemFxNeedsCheck(owner)) continue;
+    // [ed G382] orphan `fx.*` envelopes on an item with no fx at all: the
+    // stage compiler returns early with no entries and never reports them
+    // (older builds wrote them silently). WARN here; orphans on items that
+    // do carry fx still surface as G119 ERROR from the stage build below.
+    if ((owner.fx ?? []).length === 0) {
+      for (const env of owner.envelopes) {
+        const m = /^fx\.([^.]+)\.(.+)$/.exec(env.parameter);
+        if (m) {
+          diagnostics.push(DIAGNOSTICS.VERIFY_FX_ENVELOPE_ORPHAN(owner.id, env.parameter, m[1]));
+        }
+      }
+      continue;
+    }
     try {
       const parts = buildItemFxStage(ctx, { owner, receivedPixFmt: "yuv420p", itemHasAlpha: false });
       // Shader fx on a lane cue is an ERROR here too (G709), never silent.

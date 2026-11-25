@@ -7,6 +7,7 @@
  * with an equal line mapping.
  */
 import "./test_setup.js";
+import { rmRetrySync } from "./fs_cleanup.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -25,7 +26,7 @@ process.env.CUTHOL_SKILLS_AUTO = "0";
 process.env.CI = "1";
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-live-shader-"));
-test.after(() => fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+test.after(() => rmRetrySync(TMP));
 
 const GLSL_A = `precision highp float;
 uniform float time;

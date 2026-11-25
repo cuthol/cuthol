@@ -37,8 +37,13 @@ const BOOLEAN_FLAGS = new Set([
   "all",
   "refresh",
   "force",
+  // cuthol monitor
+  "no-hud",
+  // cuthol render
+  "profile",
   // cuthol setup
   "apply",
+  "ffmpeg",
   "local-speech",
   // cuthol live
   "global",
@@ -219,6 +224,8 @@ export const KNOWN_CLI_FLAGS = new Set([
   "grid",
   "start",
   "end",
+  // MCP `monitor` hud:false arrives as --hud=false (CLI documents --no-hud)
+  "hud",
   "width",
   "lens",
   "window",
@@ -514,6 +521,9 @@ const REST_BUDGETS: Record<string, RestBudget> = {
   "settings.get": { max: 1 },
   "settings.set": { max: 2 },
   "settings.reset": { max: 1 },
+
+  // `color look <op> [look_XX]`: the op is a real positional; bind/remove also read the look id from rest[1].
+  "color.look": { max: 2 },
 
   "monitor.frame": { max: 1, occupiedBy: ["at"] },
 

@@ -6,6 +6,7 @@
  */
 
 import { computeRenderDurationMs } from "../core/timeline.js";
+import type { CutholDiagnostic } from "../core/diagnostics.js";
 import { CutholSequence } from "../core/schema.js";
 import { WorkspacePaths } from "../core/workspace.js";
 import { MediaLedger } from "../library/ledger.js";
@@ -89,6 +90,8 @@ export interface CompiledRenderPlan {
   directVideoBlobPath?: string | null;
   /** Present only when the compile cut at least one spine clip chain. */
   prePasses?: PrePassJob[];
+  /** Single-frame warnings (e.g. G267); absent when empty so render plans stay byte-identical. */
+  compileWarnings?: CutholDiagnostic[];
 }
 
 /**
@@ -119,6 +122,11 @@ export function resolveForceFxSplit(options?: CompileSequenceOptions): ForceFxSp
 
 export interface CompileSequenceOptions {
   activeWindowMs?: [number, number];
+  /** Windowed callers that bound the output with their own frame count
+   * (`-frames:v`) set this so the final video trim keeps `start=` (frames
+   * before the window are still dropped) but does not end the stream with
+   * `end=`. Defaults to false (today's behaviour). */
+  windowEndByFrameCount?: boolean;
   singleFrameAtMs?: number;
   /** Early window trim for single-frame compiles; defaults to on. */
   singleFrameEarlyTrim?: boolean;
@@ -172,6 +180,8 @@ export interface VideoGraphCompileContext {
   forceFxSplit: ForceFxSplit | null;
   /** Pre-pass jobs emitted by spine compiles that cut a chain. */
   prePasses: PrePassJob[];
+  /** Single-frame warnings collected during this compile (e.g. G267). */
+  compileWarnings: CutholDiagnostic[];
 }
 
 function ensureSequenceVideoProbes(seq: CutholSequence, paths: WorkspacePaths): void {
@@ -281,6 +291,7 @@ function initVideoGraphCompileContext(
     vStepCounter: 0,
     forceFxSplit: resolveForceFxSplit(compileOptions),
     prePasses: [],
+    compileWarnings: [],
   };
 
   const alpha = isAlphaPreset(preset);
@@ -396,13 +407,19 @@ export function compileSequenceRenderPlan(
       const halfFrameSec = 0.5 / Math.max(1, ctx.fps);
       const trimStart = Math.max(0, Number(ctx.winStartSec) - halfFrameSec).toFixed(6);
       const trimEnd = (Number(ctx.winEndSec) + 2 * halfFrameSec).toFixed(6);
-      ctx.filterChains.push(`${ctx.currentVideoPad}trim=start=${trimStart}:end=${trimEnd},${retime},${pixFmt},settb=AVTB${finalVideoPad}`);
+      const trim = compileOptions?.windowEndByFrameCount
+        ? `trim=start=${trimStart}`
+        : `trim=start=${trimStart}:end=${trimEnd}`;
+      ctx.filterChains.push(`${ctx.currentVideoPad}${trim},${retime},${pixFmt},settb=AVTB${finalVideoPad}`);
     } else {
       ctx.filterChains.push(`${ctx.currentVideoPad}${retime},${pixFmt},settb=AVTB${finalVideoPad}`);
     }
   } else if (ctx.activeWin && compileOptions?.singleFrameAtMs === undefined) {
+    const trim = compileOptions?.windowEndByFrameCount
+      ? `trim=start=${ctx.winStartSec}`
+      : `trim=start=${ctx.winStartSec}:end=${ctx.winEndSec}`;
     ctx.filterChains.push(
-      `${ctx.currentVideoPad}trim=start=${ctx.winStartSec}:end=${ctx.winEndSec},setpts=PTS-STARTPTS,${pixFmt},settb=AVTB${finalVideoPad}`
+      `${ctx.currentVideoPad}${trim},setpts=PTS-STARTPTS,${pixFmt},settb=AVTB${finalVideoPad}`
     );
   } else {
     ctx.filterChains.push(`${ctx.currentVideoPad}${pixFmt},settb=AVTB${finalVideoPad}`);
@@ -442,5 +459,6 @@ export function compileSequenceRenderPlan(
     hyperframesBlobs: ctx.hyperframesBlobs,
     directVideoBlobPath,
     ...(ctx.prePasses.length > 0 ? { prePasses: ctx.prePasses } : null),
+    ...(ctx.compileWarnings.length > 0 ? { compileWarnings: [...ctx.compileWarnings] } : null),
   };
 }

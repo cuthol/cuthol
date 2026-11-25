@@ -15,6 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { rmRetrySync } from "./fs_cleanup.js";
 import { commitSequenceMutation, initWorkspace } from "../core/workspace.js";
 import { ingestAssetsIntoWorkspace } from "../library/probe.js";
 import { enableExtensionInWorkspace } from "../extensions/ext_lifecycle.js";
@@ -142,6 +143,6 @@ test("incoming_scale renders a growing centred picture, not a full-frame no-op",
     console.log(`after-window diff=${dAfter.toFixed(2)}`);
     assert.ok(dAfter < 6, `frame after transition differs from no-transition (d=${dAfter})`);
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(tmp);
   }
 });

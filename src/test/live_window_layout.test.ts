@@ -22,7 +22,7 @@ import test, { after } from "node:test";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { resolveCoordsChromePath } from "../compositor/coords_extract.js";
 import { initWorkspace } from "../core/workspace.js";
-import { waitFor } from "./b_helpers.js";
+import { rmRetrySync, waitFor } from "./b_helpers.js";
 
 process.env.CUTHOL_SKILLS_AUTO = "0";
 
@@ -154,7 +154,7 @@ test("speed label never overlaps the volume controls", async () => {
     }
   } finally {
     await stopLive(fx);
-    fs.rmSync(dir, { recursive: true, force: true });
+    rmRetrySync(dir);
   }
 });
 
@@ -191,7 +191,7 @@ test("tall project keeps every preview control inside the viewport", async () =>
     }
   } finally {
     await stopLive(fx);
-    fs.rmSync(dir, { recursive: true, force: true });
+    rmRetrySync(dir);
   }
 });
 
@@ -241,7 +241,7 @@ test("fresh page shows connecting, dead token shows error", async () => {
     }
   } finally {
     await stopLive(fx);
-    fs.rmSync(dir, { recursive: true, force: true });
+    rmRetrySync(dir);
   }
 });
 
@@ -286,6 +286,6 @@ test("caption type scales with the stage in whole px, no blur", async () => {
     }
   } finally {
     await stopLive(fx);
-    fs.rmSync(dir, { recursive: true, force: true });
+    rmRetrySync(dir);
   }
 });

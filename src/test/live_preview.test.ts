@@ -26,7 +26,7 @@ import { loadSequence } from "../core/workspace.js";
 import { routeLiveCompRequest } from "../live/live_comp_serve.js";
 import { routeLiveFrameRequest } from "../live/live_frame.js";
 import { LiveProxyManager, routeProxyRequest } from "../live/live_proxy.js";
-import { waitFor } from "./b_helpers.js";
+import { rmRetrySync, waitFor } from "./b_helpers.js";
 
 const REPO = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, "$1")), "../..");
 const CLI = path.join(REPO, "dist", "cli.js");
@@ -35,13 +35,25 @@ const FIXTURE = path.join(REPO, "test-workspace", "live-design", "fixture", "liv
 const FIXTURE_SKIP = fs.existsSync(FIXTURE) ? false : `fixture not present: ${FIXTURE}`;
 const FRAME_MS = 1000 / 30;
 
-function cli(dir: string, args: string[]): { status: number; stdout: string; stderr: string } {
+function cli(dir: string, args: string[], step = "cli"): { status: number; stdout: string; stderr: string; signal: string; step: string } {
   const proc = spawnSync(process.execPath, [CLI, ...args, "--dir", dir], {
     encoding: "utf8",
     env: { ...process.env, CUTHOL_SKILLS_AUTO: "0" },
     timeout: 120000,
   });
-  return { status: proc.status ?? 1, stdout: String(proc.stdout ?? ""), stderr: String(proc.stderr ?? "") };
+  return {
+    status: proc.status ?? 1,
+    stdout: String(proc.stdout ?? ""),
+    stderr: String(proc.stderr ?? ""),
+    signal: String(proc.signal ?? ""),
+    step,
+  };
+}
+
+/** One-line CLI failure summary: step name, status, signal, stderr tail. */
+function cliFailure(proc: { status: number; signal: string; stderr: string; step: string }): string {
+  const tail = proc.stderr.split("\n").slice(-10).join("\n").slice(-1000);
+  return `step ${proc.step} failed: status=${proc.status} signal=${proc.signal} stderr tail: ${tail}`;
 }
 
 function ffprobeJson(file: string, args: string[]): any {
@@ -162,8 +174,39 @@ async function stopFixture(fx: Fixture): Promise<void> {
   fx.live.kill();
   await new Promise((r) => setTimeout(r, 500));
   try {
-    fs.rmSync(fx.dir, { recursive: true, force: true });
+    rmRetrySync(fx.dir);
   } catch {}
+}
+
+/** Per-step hang bound for the revision test: a node:test timeout cannot fire while spawnSync blocks the loop, so each awaited step races a labelled timer. */
+const STEP_MS = 90_000;
+
+/** Last 40 lines of the fixture server log (read before the temp dir is deleted). */
+function serverLogTail(fx: Fixture | null): string {
+  try {
+    if (!fx) return "no fixture yet";
+    const log = path.join(fx.dir, ".cuthol", "live", "server.log");
+    if (!fs.existsSync(log)) return "no server.log yet";
+    return fs.readFileSync(log, "utf8").split(/\r?\n/).slice(-40).join("\n");
+  } catch (e) {
+    return `server.log unreadable: ${String(e).slice(0, 200)}`;
+  }
+}
+
+/** Race one awaited step against a labelled 90 s timer; on timeout fail with step name + evidence. */
+async function withStep<T>(name: string, fn: () => Promise<T>, evidence: () => string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      fn(),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`step ${name} did not finish in 90 s\n${evidence()}`)), STEP_MS);
+        timer.unref?.();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 /**
@@ -562,17 +605,24 @@ test("load: live preview: proxy playback performance (1080p source, drops, heap,
 
 test("live preview: new revision renders at the same playhead without a flicker", { skip: FIXTURE_SKIP, timeout: 300000 }, async () => {
   // Own copy: this test edits the sequence through the CLI.
-  const fx = await startFixture();
-  const { page, errors } = await openPreview(fx);
+  let fx: Fixture | null = null;
+  let page: Page | null = null;
+  const errors: string[] = [];
+  const evidence = (): string =>
+    `server.log tail (last 40 lines):\n${serverLogTail(fx)}\npage/console errors: ${errors.length ? errors.join(" | ").slice(0, 2000) : "(none)"}`;
   try {
-    await seekSettled(page, 2500);
+    fx = await withStep("startFixture", () => startFixture(), evidence);
+    const opened = await withStep("openPreview", () => openPreview(fx as Fixture), evidence);
+    page = opened.page;
+    errors.push(...opened.errors);
+    await withStep("seekSettled", () => seekSettled(page as Page, 2500), evidence);
     // A real agent-side edit through the CLI + journal (backdrop color).
-    const edit = cli(fx.dir, ["workspace", "backdrop", "--color", "#14202e"]);
-    assert.equal(edit.status, 0, `backdrop edit applies: ${edit.stderr.slice(0, 300)}`);
+    const edit = cli(fx.dir, ["workspace", "backdrop", "--color", "#14202e"], "edit backdrop");
+    assert.equal(edit.status, 0, cliFailure(edit));
     // Wave-0 live_client does not map `delta` onto the store yet (server file
     // belongs to another agent), so the test feeds the fresh server snapshot
     // through the same intake the store handlers call.
-    const applied = await page.evaluate(async () => {
+    const applied = await withStep("page.evaluate", () => (page as Page).evaluate(async () => {
       const hook = (window as any).__livePreview;
       const before = hook.state();
       const token = new URLSearchParams(location.search).get("t");
@@ -581,14 +631,28 @@ test("live preview: new revision renders at the same playhead without a flicker"
       const after = hook.state();
       const bg = getComputedStyle(document.querySelector(".pv-stage") as HTMLElement).backgroundColor;
       return { beforeT: before.t, afterT: after.t, clip: after.clipId, bg };
-    });
+    }), evidence);
     assert.equal(applied.afterT, applied.beforeT, "playhead does not move on a new revision");
     assert.equal(applied.afterT, 2500, "still showing the same moment");
     assert.equal(applied.clip, "sp_01", "same clip after the revision");
     assert.equal(applied.bg, "rgb(20, 32, 46)", `new backdrop renders (${applied.bg})`);
     assert.deepEqual(errors, [], `zero console/page/network errors (got ${errors.length})`);
   } finally {
-    await page.close().catch(() => {});
-    await stopFixture(fx);
+    // A hang here must not eat the test: log and continue the cleanup.
+    if (page) {
+      try {
+        await withStep("page.close", () => (page as Page).close().catch(() => {}), evidence);
+      } catch (e) {
+        console.log(`cleanup: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}`);
+      }
+    }
+    if (fx) {
+      const tail = serverLogTail(fx);
+      try {
+        await withStep("stopFixture", () => stopFixture(fx as Fixture), evidence);
+      } catch (e) {
+        console.log(`cleanup: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}\n${tail}`);
+      }
+    }
   }
 });

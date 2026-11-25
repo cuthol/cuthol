@@ -5,6 +5,7 @@
  * Static text cues keep the shared direct burn, byte for byte.
  */
 import "./test_setup.js";
+import { rmRetrySync } from "./fs_cleanup.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -21,12 +22,12 @@ process.env.CUTHOL_SKILLS_AUTO = "0";
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-movingtext-"));
 
-test.after(() => fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+test.after(() => rmRetrySync(TMP));
 
 function ffmpeg(args: string[], cwd?: string): void {
-  const proc = spawnSync("ffmpeg", args, { encoding: "utf8", windowsHide: true, cwd, timeout: 300_000 });
+  const proc = spawnSync("ffmpeg", args, { encoding: "utf8", windowsHide: true, cwd, timeout: 120_000 });
   if (proc.error && (proc.error as NodeJS.ErrnoException).code === "ETIMEDOUT")
-    assert.fail(`ffmpeg timed out after 300 s: ffmpeg ${args.slice(0, 6).join(" ")}…`);
+    assert.fail(`ffmpeg timed out after 120 s: ffmpeg ${args.slice(0, 6).join(" ")}…`);
   assert.equal(proc.status, 0, proc.stderr || proc.stdout || "ffmpeg failed");
 }
 
@@ -489,5 +490,74 @@ test("moving text: own-layer canvas input is bounded (cue seconds + 2/fps)", () 
     const want = `:d=${(3000 / 1000 + 2 / plan.fps).toFixed(3)}`;
     assert.ok(canvas!.join(" ").includes(want), `${name} canvas must carry ${want}: ${canvas!.join(" ")}`);
     assertNoUnboundedInput(plan);
+  }
+});
+
+function renderRawWindowed(
+  wsDir: string,
+  outName: string,
+  preset: "draft_480p" | "master_1080p",
+  win: [number, number]
+): { buf: Buffer; w: number; h: number; fps: number } {
+  const { sequence, paths } = loadSequence(wsDir);
+  const fps = sequence.stage.fps;
+  const wantFrames = Math.round(((win[1] - win[0]) / 1000) * fps);
+  const plan = compileSequenceRenderPlan(sequence, paths, preset, {
+    activeWindowMs: win,
+    // The product's segment encodes bound the output with `-frames:v`,
+    // so the windowed plan keeps `start=` but no `end=`.
+    windowEndByFrameCount: true,
+  });
+  const outPath = path.join(wsDir, "out", outName);
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
+  const script = `${outPath}.graph.txt`;
+  fs.writeFileSync(script, plan.filterComplex, "utf8");
+  ffmpeg(
+    [
+      "-y", "-v", "error",
+      ...plan.inputArgs,
+      "-/filter_complex", script,
+      "-map", plan.videoOutPad,
+      "-frames:v", String(wantFrames),
+      "-f", "rawvideo", "-pix_fmt", "yuv420p", outPath,
+      "-map", plan.audioOutPad, "-f", "null", "-",
+    ],
+    paths.rootDir
+  );
+  const buf = fs.readFileSync(outPath);
+  return { buf, w: plan.renderWidth, h: plan.renderHeight, fps };
+}
+
+test("moving text: text layers crossing a segment boundary match the full render", () => {
+  const wsDir = path.join(TMP, "ws_segtext");
+  const { cueId } = makeProject(wsDir);
+  setEnvelopes(wsDir, cueId, [xEnvelope(-30, 30, 3000)]);
+  const cue2 = addLaneCue({
+    workspaceDir: wsDir, laneId: "ln_title", kind: "title",
+    atMs: 0, durationMs: 2500, fontSizePx: 72,
+    colorHex: "#FFFFFF", text: "SECOND WORDS HERE",
+  }).cue.id;
+  updateSequenceInPlace(wsDir, (seq) => {
+    for (const lane of seq.lanes) {
+      const cue = lane.cues.find((c) => c.id === cue2);
+      if (cue) cue.fx = [{ id: "fx_01", kind: "ffmpeg", params: { filter: "eq=brightness=0" } }] as never;
+    }
+  });
+  const full = renderRaw(wsDir, "seg_full.yuv", "draft_480p");
+  const frameSize = Math.round((full.w * full.h * 3) / 2);
+  assert.equal(full.buf.length % frameSize, 0, "full render must hold whole frames");
+  const totalFrames = full.buf.length / frameSize;
+  for (const win of [[1000, 2500], [0, 2000]] as Array<[number, number]>) {
+    const part = renderRawWindowed(wsDir, `seg_${win[0]}_${win[1]}.yuv`, "draft_480p", win);
+    const startFrame = Math.round((win[0] / 1000) * part.fps);
+    const wantFrames = Math.round(((win[1] - win[0]) / 1000) * part.fps);
+    assert.equal(part.buf.length, wantFrames * frameSize, `window [${win}] frame count`);
+    assert.ok(startFrame + wantFrames <= totalFrames, `window [${win}] must sit inside the full render`);
+    for (let k = 0; k < wantFrames; k++) {
+      const a = full.buf.subarray((startFrame + k) * frameSize, (startFrame + k + 1) * frameSize);
+      const b = part.buf.subarray(k * frameSize, (k + 1) * frameSize);
+      assert.ok(a.equals(b), `window [${win}] frame ${k} (global ${startFrame + k}) differs from the full render`);
+    }
+    console.log(`window [${win}]: ${wantFrames} frames match the full render`);
   }
 });

@@ -13,6 +13,7 @@ import {
   applySetup,
   buildCodexFileText,
   buildJsonFileText,
+  isSameOrLegacyMcpEntry,
   planSetup,
   readCodexEntry,
   readJsonEntry,
@@ -95,7 +96,8 @@ function runCli(args: string[], home: string): { status: number; stdout: string;
 }
 
 const PKG_ROOT = path.resolve(process.cwd());
-const EXPECTED_ARGS = [path.join(PKG_ROOT, "dist", "cli.js"), "mcp"];
+const EXPECTED_ARGS = [path.join(PKG_ROOT, "dist", "mcp_bin.js")];
+const LEGACY_ARGS = [path.join(PKG_ROOT, "dist", "cli.js"), "mcp"];
 
 test("setup: npx cache path registers `npx -y cuthol mcp` (wrapped in `cmd /c` on Windows)", () => {
   const npxRoot = path.join("C:", "Users", "u", "_npx", "abc", "node_modules", "cuthol");
@@ -213,6 +215,25 @@ test("setup: TOML/JSON builders keep unrelated content", () => {
   const merged = buildJsonFileText(JSON.stringify({ mcpServers: { x: { command: "y", args: [] } } }), { command: "node", args: ["c", "mcp"] });
   const parsed = JSON.parse(merged) as { mcpServers: Record<string, unknown> };
   assert.ok("x" in parsed.mcpServers && "cuthol" in parsed.mcpServers);
+});
+
+test("setup: new registrations use mcp_bin.js; a legacy cli.js mcp entry counts as up to date", () => {
+  const fresh = { command: "node", args: EXPECTED_ARGS };
+  const legacy = { command: "node", args: LEGACY_ARGS };
+  assert.ok(isSameOrLegacyMcpEntry(legacy, fresh), "legacy cli.js mcp entry is not reported as wrong");
+  assert.ok(isSameOrLegacyMcpEntry(fresh, fresh));
+  assert.ok(!isSameOrLegacyMcpEntry({ command: "node", args: ["other", "mcp"] }, fresh));
+  const home = makeTempHome("cuthol-setup-legacy-");
+  fs.mkdirSync(path.join(home, ".codex"), { recursive: true });
+  fs.writeFileSync(
+    path.join(home, ".codex", "config.toml"),
+    `[mcp_servers.cuthol]\ncommand = "node"\nargs = ${JSON.stringify(LEGACY_ARGS)}\n`
+  );
+  const planned = planSetup({ ids: ["codex"], homeDir: home, packageRootDir: PKG_ROOT, claudeRunner: absentClaude() });
+  assert.equal(planned.tools[0].state, "registered-same");
+  const applied = applySetup({ ids: ["codex"], homeDir: home, packageRootDir: PKG_ROOT, apply: true, claudeRunner: absentClaude() });
+  assert.equal(applied.tools[0].written, false, "legacy entry is never rewritten");
+  assert.deepEqual(readCodexEntry(fs.readFileSync(path.join(home, ".codex", "config.toml"), "utf8")), legacy);
 });
 
 test("setup: real CLI dry run and apply against a temp home", () => {

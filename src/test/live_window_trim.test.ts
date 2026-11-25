@@ -15,7 +15,7 @@ import path from "node:path";
 import test, { after, before } from "node:test";
 import puppeteer, { type Browser, type Page } from "puppeteer-core";
 import { resolveCoordsChromePath } from "../compositor/coords_extract.js";
-import { waitFor } from "./b_helpers.js";
+import { rmRetrySync, waitFor } from "./b_helpers.js";
 
 process.env.CUTHOL_SKILLS_AUTO = "0";
 
@@ -82,7 +82,7 @@ async function stopServer(srv: Served): Promise<void> {
   } catch {}
   await new Promise((r) => setTimeout(r, 800));
   try {
-    fs.rmSync(srv.dir, { recursive: true, force: true });
+    rmRetrySync(srv.dir);
   } catch {}
 }
 

@@ -13,7 +13,11 @@
 // → incoming transition position → outgoing transition position (compile_spine_transition.ts).
 import { CutholSequence, isStillGraphic, TransitionSpec } from "../core/schema.js";
 import { buildCueOverlayEnableExpr } from "../core/frame_time.js";
-import { buildSpineClipTimingFilters, computeSpineClipEffectiveRate } from "./compile_spine_timing.js";
+import {
+  buildSpineClipTimingFilters,
+  computeSpineClipEffectiveRate,
+  videoLeadingGapSec,
+} from "./compile_spine_timing.js";
 import { buildSpineClipColorFilters } from "./compile_spine_color.js";
 import { buildItemFxStage, emitFxStageParts, fxStageWouldKeepAlpha, itemCarriesAlphaAtFx, SPINE_FX_ENTRY_CONVERTER, SPINE_FX_RGBA_EXIT, spineFxReceivedPixFmt } from "./compile_fx_stage.js";
 import type { FxShaderCutSpec, FxStagePart } from "./compile_fx_stage.js";
@@ -64,6 +68,7 @@ import {
   placementLayers,
   placementStaticValue,
 } from "../sequence/placement_resolve.js";
+import { clipLocalMsToSourceMs } from "../sequence/spine_time.js";
 import type { DrawnVisualLayer, VideoGraphCompileContext } from "./compiler.js";
 
 type SpineClipSpec = CutholSequence["spine"]["clips"][number];
@@ -177,6 +182,133 @@ export function computeShaderNarrowWindow(args: {
   return { firstFrame: first, frameCount: last - first };
 }
 
+/**
+ * Single-frame input narrowing: seeks the clip input close to the requested
+ * instant (a margin before it), so decode cost no longer grows with the
+ * timeline position. The chain is re-anchored to the narrowed start: the
+ * timing trim starts at the seek point, the early frame-number window shifts
+ * by the skipped output frames, and the timeline `setpts` moves forward by the
+ * skipped clip-local time. The `fps` phase stays anchored to the clip source
+ * start only when the skipped span holds a whole number of output frames on
+ * the source frame grid; otherwise (VFR, ramps, non-unity rates, animated
+ * chains, unaligned grids) the old path is kept (`null`).
+ */
+const SINGLE_FRAME_SEEK_MARGIN_MS = 2000;
+/** Input-seek epsilon: lands just before the chain-start frame so `-ss` rounding never drops it. */
+const SINGLE_FRAME_SEEK_EPS_SEC = 0.001;
+
+export interface SingleFrameChainShift {
+  /** `-ss` value: chain-start source time minus the epsilon. */
+  seekSec: number;
+  /** Timeline `setpts` offset (seconds, microsecond-exact). */
+  timelineOffsetSec: number;
+  /** Output frames skipped by the narrowed start; subtracted from the early window. */
+  skipFrames: number;
+}
+
+function intGcd(a: number, b: number): number {
+  let x = Math.abs(Math.round(a));
+  let y = Math.abs(Math.round(b));
+  while (y > 0) {
+    const t = x % y;
+    x = y;
+    y = t;
+  }
+  return Math.max(1, x);
+}
+
+function buildSingleFrameChainShift(params: {
+  clip: SpineClipSpec;
+  asset: CutholSequence["library"][number];
+  effectiveRate: number;
+  singleFrameAtMs: number;
+  fpsOut: number;
+  oldSeekSec: number;
+  hasCut: boolean;
+  incomingTransition: TransitionSpec | null;
+}): SingleFrameChainShift | null {
+  const { clip, asset } = params;
+  const probe = asset.probe;
+  // VFR: the `fps` phase is set by the first frame of the narrowed window,
+  // so output frames shift by one. CFR only.
+  if (probe.is_vfr !== false) return null;
+  if (!Number.isInteger(params.fpsOut) || params.fpsOut <= 0) return null;
+  if (!(probe.fps > 0) || Math.abs(probe.fps - Math.round(probe.fps)) > 1e-3) return null;
+  const srcFps = Math.round(probe.fps);
+  if (clip.playback.speed_ramp && clip.playback.speed_ramp.length > 0) return null;
+  if (Math.abs(params.effectiveRate - 1) > 1e-6) return null;
+  if (params.hasCut) return null;
+  if ((clip.transition_out?.duration_ms ?? 0) > 0) return null;
+  if ((params.incomingTransition?.duration_ms ?? 0) > 0) return null;
+  // Any time-varying stage (envelopes, dynamic placement, fx, motion blur)
+  // evaluates on chain frame numbers, which the shift renumbers.
+  if (clip.envelopes.length > 0) return null;
+  if (placementAnimatesAny(clip, PLACEMENT_CHANNELS)) return null;
+  if (placementHasAnyEnvelopeInput(clip)) return null;
+  if ((clip.fx ?? []).length > 0) return null;
+  if (buildSpineClipMotionBlurFilters(clip).length > 0) return null;
+  // A leading stream-start gap splits the timing block into a held prefix
+  // plus the main segment; the shift only models the plain single trim.
+  if (videoLeadingGapSec(clip.source_in_ms / 1000, probe.video_start_sec) > 0) return null;
+  const localMs = params.singleFrameAtMs - clip.timeline_in_ms;
+  if (!Number.isFinite(localMs) || localMs < 0 || localMs > clip.duration_ms) return null;
+  // Stay clear of the timeline end: the frame caller clamps the frame index
+  // to the last timeline frame, which would move the anchored select.
+  if (localMs > clip.duration_ms - (1.5 * 1000) / params.fpsOut) return null;
+  const srcReqMs = clipLocalMsToSourceMs(clip, localMs);
+  // Source frame grid anchor: the probed video stream start (usually 0).
+  const anchor = probe.video_start_sec ?? 0;
+  const srcInSec = clip.source_in_ms / 1000;
+  const firstIdx = Math.ceil((srcInSec - anchor) * srcFps - 1e-9);
+  const firstFrameSec = anchor + firstIdx / srcFps;
+  const e0 = firstFrameSec - srcInSec;
+  // Skip a multiple of `step` source frames so the skipped span is whole output frames.
+  const step = srcFps / intGcd(params.fpsOut, srcFps);
+  const maxSkip = Math.floor(
+    (srcReqMs / 1000 - SINGLE_FRAME_SEEK_MARGIN_MS / 1000 - firstFrameSec) * srcFps + 1e-9
+  );
+  if (maxSkip < 0) return null;
+  const skipSrc = Math.floor(maxSkip / step) * step;
+  const startSec = firstFrameSec + skipSrc / srcFps;
+  const seekSec = startSec - SINGLE_FRAME_SEEK_EPS_SEC;
+  if (!(seekSec >= 0) || !(startSec > params.oldSeekSec + 1e-9)) return null;
+  const skipFrames = (skipSrc * params.fpsOut) / srcFps;
+  if (!Number.isInteger(skipFrames)) return null;
+  const c0Sec = (startSec - srcInSec) / params.effectiveRate;
+  // Grid check: the new chain grid must coincide with the old one up to the
+  // whole-frame relabelling `skipFrames`. A wrong grid anchor (or float
+  // drift) makes this non-integer and falls back to the old path.
+  const relabel = ((c0Sec - e0 / params.effectiveRate) * params.fpsOut);
+  if (Math.abs(relabel - skipFrames) > 1e-6) return null;
+  // `.5` rounding gate: `fps` maps each input frame to an output slot by
+  // rounding, and microsecond timestamp quantization (±0.5µs) flips exact
+  // `.5` slot positions either way. The old and new chains quantize the same
+  // source frame differently, so any deciding boundary on `.5` diverges.
+  // Exact slot fractions match between the chains (they differ by whole
+  // slots), so gate the exact fractions near the selected slot: anything
+  // within a millisecond-scale margin of `.5` falls back.
+  const nStar = Math.round((srcReqMs / 1000 - startSec) * params.fpsOut);
+  for (let n = nStar - 1; n <= nStar + 1; n++) {
+    const jc = Math.round((startSec + n / params.fpsOut - anchor) * srcFps);
+    for (let j = jc - 1; j <= jc + 1; j++) {
+      if (j < firstIdx + skipSrc) continue;
+      const rem = (((j - firstIdx - skipSrc) * params.fpsOut) % srcFps + srcFps) % srcFps;
+      if (Math.abs(rem / srcFps - 0.5) < 1e-3) return null;
+    }
+  }
+  // Microsecond-exact timeline offset: the outer time select (`trim=start=`
+  // on the frame-grid instant) and the overlay (latest frame at or before
+  // each instant) need the selected slot's timestamp to coincide with the
+  // frame-grid instant exactly, from opposite sides. Deriving the offset from
+  // the grid instant (instead of rounding the chain start) makes the equality
+  // exact in microsecond integers.
+  const frameIdx = Math.max(0, Math.floor((params.singleFrameAtMs / 1000) * params.fpsOut + 1e-6));
+  const snappedUs = Math.round((frameIdx * 1e6) / params.fpsOut);
+  const slotUs = Math.round((nStar * 1e6) / params.fpsOut);
+  const timelineOffsetSec = (snappedUs - slotUs) / 1e6;
+  return { seekSec, timelineOffsetSec, skipFrames };
+}
+
 /** Clip ids are sequence-local (`c1`, `sp_01`); keep the file mapping filesystem-safe. */
 function safeClipFileToken(clipId: string): string {
   return clipId.replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 48) || "clip";
@@ -276,6 +408,10 @@ function buildSpineClipFilterChain(
     fxCutAfterEntry?: number | null;
     srcInSec: string;
     srcOutSec: string;
+    /** Input `-ss` offset (seconds); `srcInSec`/`srcOutSec` are local to the seeked input. */
+    seekSec?: number;
+    /** Single-frame chain re-anchor (narrowed input start), or null for the full chain. */
+    singleFrameShift?: SingleFrameChainShift | null;
     tlInSec: string;
     clipStartMs: number;
     clipEndMs: number;
@@ -314,6 +450,7 @@ function buildSpineClipFilterChain(
     inIdx,
     srcInSec,
     srcOutSec,
+    singleFrameShift,
     tlInSec,
     clipStartMs,
     clipEndMs,
@@ -368,6 +505,12 @@ function buildSpineClipFilterChain(
         srcInSec,
         srcOutSec,
         effectiveRate,
+        containerSrcInSec: clip.source_in_ms / 1000,
+        videoStartSec: asset.probe.video_start_sec,
+        localVideoStartSec:
+          asset.probe.video_start_sec == null
+            ? undefined
+            : asset.probe.video_start_sec - (params.seekSec ?? 0),
       });
   const vFilters: string[] = [...timingFilters];
   const timingEndIdx = vFilters.length;
@@ -460,10 +603,10 @@ function buildSpineClipFilterChain(
   const spRotExpr = compilePlacementChannelExpr(clip, "rotation_deg", { timeBaseOffsetMs: 0, mode: "raw" });
   if (spRotExpr) {
     const radExpr = `((${spRotExpr})*PI/180)`;
-    vFilters.push(`rotate=a='${radExpr}':ow='rotw(${radExpr})':oh='roth(${radExpr})':c=none`);
+    vFilters.push(`rotate=a='${radExpr}':ow='rotw(${radExpr})':oh='roth(${radExpr})':c=black@0`);
   } else if (Math.abs(placementStaticValue(clip, "rotation_deg")) > 0.01) {
     const rad = ((placementStaticValue(clip, "rotation_deg") * Math.PI) / 180).toFixed(4);
-    vFilters.push(`rotate=${rad}:ow='rotw(${rad})':oh='roth(${rad})':c=none`);
+    vFilters.push(`rotate=${rad}:ow='rotw(${rad})':oh='roth(${rad})':c=black@0`);
   }
 
   const spOpExpr = compilePlacementChannelExpr(clip, "opacity", { timeBaseOffsetMs: 0, mode: "raw" });
@@ -481,6 +624,7 @@ function buildSpineClipFilterChain(
     absAssetPath,
     isStill,
     inIdx,
+    singleFrameShift,
     tlInSec,
     clipStartMs,
     clipEndMs,
@@ -554,6 +698,8 @@ function appendSpineClipTransitionsAndScale(
     spUsesRgba: boolean;
     /** Index of the fx stage's exit converter in `vFilters`, or -1 without fx. */
     fxExitIdx: number;
+    /** Single-frame chain re-anchor (narrowed input start), or null for the full chain. */
+    singleFrameShift?: SingleFrameChainShift | null;
     /**
      * Forced pre-pass cut: vFilters index of the cut plus the source input
      * args and formats the pre-pass job needs, or null without a cut.
@@ -618,6 +764,7 @@ function appendSpineClipTransitionsAndScale(
     clipColorSpec,
     spRgbaIdx,
     fxExitIdx,
+    singleFrameShift,
   } = params;
   let { spUsesRgba } = params;
 
@@ -715,19 +862,30 @@ function appendSpineClipTransitionsAndScale(
     !(outTrans && outTrans.duration_ms > 0) &&
     !(incomingTransition && incomingTransition.duration_ms > 0)
   ) {
-    const startFrame = Math.max(0, Math.floor(((winLeadStartMs - clipStartMs) * fps) / 1000));
-    const winEndPadMs = winEndMs + 2000 / Math.max(1, fps);
-    const endFrame = Math.max(startFrame + 1, Math.ceil(((winEndPadMs - clipStartMs) * fps) / 1000));
-    const early = applySingleFrameEarlyTrim({
-      entries: vFilters,
-      timingEndIdx,
-      startFrame,
-      endFrame,
-      fps,
-    });
-    if (early.applied) {
-      vFilters.length = 0;
-      vFilters.push(...early.entries);
+    // A narrowed single-frame input starts the chain `skipFrames` output
+    // frames later; the window counts from the chain start, so it shifts too.
+    const skip = singleFrameShift?.skipFrames ?? 0;
+    const fullStart = Math.max(0, Math.floor(((winLeadStartMs - clipStartMs) * fps) / 1000));
+    // A shifted window starting before the chain start cannot trim: the
+    // requested frame is inside the kept prefix, so leave the chain whole.
+    if (fullStart >= skip) {
+      const startFrame = fullStart - skip;
+      const winEndPadMs = winEndMs + 2000 / Math.max(1, fps);
+      const endFrame = Math.max(
+        startFrame + 1,
+        Math.ceil(((winEndPadMs - clipStartMs) * fps) / 1000) - skip
+      );
+      const early = applySingleFrameEarlyTrim({
+        entries: vFilters,
+        timingEndIdx,
+        startFrame,
+        endFrame,
+        fps,
+      });
+      if (early.applied) {
+        vFilters.length = 0;
+        vFilters.push(...early.entries);
+      }
     }
   }
   if (activeWin && (clipStartMs < winLeadStartMs - 1e-3 || clipEndMs > winEndMs + 1e-3)) {
@@ -971,6 +1129,40 @@ export function compileSpineClip(ctx: VideoGraphCompileContext, i: number): void
         asset.probe.duration_ms,
         allowClipSeek
       );
+  // Single-frame narrowing: seek near the requested instant and re-anchor
+  // the chain to the narrowed start (see `buildSingleFrameChainShift`).
+  // Falls back to the clip-start seek whenever the phase cannot be anchored
+  // exactly; render compiles (`singleFrameAtMs` undefined) never narrow.
+  const effectiveRateForShift = computeSpineClipEffectiveRate(clip);
+  let singleFrameShift: SingleFrameChainShift | null =
+    !isStill && compileOptions?.singleFrameAtMs !== undefined
+      ? buildSingleFrameChainShift({
+          clip,
+          asset,
+          effectiveRate: effectiveRateForShift,
+          singleFrameAtMs: compileOptions.singleFrameAtMs,
+          fpsOut: ctx.fps,
+          oldSeekSec: clipSeek?.seekSec ?? 0,
+          hasCut: fxCutArmed,
+          incomingTransition,
+        })
+      : null;
+  if (singleFrameShift && singleFrameShift.skipFrames <= 0) singleFrameShift = null;
+  const effSeek = singleFrameShift
+    ? {
+        inputArgs: [
+          "-ss",
+          singleFrameShift.seekSec.toFixed(6),
+          "-t",
+          String(Math.max(1, Math.ceil(clip.source_out_ms / 1000 - singleFrameShift.seekSec + 3))),
+          "-i",
+          absAssetPath,
+        ],
+        localSrcInSec: "0.000",
+        localSrcOutSec: (clip.source_out_ms / 1000 - singleFrameShift.seekSec).toFixed(3),
+        seekSec: singleFrameShift.seekSec,
+      }
+    : clipSeek;
   // A still image is a single frame: loop it so it covers the whole source range of the clip.
   // In single-frame compiles the picture is decoded once; `tpad=clone` in the
   // timing block covers the clip (the looped range is identical content).
@@ -989,12 +1181,14 @@ export function compileSpineClip(ctx: VideoGraphCompileContext, i: number): void
           "-i",
           absAssetPath,
         ]
-    : [...clipSeek!.inputArgs];
+    : [...effSeek!.inputArgs];
   const inIdx = ctx.addInput(clipInputArgs);
 
-  const srcInSec = clipSeek ? clipSeek.localSrcInSec : (clip.source_in_ms / 1000).toFixed(3);
-  const srcOutSec = clipSeek ? clipSeek.localSrcOutSec : (clip.source_out_ms / 1000).toFixed(3);
-  const tlInSec = (clip.timeline_in_ms / 1000).toFixed(3);
+  const srcInSec = effSeek ? effSeek.localSrcInSec : (clip.source_in_ms / 1000).toFixed(3);
+  const srcOutSec = effSeek ? effSeek.localSrcOutSec : (clip.source_out_ms / 1000).toFixed(3);
+  const tlInSec = singleFrameShift
+    ? singleFrameShift.timelineOffsetSec.toFixed(6)
+    : (clip.timeline_in_ms / 1000).toFixed(3);
   const tlOutSec = (clipEndMs / 1000).toFixed(3);
 
   // Compute effectiveRate from integrated `clip.duration_ms` so speed_ramp durations match exactly
@@ -1011,6 +1205,8 @@ export function compileSpineClip(ctx: VideoGraphCompileContext, i: number): void
     fxCutAfterEntry: fxCutArmed ? fxCutAfterEntry : null,
     srcInSec,
     srcOutSec,
+    seekSec: effSeek?.seekSec ?? 0,
+    singleFrameShift,
     tlInSec,
     clipStartMs,
     clipEndMs,

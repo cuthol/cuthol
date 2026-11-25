@@ -146,7 +146,7 @@ function formatHintValue(value: string | string[]): string {
  *
  * A positional maps to a parameter only when the spec marks one (`positional: true`,
  * e.g. `color look list`), or when the action has exactly one required parameter left
- * unsatisfied by the flags (e.g. `extension enable karma`: only `name` is required).
+ * unsatisfied by the flags (e.g. `extension enable my-kit`: only `name` is required).
  * Otherwise the whole original CLI text is kept unchanged rather than emitting a
  * broken call, because an unmapped positional would be lost or misattributed.
  */

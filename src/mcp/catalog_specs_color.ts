@@ -91,7 +91,7 @@ export const COLOR_ACTION_SPECS: ActionSpec[] = [
     params: [
       s("op", "Look operation.", { positional: true, enum: ["list", "create", "from-pair", "bind", "remove"] }),
       s("name", "Look name (create, from-pair)."),
-      s("from-item", "Create from this item's blocks.", { flag: "from-item" }),
+      s("from_item", "Create from this item's blocks.", { flag: "from-item" }),
       s("lut", "Create from a .cube file."),
       s("blocks", "Create from blocks JSON."),
       s("before", "from-pair: untouched file."),

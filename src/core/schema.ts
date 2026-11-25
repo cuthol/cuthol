@@ -35,6 +35,15 @@ export interface ProbeMetadata {
   color_primaries?: string | null;
   has_video: boolean;
   has_audio: boolean;
+  /**
+   * Container-clock `start_time` (seconds) of the first video / audio stream,
+   * i.e. how far after the file start the stream's first sample sits (`null`
+   * when ffprobe reports none). Missing (`undefined`) on ledgers written
+   * before this field existed: callers must treat it as unknown (= 0, the
+   * old behaviour), never as a gap.
+   */
+  video_start_sec?: number | null;
+  audio_start_sec?: number | null;
   video_codec: string | null;
   audio_codec: string | null;
   sample_rate: number | null;

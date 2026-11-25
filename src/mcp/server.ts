@@ -49,6 +49,7 @@ import { CUTHOL_PROGRESS_PREFIX } from "../core/progress.js";
 import { repairToolArguments, readRevision, tryParseJson, formatEnvelopeCompact, findValuesByKey, stripCutholProgress } from "./mcp_format.js";
 import { drainLiveInbox, formatLiveNotesBlock, LIVE_NOTES_HEADER } from "../live/live_inbox.js";
 import { McpReloadRelay, prependNoteToResponse, RELAY_CHILD_ENV } from "./mcp_reload.js";
+import { preferCutholFfmpeg } from "../core/env.js";
 export { repairToolArguments, readWorkspaceRevision, translateCliHint, resolveActionSpecForCommand, formatEnvelopeCompact } from "./mcp_format.js";
 export { buildCliArgv } from "./catalog.js";
 export type { FormatEnvelopeCompactOptions } from "./mcp_format.js";
@@ -898,6 +899,7 @@ export function computeSkillsHint(): string | null {
 }
 
 export function startMcpStdioServer(options: Omit<CutholMcpServerOptions, "onNotification"> = {}): void {
+  preferCutholFfmpeg();
   const write = (msg: unknown): void => {
     process.stdout.write(`${JSON.stringify(msg)}\n`);
   };

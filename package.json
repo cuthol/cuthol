@@ -6,7 +6,28 @@
   "type": "module",
   "bin": {
     "cuthol": "./dist/cli.js",
-    "cuthol-mcp": "./dist/cli.js"
+    "cuthol-mcp": "./dist/mcp_bin.js"
+  },
+  "keywords": [
+    "video-editor",
+    "nle",
+    "mcp",
+    "ai-agents",
+    "ffmpeg",
+    "hyperframes",
+    "motion-graphics",
+    "captions",
+    "cli",
+    "timeline",
+    "color-grading"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HypeAITR/Cuthol"
+  },
+  "homepage": "https://github.com/HypeAITR/Cuthol#readme",
+  "bugs": {
+    "url": "https://github.com/HypeAITR/Cuthol/issues"
   },
   "files": [
     "dist",

@@ -25,7 +25,8 @@ milliseconds. When several bare `--at` numbers are all under 1000 on a sequence
 of ≥ 10 s, the call warns (G114) — the times are used unchanged.
 
 The HUD line on frames reads `T:<time> | ACT:<active handles> | Y:<mean luma>`.
-`boxes=false` gives a clean frame.
+`--no-hud` (CLI) or `hud=false` (MCP) hides that strip; `boxes=false` only
+removes the safe-area and cue boxes.
 
 What to check, concretely:
 

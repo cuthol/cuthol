@@ -7,6 +7,7 @@
 import "./test_setup.js";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { rmRetrySync } from "./b_helpers.js";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -52,7 +53,7 @@ function compHtml(): string {
 /** Workspace with one 3 s composition cue on a motion lane. */
 function makeCompWorkspace(name: string): string {
   const dir = path.join(ROOT, name);
-  fs.rmSync(dir, { recursive: true, force: true });
+  rmRetrySync(dir);
   initWorkspace({ dir, title: name, aspect: "16:9", fps: 30 });
   const compDir = path.join(dir, "compositions", "card");
   fs.mkdirSync(path.join(compDir, "assets"), { recursive: true });
@@ -93,7 +94,7 @@ function httpRequest(
 }
 
 test.after(() => {
-  fs.rmSync(ROOT, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  rmRetrySync(ROOT);
 });
 
 test("prewarm window is forward-heavy and clamped", () => {

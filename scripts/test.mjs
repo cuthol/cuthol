@@ -8,24 +8,20 @@ import fs from "node:fs";
 import path from "node:path";
 
 const SERIAL = new Set([
-  "stall_watchdog.test.js", // stall thresholds of a few seconds
+  "stall_watchdog.test.js", // asserts wall-clock stall thresholds of a few seconds
   "color_alpha_encoders.test.js", // hardware encoder probes and session limits
-  "render_speed.test.js", // worker counts and render timings
-  "render_scan_timeouts.test.js",
-  "long_form.test.js",
-  "speech_pauses_fillers.test.js",
-  "runtime_bridge_determinism.test.js",
+  "render_speed.test.js", // asserts wall-clock worker counts and render timings
+  "long_form.test.js", // cold vs cached performance.now comparison
   "speech_cleanup_mix.test.js", // live ElevenLabs + Deepgram
-  "shared_cache_layout.test.js",
-  "ducking_bbox_real_speech.test.js",
-  "composition_audio.test.js", // renders HyperFrames audio (browser) and measures timing
-  "composition_coords.test.js", // opens a browser
-  "composition_coords_ink.test.js", // opens a browser
-  "coords_ink_transform.test.js", // opens a browser
-  "coords_query.test.js", // opens a browser
-  "script_errors.test.js", // opens a browser (probe child)
-  "coords_quads.test.js", // opens a browser
+  "ducking_bbox_real_speech.test.js", // downloads real speech fixtures over the network
   "tempo_render.test.js", // hardware encoder renders with frame-exact checks
+  // Moved to parallel (no wall-clock assert; media-time "ms" only; per-process
+  // temp dirs or distinct repo subdirs; env vars saved/restored per file):
+  // "composition_audio.test.js", "script_errors.test.js",
+  // "composition_coords.test.js", "composition_coords_ink.test.js",
+  // "coords_ink_transform.test.js", "coords_query.test.js", "coords_quads.test.js",
+  // "runtime_bridge_determinism.test.js", "speech_pauses_fillers.test.js",
+  // "shared_cache_layout.test.js", "render_scan_timeouts.test.js",
 ]);
 
 const testDir = path.join("dist", "test");

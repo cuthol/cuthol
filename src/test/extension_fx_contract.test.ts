@@ -142,7 +142,7 @@ test("spine fx stage compiles the per-clip effect chain (P3)", () => {
         ],
       }),
     }),
-    [conv, "eq=gamma=1.1", conv, "rgbashift=rh=2", `${conv},format=rgba`]
+    [`${conv}:out_range=tv,format=yuv444p`, "eq=gamma=1.1", conv, "rgbashift=rh=2", `${conv},format=rgba`]
   );
   assert.throws(() =>
     buildSpineClipFxFilters(ctx, { ...p, clip: fakeClip({ fx: [{ id: "fx_01", kind: "nope", params: {} }] }) }),

@@ -159,11 +159,11 @@ test("static rotation → de-rotate plan: clean crop, filled surround rect, exac
   );
   const filters = buildSpineClipEdgeFilters(ctx, { clip, targetW: 1344, targetH: 756, hasDynamicScale: false });
   assert.equal(filters[0], "format=rgba");
-  assert.match(filters[1], /^rotate=-0\.2618:ow='rotw\(-0\.2618\)':oh='roth\(-0\.2618\)':c=none$/);
+  assert.match(filters[1], /^rotate=-0\.2618:ow='rotw\(-0\.2618\)':oh='roth\(-0\.2618\)':c=black@0$/);
   assert.match(filters[2], /^crop=w=1344:h=756:x=189:y=336$/);
   assert.match(filters[3], /^pad=w=2212:h=1586:x=434:y=415:color=black@0$/);
   assert.match(filters[4], /fillborders=left=434:right=434:top=415:bottom=415:mode=mirror/);
-  assert.match(filters[5], /^rotate=0\.2618:ow='rotw\(0\.2618\)':oh='roth\(0\.2618\)':c=none$/);
+  assert.match(filters[5], /^rotate=0\.2618:ow='rotw\(0\.2618\)':oh='roth\(0\.2618\)':c=black@0$/);
   assert.deepEqual(
     applySpineClipEdgeToOverlay(ctx, { clip, xExpr: "213", yExpr: "1", hasDynamicScale: false }),
     { xExpr: "-314", yExpr: "-512" }

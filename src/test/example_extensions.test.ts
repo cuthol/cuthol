@@ -283,7 +283,7 @@ test("film-look fx and motion-transitions register, validate params, and render 
   const pulse = await fastJson(ws, ["spine", "fx", "add", "--clip", "sp_04", "--kind", "ext:film-look/pulse"]);
   const pulseId = (pulse.fx as Json).id as string;
   await fastJson(ws, ["spine", "envelope", "--clip", "sp_04", "--param", `fx.${pulseId}.level`, "--points", "0ms:0,1s:0.3,1900ms:0"]);
-  cliFails(ws, ["spine", "envelope", "--clip", "sp_01", "--param", "fx.fx_01.strength", "--points", "0ms:0,1s:20"], "CUTHOL-G119");
+  cliFails(ws, ["spine", "envelope", "--clip", "sp_01", "--param", "fx.fx_01.strength", "--points", "0ms:0,1s:20"], "CUTHOL-G381");
   cliFails(ws, ["spine", "fx", "add", "--clip", "sp_01", "--kind", "ext:film-look/vignette", "--param", "radius=2"], "CUTHOL-G118");
 
   const v = await fastJson(ws, ["verify"]);

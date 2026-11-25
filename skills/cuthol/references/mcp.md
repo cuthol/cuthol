@@ -5,9 +5,13 @@
 The server speaks MCP over stdio. It is the same program as the CLI:
 
 ```bash
-cuthol mcp                      # or: cuthol-mcp
+cuthol mcp                          # or: cuthol-mcp
 cuthol mcp --dir /path/to/project   # preselect a project
 ```
+
+The dedicated entry `dist/mcp_bin.js` starts the same server without
+depending on the invoked program name (npm's Windows `.cmd` shims run
+`node .../cli.js`, which hides the `cuthol-mcp` name from `cli.js`).
 
 Client configuration (JSON used by most MCP clients):
 
@@ -16,7 +20,7 @@ Client configuration (JSON used by most MCP clients):
   "mcpServers": {
     "cuthol": {
       "command": "node",
-      "args": ["/absolute/path/to/cuthol/dist/cli.js", "mcp"],
+      "args": ["/absolute/path/to/cuthol/dist/mcp_bin.js"],
       "env": {
         "DEEPGRAM_API_KEY": "…",
         "ELEVENLABS_API_KEY": "…"
@@ -26,7 +30,14 @@ Client configuration (JSON used by most MCP clients):
 }
 ```
 
-Requirements on the machine: Node.js ≥ 22.5, `ffmpeg`/`ffprobe` on PATH, and a Chrome that HyperFrames can launch (for overlays). API keys are only needed for transcription and voiceover; they can also live in a `.env` file inside the project folder. After adding or editing `.mcp.json`, restart the MCP client session and approve the server; to verify the server directly over stdio, send `initialize` followed by `tools/list` to `node dist/cli.js mcp` and confirm 15 tools are returned.
+(`dist/cli.js` with `"args": [".../dist/cli.js", "mcp"]` works too.)
+On Windows, MCP clients start the server without a shell, so a bare
+`"command": "cuthol"` (a `.cmd` shim) fails — use `"command": "node"`
+with the absolute `dist/mcp_bin.js` path as above, or
+`"command": "cmd", "args": ["/c", "cuthol", "mcp"]`.
+`cuthol setup` prints the exact entry for your machine.
+
+Requirements on the machine: Node.js ≥ 22.5, `ffmpeg`/`ffprobe` 8.x on PATH (or `cuthol setup --ffmpeg --apply`), and a Chrome that HyperFrames can launch (for overlays). API keys are only needed for transcription and voiceover; they can also live in a `.env` file inside the project folder. After adding or editing `.mcp.json`, restart the MCP client session and approve the server; to verify the server directly over stdio, send `initialize` followed by `tools/list` to `node dist/cli.js mcp` and confirm 15 tools are returned.
 
 Environment switches:
 - **MCP server**: `CUTHOL_WORKSPACE` (default project), `CUTHOL_MCP_PROGRESSIVE=1` (start with core tools only; unlock with `discover_capabilities`), `CUTHOL_MCP_STRUCTURED=1` (also send the full JSON as `structuredContent`), `CUTHOL_MCP_TIMEOUT_MS`.
@@ -43,7 +54,7 @@ Environment switches:
 
 ## Conventions
 
-- **Project selection & relative paths**: `workspace.init(dir=…)` or `workspace.open(dir=…, verbose?)` sets the session project; afterwards `dir` can be omitted. `workspace.open` returns a compact summary (counts + first 3 library items and spine clips + lane cue counts); pass `verbose=true` for full tables. Passing `dir` to any call switches to that folder for that call. Over MCP, relative paths (`files`, `comp_dir`, `out`, `file`) resolve against the project folder (`dir`); on the CLI, relative file paths (such as `cuthol library ingest <files...>`) follow standard CLI convention and resolve against the current working directory (`cwd`), while `G201` reports the exact absolute path tried.
+- **Project selection & relative paths**: `workspace.init(dir=…)` or `workspace.open(dir=…, verbose?)` sets the session project; afterwards `dir` can be omitted. `workspace.open` returns a compact summary (counts + first 3 library items and spine clips + lane cue counts); pass `verbose=true` for full tables. Passing `dir` to any call switches to that folder for that call. Over MCP, relative paths (`files`, `comp_dir`, `out`, `file`) resolve against the project folder (`dir`); on the CLI, relative input file paths (such as `cuthol library ingest <files...>`) follow standard CLI convention and resolve against the current working directory (`cwd`), while `G201` reports the exact absolute path tried. `--out` (and `--png`) always resolve against the project folder, on the CLI and over MCP.
 - **CLI compact mode**: Pass `--compact` (or `--format text`) to any CLI command to print the exact same compact text format used by the MCP server (default CLI output remains JSON).
 - **Result format** (text, real example):
   ```
@@ -62,8 +73,9 @@ Environment switches:
 - **Manual**: `guide()` with no topic returns the main `cuthol` skill plus the
   name and description of every skill. `guide(topic="<skill>")` returns that
   skill (`cuthol`, `cuthol-editing`, `cuthol-speech`, `cuthol-audio`,
-  `cuthol-motion`, `cuthol-geometry`, `cuthol-review`, `cuthol-render`,
-  `cuthol-extensions`); `guide(topic="<skill>/<reference>")` returns one of its
+  `cuthol-motion`, `cuthol-color`, `cuthol-geometry`, `cuthol-review`,
+  `cuthol-render`, `cuthol-extensions`); `guide(topic="<skill>/<reference>")`
+  returns one of its
   reference files (e.g. `cuthol-review/diagnostics`, `cuthol/mcp`).
   Older topic names still work as aliases: `overview` → `cuthol`,
   `editing` → `cuthol-editing`, `speech_mix` → `cuthol-speech`,

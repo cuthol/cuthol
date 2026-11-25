@@ -21,6 +21,7 @@ import { checkExtTransitionBackstop } from "../verify/gates_transitions.js";
 import { sliceEnvelopes, sliceReframeFocalPoints } from "./spine_envelope.js";
 import { dropSlicedPresetRecords } from "../effects/preset_apply.js";
 import { probeEntryOrThrow } from "./spine_fx.js";
+import { assertFxEnvelopeWritable } from "./envelope_points.js";
 import { isKnownEnvelopeParameter, suggestEnvelopeParameter } from "./envelope_params.js";
 import { isProjectEmptyForAdoption, maybeAdoptStageFromFirstSource } from "./stage_adopt.js";
 import { reflowSpine, clipLocalMsToSourceMs, sliceSpeedRamp, computeClipDurationMs, sourceMsToClipLocalMs, TimeCoordinateSpace, sequenceMsToSourceMs, invertClipLocalMsToSourceOffset, integrateSourceOffsetToClipLocalMs } from "./spine_time.js";
@@ -92,6 +93,31 @@ export function splitSpineClip(options: {
   splitPointsMs: number[];
   isSequenceTime?: boolean;
 }): { clips: SpineClip[]; revision: number; verification: VerificationReport } {
+  // [ed G383] `--at` is clip-local: a sequence-time-looking point (or any
+  // point outside the clip) used to split silently into nothing. Reject with
+  // nothing written, naming the clip-local and sequence ranges to convert by.
+  {
+    const { sequence: preSeq } = loadSequence(options.workspaceDir);
+    const pre = preSeq.spine.clips.find((c) => c.id === options.clipId);
+    if (pre) {
+      const locals = options.splitPointsMs.map((pt) =>
+        options.isSequenceTime ? pt - pre.timeline_in_ms : pt
+      );
+      const outside = locals.some((off) => !(off > 0 && off < pre.duration_ms));
+      if (outside || locals.length === 0) {
+        throw new CutholError(
+          DIAGNOSTICS.SPINE_SPLIT_NO_POINT(
+            options.clipId,
+            options.splitPointsMs,
+            0,
+            pre.duration_ms,
+            pre.timeline_in_ms,
+            pre.timeline_in_ms + pre.duration_ms
+          )
+        );
+      }
+    }
+  }
   const { result, revision, verification } = commitVerifiedMutation(
     options.workspaceDir,
     `spine.split(${options.clipId})`,
@@ -910,10 +936,12 @@ export function setItemEnvelope(options: {
     );
   }
   // [fxcheck:A G320–G329] frozen/instance probe on the would-be fx envelope; ERROR rejects before write.
+  // [ed G380–G381] orphan / non-animatable fx envelopes rejected here with nothing written.
   {
     const m = /^fx\.([^.]+)\.(.+)$/.exec(options.parameter);
     if (m) {
       const { sequence: preSeq } = loadSequence(options.workspaceDir);
+      assertFxEnvelopeWritable(preSeq, options.workspaceDir, options.targetId, options.parameter);
       const clip = preSeq.spine.clips.find((c) => c.id === options.targetId);
       const cue = preSeq.lanes.flatMap((l) => l.cues).find((c) => c.id === options.targetId);
       const owner = clip ?? cue;

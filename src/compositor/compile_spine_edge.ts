@@ -491,11 +491,11 @@ function buildDerotateFillFilters(
   const out: string[] = ["format=rgba"];
   if (rot.hasRotEnv) {
     const ang = `((${rot.rotExpr})*PI/180)`;
-    out.push(`rotate=a='-(${ang})':ow='rotw(-(${ang}))':oh='roth(-(${ang}))':c=none`);
+    out.push(`rotate=a='-(${ang})':ow='rotw(-(${ang}))':oh='roth(-(${ang}))':c=black@0`);
     out.push(`crop=w=${targetW}:h=${targetH}:x='(in_w-${targetW})/2':y='(in_h-${targetH})/2'`);
   } else {
     const derad = ((-rot.thetaDeg * Math.PI) / 180).toFixed(4);
-    out.push(`rotate=${derad}:ow='rotw(${derad})':oh='roth(${derad})':c=none`);
+    out.push(`rotate=${derad}:ow='rotw(${derad})':oh='roth(${derad})':c=black@0`);
     const { fw: plainW, fh: plainH } = rotatedFrameSize(targetW, targetH, rot.thetaDeg);
     const de = rotatedFrameSize(plainW, plainH, rot.thetaDeg);
     out.push(`crop=w=${targetW}:h=${targetH}:x=${Math.round((de.fw - targetW) / 2)}:y=${Math.round((de.fh - targetH) / 2)}`);
@@ -504,10 +504,10 @@ function buildDerotateFillFilters(
   out.push(...buildSurroundFillFilters(targetW, targetH, ring, edge));
   if (rot.hasRotEnv) {
     const ang = `((${rot.rotExpr})*PI/180)`;
-    out.push(`rotate=a='${ang}':ow='rotw(${ang})':oh='roth(${ang})':c=none`);
+    out.push(`rotate=a='${ang}':ow='rotw(${ang})':oh='roth(${ang})':c=black@0`);
   } else {
     const rad = ((rot.thetaDeg * Math.PI) / 180).toFixed(4);
-    out.push(`rotate=${rad}:ow='rotw(${rad})':oh='roth(${rad})':c=none`);
+    out.push(`rotate=${rad}:ow='rotw(${rad})':oh='roth(${rad})':c=black@0`);
   }
   return out;
 }

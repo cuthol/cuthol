@@ -8,6 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { rmRetrySync } from "./fs_cleanup.js";
 import { runSpineFxPreset } from "../cli_cmd_spine.js";
 import { initWorkspace, loadSequence } from "../core/workspace.js";
 import { enableExtensionInWorkspace } from "../extensions/ext_lifecycle.js";
@@ -62,6 +63,6 @@ test("docs preset example enables and applies as written", () => {
     // `cuthol spine fx preset --item <sp_XX> --reapply --all`.
     runSpineFxPreset(wsDir, { item: clip.id, reapply: true, all: true });
   } finally {
-    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(tmp);
   }
 });

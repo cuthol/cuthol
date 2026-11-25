@@ -10,6 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { rmRetrySync } from "./fs_cleanup.js";
 import {
   compileColorStageFilters,
   compiledColorLutInfo,
@@ -28,7 +29,7 @@ import { appendSpineClip, setItemEnvelope } from "../sequence/spine_edit.js";
 
 const TEST_TMP = fs.mkdtempSync(path.join(os.tmpdir(), "cuthol-cr-"));
 
-test.after(() => fs.rmSync(TEST_TMP, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
+test.after(() => rmRetrySync(TEST_TMP));
 
 let cachedMedia: string | null = null;
 function ensureMedia(): string {

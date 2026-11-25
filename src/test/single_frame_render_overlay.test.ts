@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import "./test_setup.js";
+import { rmRetrySync } from "./fs_cleanup.js";
 
 import { compileSequenceRenderPlan } from "../compositor/compiler.js";
 import { renderHyperFramesSingleFramePng } from "../compositor/hyperframes_bridge.js";
@@ -23,7 +24,7 @@ function makeTempDir(prefix: string): string {
 
 function safeRm(dir: string): void {
   try {
-    fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+    rmRetrySync(dir);
   } catch {
     // ignore cleanup error
   }

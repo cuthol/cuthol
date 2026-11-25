@@ -7,6 +7,7 @@ import "./test_setup.js";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import { rmRetrySync } from "./b_helpers.js";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -69,7 +70,7 @@ function sharedTone(): string {
 /** Workspace with one ingested clip on the spine (rev 3: init, ingest, append). */
 function makeWorkspace(name: string): string {
   const dir = path.join(ROOT, name);
-  fs.rmSync(dir, { recursive: true, force: true });
+  rmRetrySync(dir);
   initWorkspace({ dir, title: name, aspect: "16:9", fps: 30 });
   const media = sharedTone();
   const [item] = ingestAssetsIntoWorkspace({ workspaceDir: dir, filePaths: [media] });
@@ -446,6 +447,39 @@ test("note packets ride the next CLI response exactly once", async () => {
     const second = runCli(["brief", "--json", "--dir", dir]);
     assert.equal(second.status, 0);
     assert.ok(!("live_notes" in parseJsonStream(second)), "second response must not repeat live_notes");
+  } finally {
+    await stopLiveServer(dir);
+  }
+});
+
+test("note packets ride a lens JSON response exactly once", async () => {
+  const dir = makeWorkspace("ws_notes_lens");
+  const info = await ensureLiveServer(dir);
+  try {
+    const pngBase64 = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    const post = await httpRequest(info.port, `/api/notes?t=${info.token}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        notes: [{ n: 1, text: "lens note here", at_ms: 1000, frame: 30, point: { x: 80, y: 40, nx: 0.5, ny: 0.25 }, elements: [] }],
+        sheet_png_base64: pngBase64,
+      }),
+    });
+    assert.equal(post.status, 200);
+    assert.equal(peekLiveInbox(dir).length, 1);
+
+    const first = runCli(["brief", "--json", "--lens", "overview", "--dir", dir]);
+    assert.equal(first.status, 0);
+    const env1 = parseJsonStream(first);
+    const notes1 = env1.live_notes as { packets: Array<{ id: string }>; lines: string[]; images: string[] };
+    assert.ok(notes1, "lens JSON response must carry live_notes");
+    assert.equal(notes1.packets.length, 1);
+    assert.ok(notes1.lines.some((l) => l.includes("lens note here")));
+    assert.equal(notes1.images.length, 1);
+
+    const second = runCli(["brief", "--json", "--lens", "overview", "--dir", dir]);
+    assert.equal(second.status, 0);
+    assert.ok(!("live_notes" in parseJsonStream(second)), "second lens response must not repeat live_notes");
   } finally {
     await stopLiveServer(dir);
   }

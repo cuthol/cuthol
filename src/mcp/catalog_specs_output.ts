@@ -26,6 +26,7 @@ export const OUTPUT_ACTION_SPECS: ActionSpec[] = [
     params: [
       { name: "at", type: "time", description: `Timeline time of the frame. ${TIME_HELP}`, required: true },
       { name: "boxes", type: "boolean", description: "Draw safe zones and cue boxes (default true)." },
+      { name: "hud", type: "boolean", description: "Draw the top HUD telemetry strip (default true; false for a clean frame)." },
       p.out("PNG output path."),
     ],
   },
@@ -43,6 +44,7 @@ export const OUTPUT_ACTION_SPECS: ActionSpec[] = [
       { name: "end", type: "time", description: "Window end (default end of edit)." },
       { name: "grid", type: "string", description: "Columns x rows, e.g. '4x3' (default 3x3, or auto-sized to fit `at`)." },
       { name: "boxes", type: "boolean", description: "Draw safe zones and cue boxes (default true)." },
+      { name: "hud", type: "boolean", description: "Draw the top HUD telemetry strip on each cell (default true; false for clean frames)." },
       p.out("PNG output path."),
     ],
   },
@@ -80,6 +82,7 @@ export const OUTPUT_ACTION_SPECS: ActionSpec[] = [
       },
       p.out("Output MP4 path (default under the project folder)."),
       { name: "workers", type: "number", description: "Parallel HyperFrames browser workers (default: hardware-calibrated, e.g. 6 on 12 cores).", flag: "workers" },
+      { name: "profile", type: "boolean", description: "Also return a per-composition capture cost profile (frames captured, capture ms, ms/frame). Costs extra time; default off.", flag: "profile" },
     ],
   },
 
