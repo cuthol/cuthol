@@ -25,6 +25,18 @@ import {
 } from "./sequence/spine.js";
 import { setSpineGrade } from "./sequence/spine_grade.js";
 import { addSpineFx, listSpineFx, removeSpineFx, setSpineFx } from "./sequence/spine_fx.js";
+import { listEffectDefinitions } from "./effects/effect_registry.js";
+import { loadSequence } from "./core/workspace.js";
+import { MediaLedger } from "./library/ledger.js";
+import type { BeatAnalysisResult } from "./library/beats.js";
+import {
+  addEnvelopePoint,
+  beatToLocalMs,
+  moveEnvelopePoint,
+  readEnvelopeValueAt,
+  removeEnvelopePoint,
+  sequenceTimeToLocalMs,
+} from "./sequence/envelope_points.js";
 import { boolFlag, numFlag, parseExciseRanges, parsePropsJsonFlag, strFlag } from "./cli_args.js";
 
 function parseSpeedRampFlag(raw: string): SpeedRampPoint[] {
@@ -61,6 +73,7 @@ import {
   CliCommandResult,
   emitEnvelopeJson,
 } from "./cli_output.js";
+import { runSpineTreatmentCommand } from "./cli_cmd_spine_treatments.js";
 
 function parseFxScalar(raw: string): number | string | boolean {
   const t = raw.trim();
@@ -338,8 +351,141 @@ export function runSpineCommand(ctx: CliCommandContext): CliCommandResult {
     return;
   }
 
+  if (action === "envelope" && rest[0] === "point") {
+    const sub = rest[1];
+    if (sub !== "add" && sub !== "move" && sub !== "remove") {
+      throw new Error("Provide a subcommand: spine envelope point [add|move|remove] --clip <sp_XX|cue_XX> ...");
+    }
+    const targetId =
+      strFlag(flags, "clip") ?? strFlag(flags, "id") ?? strFlag(flags, "item") ?? rest[2];
+    const parameter = strFlag(flags, "param") as ParameterEnvelope["parameter"] | undefined;
+    if (!targetId || !parameter) {
+      throw new Error("Provide --clip <sp_XX|cue_XX> --param <name>.");
+    }
+    const { easing, bezier } = parseEasingFlag(strFlag(flags, "easing", "linear"));
+    const resolveLocalMs = (raw: string | undefined, what: string): number => {
+      const beatRaw = strFlag(flags, "beat");
+      const beatsOf = strFlag(flags, "beats-of");
+      if (beatRaw !== undefined || beatsOf !== undefined) {
+        if (beatRaw === undefined || beatsOf === undefined) {
+          throw new Error("Provide both --beat <n> and --beats-of <aud_XX>.");
+        }
+        const { sequence, paths } = loadSequence(workspaceDir);
+        const item = sequence.library.find((x) => x.handle === beatsOf);
+        const ledger = new MediaLedger(paths.ledgerFile);
+        const cached = item
+          ? ledger.getBeats<BeatAnalysisResult>(item.digest_sha256, 1.35)
+          : null;
+        const local = beatToLocalMs({
+          seq: sequence,
+          targetId,
+          beat: Number(beatRaw),
+          beatsOf,
+          gridMs: cached?.grid_ms ?? null,
+        });
+        void raw;
+        return local;
+      }
+      if (raw === undefined) throw new Error(`Provide ${what}.`);
+      const t = parseTimeMs(raw);
+      if (boolFlag(flags, "sequence-time", false)) {
+        const { sequence } = loadSequence(workspaceDir);
+        return Math.round(sequenceTimeToLocalMs(sequence, targetId, t));
+      }
+      return t;
+    };
+    if (sub === "add") {
+      const localMs = resolveLocalMs(strFlag(flags, "at"), "--at <t>");
+      const valueRaw = strFlag(flags, "value");
+      const res = addEnvelopePoint({
+        workspaceDir,
+        targetId,
+        parameter,
+        offsetMs: localMs,
+        value: valueRaw !== undefined ? Number(valueRaw) : undefined,
+        easing,
+        ...(bezier ? { bezier: [...bezier] } : {}),
+      });
+      emitEnvelopeJson(workspaceDir, "spine.envelope.point.add", {
+        action: "spine.envelope.point.add",
+        ...res,
+      });
+      return;
+    }
+    if (sub === "move") {
+      const fromRaw = strFlag(flags, "at") ?? strFlag(flags, "from");
+      const toRaw = strFlag(flags, "to");
+      if (fromRaw === undefined || toRaw === undefined) {
+        throw new Error("Provide --at <t> (or --from <t>) and --to <t>.");
+      }
+      const fromMs = (() => {
+        const t = parseTimeMs(fromRaw);
+        if (boolFlag(flags, "sequence-time", false)) {
+          const { sequence } = loadSequence(workspaceDir);
+          return Math.round(sequenceTimeToLocalMs(sequence, targetId, t));
+        }
+        return t;
+      })();
+      const toMs = (() => {
+        const t = parseTimeMs(toRaw);
+        if (boolFlag(flags, "sequence-time", false)) {
+          const { sequence } = loadSequence(workspaceDir);
+          return Math.round(sequenceTimeToLocalMs(sequence, targetId, t));
+        }
+        return t;
+      })();
+      const valueRaw = strFlag(flags, "value");
+      const res = moveEnvelopePoint({
+        workspaceDir,
+        targetId,
+        parameter,
+        fromMs,
+        toMs,
+        value: valueRaw !== undefined ? Number(valueRaw) : undefined,
+        easing,
+        ...(bezier ? { bezier: [...bezier] } : {}),
+      });
+      emitEnvelopeJson(workspaceDir, "spine.envelope.point.move", {
+        action: "spine.envelope.point.move",
+        ...res,
+      });
+      return;
+    }
+    const localMs = resolveLocalMs(strFlag(flags, "at"), "--at <t>");
+    const res = removeEnvelopePoint({ workspaceDir, targetId, parameter, offsetMs: localMs });
+    emitEnvelopeJson(workspaceDir, "spine.envelope.point.remove", {
+      action: "spine.envelope.point.remove",
+      ...res,
+    });
+    return;
+  }
+
+  if (action === "value") {
+    const targetId =
+      strFlag(flags, "item") ?? strFlag(flags, "clip") ?? strFlag(flags, "id") ?? rest[0];
+    const parameter = strFlag(flags, "param");
+    const atRaw = strFlag(flags, "at");
+    if (!targetId || !parameter || !atRaw) {
+      throw new Error("Provide --item <sp_XX|cue_XX> --param <name> --at <t>.");
+    }
+    let localMs = parseTimeMs(atRaw);
+    if (boolFlag(flags, "sequence-time", false)) {
+      const { sequence } = loadSequence(workspaceDir);
+      localMs = Math.round(sequenceTimeToLocalMs(sequence, targetId, localMs));
+    }
+    const res = readEnvelopeValueAt({ workspaceDir, targetId, parameter, localMs });
+    emitEnvelopeJson(workspaceDir, "spine.value", {
+      action: "spine.value",
+      item: targetId,
+      param: parameter,
+      at_ms: Math.round(localMs),
+      ...res,
+    });
+    return;
+  }
+
   if (action === "envelope") {
-    const targetId = strFlag(flags, "clip") ?? strFlag(flags, "id") ?? rest[0];
+    const targetId = strFlag(flags, "item") ?? strFlag(flags, "clip") ?? strFlag(flags, "id") ?? rest[0];
     const parameter = strFlag(flags, "param") as ParameterEnvelope["parameter"] | undefined;
     const ptsRaw = strFlag(flags, "points");
     if (!targetId || !parameter || !ptsRaw) {
@@ -435,17 +581,42 @@ export function runSpineCommand(ctx: CliCommandContext): CliCommandResult {
     emitEnvelopeJson(workspaceDir, cmdName, { action: cmdName, ...res });
     return;
   }
+  if (action === "mask" || action === "motion-blur") {
+    return runSpineTreatmentCommand(ctx);
+  }
   if (action === "fx") {
     const sub = rest[0];
-    if (sub !== "add" && sub !== "set" && sub !== "remove" && sub !== "list") {
-      throw new Error("Provide a subcommand: spine fx [add|set|remove|list] --clip <sp_XX> ...");
+    if (sub === "catalog") {
+      const { sequence } = loadSequence(workspaceDir);
+      const defs = listEffectDefinitions(sequence, { rootDir: workspaceDir });
+      const lines = defs.map((d) => {
+        const params = Object.entries(d.params)
+          .map(
+            ([k, p]) =>
+              `${k}:${p.type}${p.min !== undefined || p.max !== undefined ? `[${p.min ?? ""}..${p.max ?? ""}]` : ""}${p.default !== undefined ? `=${String(p.default)}` : ""}`
+          )
+          .join(",");
+        return `${d.kind} role=${d.role} backend=${d.backend} alpha=${d.alpha ?? "keep"} live=${d.live} animatable=[${d.animatable.join(",")}] params={${params}}`;
+      });
+      // One line per effect by default (agents, MCP); full definitions with --full.
+      emitEnvelopeJson(
+        workspaceDir,
+        "spine.fx.catalog",
+        boolFlag(flags, "full", false) === true
+          ? { action: "spine.fx.catalog", effects: defs }
+          : { action: "spine.fx.catalog", effects: lines }
+      );
+      return;
     }
-    const clipId = strFlag(flags, "clip");
-    if (!clipId) throw new Error("Provide --clip <sp_XX>.");
+    if (sub !== "add" && sub !== "set" && sub !== "remove" && sub !== "list") {
+      throw new Error("Provide a subcommand: spine fx [catalog|add|set|remove|list] --item <sp_XX|cue_XX> ...");
+    }
+    const item = strFlag(flags, "item") ?? strFlag(flags, "clip");
+    if (!item) throw new Error("Provide --item <sp_XX|cue_XX>.");
     if (sub === "add") {
       const kind = strFlag(flags, "kind");
       const filter = strFlag(flags, "filter");
-      const res = addSpineFx({ workspaceDir, clipId, kind, filter, params: collectSpineFxParams(flags) });
+      const res = addSpineFx({ workspaceDir, item, kind, filter, params: collectSpineFxParams(flags) });
       emitEnvelopeJson(workspaceDir, "spine.fx.add", { action: "spine.fx.add", ...res });
       return;
     }
@@ -454,22 +625,35 @@ export function runSpineCommand(ctx: CliCommandContext): CliCommandResult {
       if (!fxId) throw new Error("Provide --fx <fx_XX>.");
       const filter = strFlag(flags, "filter");
       const params = collectSpineFxParams(flags);
-      if (filter === undefined && Object.keys(params).length === 0) {
-        throw new Error("Provide --param <name=value> or --filter \"<chain>\".");
+      const enabled = boolFlag(flags, "enabled");
+      if (filter === undefined && Object.keys(params).length === 0 && enabled === undefined) {
+        throw new Error("Provide --param <name=value>, --filter \"<chain>\" or --enabled <true|false>.");
       }
-      const res = setSpineFx({ workspaceDir, clipId, fxId, params, filter });
+      const res = setSpineFx({ workspaceDir, item, fxId, params, filter, enabled });
       emitEnvelopeJson(workspaceDir, "spine.fx.set", { action: "spine.fx.set", ...res });
       return;
     }
     if (sub === "remove") {
       const fxId = strFlag(flags, "fx") ?? strFlag(flags, "id");
       if (!fxId) throw new Error("Provide --fx <fx_XX>.");
-      const res = removeSpineFx({ workspaceDir, clipId, fxId });
+      const res = removeSpineFx({ workspaceDir, item, fxId });
       emitEnvelopeJson(workspaceDir, "spine.fx.remove", { action: "spine.fx.remove", ...res });
       return;
     }
-    const res = listSpineFx({ workspaceDir, clipId });
-    emitEnvelopeJson(workspaceDir, "spine.fx.list", { action: "spine.fx.list", ...res });
+    const res = listSpineFx({ workspaceDir, item });
+    const motionGroup =
+      res.motion.length === 0
+        ? null
+        : [
+            "motion layers: applied at the geometry stage, after pixel effects, independent of list position",
+            ...res.motion.map((m) => {
+              const chans = Object.entries(m.channels)
+                .map(([c, v]) => `${c}=${v.value}${v.animated ? " (animated)" : ""}`)
+                .join(", ");
+              return `- ${m.id}${m.enabled ? "" : " (off)"}: ${chans}`;
+            }),
+          ].join("\n");
+    emitEnvelopeJson(workspaceDir, "spine.fx.list", { action: "spine.fx.list", ...res, motion_group: motionGroup });
     return;
   }
   return CLI_NOT_HANDLED;

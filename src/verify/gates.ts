@@ -23,6 +23,13 @@ import { CutholSequence, LaneCue } from "../core/schema.js";
 import { commitSequenceMutation, loadSequence, WorkspacePaths } from "../core/workspace.js";
 import { syncAllCompositionBridges } from "../compositor/bridge_exporter.js";
 import { wrapTypographyLines } from "../compositor/ass_generator.js";
+import {
+  placementAnimatesAny,
+  placementChannelRange,
+  placementRestingSegments,
+  placementStaticValue,
+  resolvedPlacementCopyAt,
+} from "../sequence/placement_resolve.js";
 import { verifyG1Schema, verifyG2Assets, verifyG3Timing } from "./gates_structural.js";
 import { verifyEasing } from "./gates_easing.js";
 import { verifyG4Stage, verifyG5Signal } from "./gates_stage_signal.js";
@@ -68,8 +75,26 @@ export function measureCuePixelBox(
   assetAspectRatio?: number,
   rootDir?: string
 ): PixelBoundingBox {
-  let centerX = stage.width * 0.5 + (cue.placement.x_pct / 100) * stage.width;
-  const centerY = stage.height * 0.5 + (cue.placement.y_pct / 100) * stage.height;
+  // An item whose placement animates (base or motion layers) is measured at its
+  // widest over the item: per-channel extremes from `placementChannelRange`.
+  // Items that do not animate use the static value exactly as before.
+  const animatesPlacement = placementAnimatesAny(cue, ["x_pct", "y_pct", "scale_x", "scale_y", "rotation_deg"]);
+  const rangeOf = (c: "x_pct" | "y_pct" | "scale_x" | "scale_y" | "rotation_deg" | "opacity") =>
+    placementChannelRange(cue, c);
+  const pickX = animatesPlacement ? (rangeOf("x_pct").min + rangeOf("x_pct").max) / 2 : placementStaticValue(cue, "x_pct");
+  const pickY = animatesPlacement ? (rangeOf("y_pct").min + rangeOf("y_pct").max) / 2 : placementStaticValue(cue, "y_pct");
+  const pickScaleX = animatesPlacement
+    ? Math.max(Math.abs(rangeOf("scale_x").min), Math.abs(rangeOf("scale_x").max))
+    : Math.abs(placementStaticValue(cue, "scale_x"));
+  const pickScaleY = animatesPlacement
+    ? Math.max(Math.abs(rangeOf("scale_y").min), Math.abs(rangeOf("scale_y").max))
+    : Math.abs(placementStaticValue(cue, "scale_y"));
+  const rotRange = rangeOf("rotation_deg");
+  const pickRot = animatesPlacement
+    ? Math.abs(rotRange.min) >= Math.abs(rotRange.max) ? rotRange.min : rotRange.max
+    : placementStaticValue(cue, "rotation_deg");
+  let centerX = stage.width * 0.5 + (pickX / 100) * stage.width;
+  const centerY = stage.height * 0.5 + (pickY / 100) * stage.height;
 
   let baseWidth = stage.width * 0.5;
   let baseHeight = stage.height * 0.2;
@@ -169,8 +194,8 @@ export function measureCuePixelBox(
             baseHeight = stage.height * measured.height_pct;
             const naturalCenterX = stage.width * ((measured.left_pct + measured.right_pct) / 2);
             const naturalCenterY = stage.height * ((measured.top_pct + measured.bottom_pct) / 2);
-            centerX = naturalCenterX + (cue.placement.x_pct / 100) * stage.width;
-            effectiveCenterY = naturalCenterY + (cue.placement.y_pct / 100) * stage.height;
+            centerX = naturalCenterX + (pickX / 100) * stage.width;
+            effectiveCenterY = naturalCenterY + (pickY / 100) * stage.height;
             appliedMeasuredAlphaBbox = true;
           }
         } catch {
@@ -190,7 +215,7 @@ export function measureCuePixelBox(
         } else if (detectedPreset === "badge_overlay") {
           baseWidth = stage.width * 0.36;
           baseHeight = stage.height * 0.08;
-          if (cue.placement.x_pct === 0 && cue.placement.y_pct === 0) {
+          if (pickX === 0 && pickY === 0) {
             centerX = stage.width * 0.76;
             effectiveCenterY = stage.height * 0.09;
           }
@@ -198,7 +223,7 @@ export function measureCuePixelBox(
           // lower_third default (top: 58%, left: 90px)
           baseWidth = stage.width * 0.78;
           baseHeight = stage.height * 0.12;
-          effectiveCenterY = stage.height * 0.64 + (cue.placement.y_pct / 100) * stage.height;
+          effectiveCenterY = stage.height * 0.64 + (pickY / 100) * stage.height;
         }
       }
     }
@@ -209,17 +234,23 @@ export function measureCuePixelBox(
     baseHeight = baseWidth / ar;
   }
 
-  let finalWidth = baseWidth * Math.abs(cue.placement.scale_x);
-  let finalHeight = baseHeight * Math.abs(cue.placement.scale_y);
+  let finalWidth = baseWidth * pickScaleX;
+  let finalHeight = baseHeight * pickScaleY;
 
-  if (Math.abs(cue.placement.rotation_deg) > 0.01) {
-    const rad = (cue.placement.rotation_deg * Math.PI) / 180;
+  if (Math.abs(pickRot) > 0.01) {
+    const rad = (pickRot * Math.PI) / 180;
     const cos = Math.abs(Math.cos(rad));
     const sin = Math.abs(Math.sin(rad));
     const rotW = finalWidth * cos + finalHeight * sin;
     const rotH = finalWidth * sin + finalHeight * cos;
     finalWidth = rotW;
     finalHeight = rotH;
+  }
+
+  if (animatesPlacement) {
+    // The box covers the item's whole travel: widen by the position ranges.
+    finalWidth += ((rangeOf("x_pct").max - rangeOf("x_pct").min) / 100) * stage.width;
+    finalHeight += ((rangeOf("y_pct").max - rangeOf("y_pct").min) / 100) * stage.height;
   }
 
   const left = Math.round(centerX - finalWidth / 2);
@@ -236,6 +267,47 @@ export function measureCuePixelBox(
     height: bottom - top,
     lines_count: linesCount,
   };
+}
+
+/** Box of a cue with placement resolved at one cue-local time (resting midpoint). */
+export function measureCuePixelBoxAtLocalMs(
+  stage: CutholSequence["stage"],
+  cue: LaneCue,
+  localMs: number,
+  assetAspectRatio?: number,
+  rootDir?: string
+): PixelBoundingBox {
+  return measureCuePixelBox(stage, resolvedPlacementCopyAt(cue, localMs), assetAspectRatio, rootDir);
+}
+
+/**
+ * Safe-zone box of a cue: the union of the boxes measured at the midpoints of the
+ * cue's resting segments (resolved values). Falls back to the range box when the cue
+ * has no resting segment.
+ */
+export function measureCueSafeZoneBox(
+  stage: CutholSequence["stage"],
+  cue: LaneCue,
+  assetAspectRatio?: number,
+  rootDir?: string
+): PixelBoundingBox {
+  const resting = placementRestingSegments(cue, cue.duration_ms);
+  if (resting.length === 0) return measureCuePixelBox(stage, cue, assetAspectRatio, rootDir);
+  let box = measureCuePixelBoxAtLocalMs(stage, cue, (resting[0][0] + resting[0][1]) / 2, assetAspectRatio, rootDir);
+  for (let i = 1; i < resting.length; i++) {
+    const b = measureCuePixelBoxAtLocalMs(
+      stage, cue, (resting[i][0] + resting[i][1]) / 2, assetAspectRatio, rootDir
+    );
+    box = {
+      left: Math.min(box.left, b.left),
+      top: Math.min(box.top, b.top),
+      right: Math.max(box.right, b.right),
+      bottom: Math.max(box.bottom, b.bottom),
+      width: Math.max(box.right, b.right) - Math.min(box.left, b.left),
+      height: Math.max(box.bottom, b.bottom) - Math.min(box.top, b.top),
+    };
+  }
+  return box;
 }
 
 export function verifySequence(

@@ -51,6 +51,7 @@ and never reused; they may appear in old projects and logs.
 | G213 | SYS ERROR | ASR provider cannot auto-detect the speech language and no `lang` was given → re-run transcribe with `lang`. |
 | G625 | SYS ERROR | `doctor` found no ffmpeg/ffprobe on PATH → install ffmpeg 8.x. |
 | G626 | SYS ERROR | `doctor` found no Chrome/Chromium for HyperFrames rendering → install Chrome or Edge. |
+| G215 | — ERROR | `composition scaffold` / `lane add-composition --scaffold` would overwrite files edited after Cuthol wrote them; nothing was written → keep the edits (other `--comp-dir`) or pass `--force` (one journal revision; `workspace journal undo` restores them). Files above 1 MB are refused even with `--force`. |
 | G214 | — WARN | `composition scaffold` / `lane add-composition` read a bare `--duration` under 100 as milliseconds. The value is unchanged → pass `4s` or `4000ms` if you meant seconds. Values with units never warn. |
 | G230 | G1 ERROR | Unknown provider id → use a listed one. |
 | G231 | G2 ERROR | Extension does not provide that provider kind → `extension show` its `providers`. |

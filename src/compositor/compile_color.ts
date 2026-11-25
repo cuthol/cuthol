@@ -28,5 +28,6 @@ export function buildSourceScaleFilter(
   if (colorSpec.isRgb) {
     return `scale=${width}:${height}${foar}`;
   }
-  return `scale=${width}:${height}${foar}:in_color_matrix=${colorSpec.inMatrix}:out_color_matrix=bt709:in_range=${colorSpec.inRange}:out_range=tv`;
+  const pin = colorSpec.fitPixFmt ? `,format=pix_fmts=${colorSpec.fitPixFmt}` : "";
+  return `scale=${width}:${height}${foar}:in_color_matrix=${colorSpec.inMatrix}:out_color_matrix=bt709:in_range=${colorSpec.inRange}:out_range=tv${pin}`;
 }

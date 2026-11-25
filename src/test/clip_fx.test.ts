@@ -15,7 +15,7 @@ import test from "node:test";
 import { runSpineCommand } from "../cli_cmd_spine.js";
 import type { CliCommandContext } from "../cli_output.js";
 import { compileSequenceRenderPlan } from "../compositor/compiler.js";
-import { checkBuiltinFxFilterChain } from "../compositor/compile_spine_fx.js";
+import { checkBuiltinFxFilterChain, SPINE_FX_ENTRY_CONVERTER } from "../compositor/compile_spine_fx.js";
 import { CutholError } from "../core/diagnostics.js";
 import { commitSequenceMutation, initWorkspace, loadSequence, stepJournal } from "../core/workspace.js";
 import { enableExtensionInWorkspace } from "../extensions/ext_lifecycle.js";
@@ -641,7 +641,7 @@ test("string params are graph-escaped and chain order follows add order", () => 
       compileSequenceRenderPlan(sequence, paths, "draft_480p").filterComplex,
       0
     );
-    assert.ok(chain.includes("gblur=sigma=3,unsharp"), chain);
+    assert.ok(chain.includes(`gblur=sigma=3,${SPINE_FX_ENTRY_CONVERTER},unsharp`), chain);
     assert.ok(chain.includes("drawtext=text=a\\:b\\,c"), chain);
     assert.ok(chain.indexOf("gblur=sigma=3") < chain.indexOf("drawtext="), chain);
   });

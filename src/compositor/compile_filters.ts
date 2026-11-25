@@ -1,6 +1,88 @@
 // Small FFmpeg filter builders: atempo chains, path escaping, envelope expressions, sub-pixel scale/pan, seekable inputs (split out of compiler.ts).
 import { ParameterEnvelope } from "../core/schema.js";
 import { compileCubicBezierEasedU } from "../core/easing.js";
+import { DIAGNOSTICS } from "../core/diagnostics.js";
+import { PLACEMENT_LAYER_COMBINE, placementLayerIdentity } from "../effects/effect_types.js";
+import {
+  placementBaseEnvelope,
+  placementChannelHasEnvelopeInput,
+  placementChannelRange,
+  placementLayers,
+  placementStaticValue,
+  type PlacementChannel,
+  type PlacementOwner,
+} from "../sequence/placement_resolve.js";
+
+/** Points per envelope above which the `if` chain becomes a balanced `if` tree. */
+export const ENVELOPE_CHAIN_LIMIT = 64;
+/** Points per envelope above which even the tree no longer fits the ffmpeg parser budget
+ * (measured: the tree fails between 4000 and 4050 points in the isolated probe;
+ * the real graph wraps it in longer text, so the cap keeps a 2x margin). */
+export const ENVELOPE_TREE_CAP = 2000;
+
+/**
+ * Expression of an effective placement channel over `t` (sequence/placement_resolve.ts), or null
+ * when the channel does not animate (use the static value). Each animated term (base or layer
+ * envelope with points) compiles in raw units and terms combine with `+` / `*`; static terms fold
+ * into one constant and identity terms are dropped. With a single animated term and an identity
+ * static remainder the term compiles directly in the target mode, so identity base + one layer
+ * envelope yields exactly the text the same points give as the base envelope.
+ */
+export function compilePlacementChannelExpr(
+  owner: PlacementOwner,
+  channel: PlacementChannel,
+  options: {
+    timeBaseOffsetMs: number;
+    mode: "pixel_offset" | "raw";
+    baseCenterPx?: number;
+    canvasDimPx?: number;
+  }
+): string | null {
+  const combine = PLACEMENT_LAYER_COMBINE[channel];
+  const baseEnv = placementBaseEnvelope(owner, channel);
+  const baseAnimates = Boolean(baseEnv && baseEnv.points.length > 0);
+  const layers = placementLayers(owner);
+  const layerEnvs: ParameterEnvelope[] = [];
+  let staticAcc = baseAnimates ? placementLayerIdentity(channel) : owner.placement[channel];
+  for (const layer of layers) {
+    const entry = layer.channels[channel];
+    if (!entry) continue;
+    if (entry.envelope && entry.envelope.points.length > 0) {
+      layerEnvs.push(entry.envelope);
+    } else if (combine === "add") {
+      staticAcc += entry.static;
+    } else {
+      staticAcc *= entry.static;
+    }
+  }
+  const animated: ParameterEnvelope[] = [...(baseAnimates ? [baseEnv!] : []), ...layerEnvs];
+  if (animated.length === 0) return null;
+  const identity = placementLayerIdentity(channel);
+  const staticIsIdentity =
+    combine === "add" ? Math.abs(staticAcc - identity) < 1e-9 : Math.abs(staticAcc - identity) < 1e-9;
+  const needsClamp =
+    channel === "opacity" &&
+    (() => {
+      const r = placementChannelRange(owner, channel);
+      return r.min < 0 || r.max > 1;
+    })();
+  if (animated.length === 1 && staticIsIdentity && !needsClamp) {
+    return compileEnvelopeToFfmpegExpr({ envelope: animated[0], ...options });
+  }
+  const termExprs = animated.map((env) =>
+    compileEnvelopeToFfmpegExpr({ envelope: env, timeBaseOffsetMs: options.timeBaseOffsetMs, mode: "raw" })
+  );
+  if (termExprs.some((e) => e === null)) return null;
+  const parts = [...(termExprs as string[])];
+  if (!staticIsIdentity) parts.push(String(Number(staticAcc.toFixed(4))));
+  const op = combine === "add" ? "+" : "*";
+  let raw = parts.map((p) => `(${p})`).join(op);
+  if (channel === "opacity" && needsClamp) raw = `clip((${raw}),0,1)`;
+  if (options.mode === "raw") return raw;
+  const center = options.baseCenterPx ?? 0;
+  const dim = options.canvasDimPx ?? 1000;
+  return `(${Number(center.toFixed(4))}+((${raw})/100)*${Number(dim.toFixed(4))})`;
+}
 
 export function buildAtempoChain(rate: number): string[] {
   const filters: string[] = [];
@@ -58,6 +140,9 @@ export function compileEnvelopeToFfmpegExpr(options: {
 }): string | null {
   const env = options.envelope;
   if (!env || env.points.length === 0) return null;
+  if (env.points.length > ENVELOPE_TREE_CAP) {
+    throw new Error(DIAGNOSTICS.PLACEMENT_EXPR_TOO_COMPLEX(env.points.length, ENVELOPE_TREE_CAP).formatted);
+  }
 
   const mapVal = (v: number): number => {
     if (options.mode === "db_to_linear") {
@@ -84,9 +169,7 @@ export function compileEnvelopeToFfmpegExpr(options: {
     return String(pts[0].val);
   }
 
-  // Build nested `if(lt(t, t1), easedLerp, ...)` from right to left (easing + dB-space interpolation)
-  let expr = String(pts[pts.length - 1].val);
-  for (let i = pts.length - 2; i >= 0; i--) {
+  const segExprOf = (i: number): string => {
     const a = pts[i];
     const b = pts[i + 1];
     const dt = Math.max(0.001, Number((b.tSec - a.tSec).toFixed(3)));
@@ -121,20 +204,40 @@ export function compileEnvelopeToFfmpegExpr(options: {
       // Step: previous value until t1; the `lt(t,t1)` nesting switches to the new value at t >= t1.
       segExpr = String(a.val);
     }
-    expr = `if(lt(t,${b.tSec}),${segExpr},${expr})`;
+    return segExpr;
+  };
+
+  if (pts.length <= ENVELOPE_CHAIN_LIMIT) {
+    // Nested `if(lt(t, t1), easedLerp, ...)` from right to left (easing + dB-space interpolation).
+    let expr = String(pts[pts.length - 1].val);
+    for (let i = pts.length - 2; i >= 0; i--) {
+      expr = `if(lt(t,${pts[i + 1].tSec}),${segExprOf(i)},${expr})`;
+    }
+    expr = `if(lt(t,${pts[0].tSec}),${pts[0].val},${expr})`;
+    return expr;
   }
-  expr = `if(lt(t,${pts[0].tSec}),${pts[0].val},${expr})`;
-  return expr;
+
+  // Balanced `if` tree over the segments: same segment per `t` as the chain, logarithmic depth.
+  // The rightmost leaf's else branch is the last point value (as in the chain).
+  const buildTree = (lo: number, hi: number): string => {
+    if (hi - lo === 1) {
+      return lo === pts.length - 2
+        ? `if(lt(t,${pts[hi].tSec}),${segExprOf(lo)},${pts[hi].val})`
+        : segExprOf(lo);
+    }
+    const mid = (lo + hi) >> 1;
+    return `if(lt(t,${pts[mid].tSec}),${buildTree(lo, mid)},${buildTree(mid, hi)})`;
+  };
+  const tree = pts.length === 2 ? segExprOf(0) : buildTree(0, pts.length - 1);
+  return `if(lt(t,${pts[0].tSec}),${pts[0].val},${tree})`;
 }
 
 export function buildSubpixelScaleOrPanFilters(options: {
   hasDynamicScale: boolean;
   sxPart: string;
   syPart: string;
-  xEnv: ParameterEnvelope | undefined;
-  yEnv: ParameterEnvelope | undefined;
-  staticXPct: number;
-  staticYPct: number;
+  /** The clip or cue whose x/y channels are compiled (static values and envelopes). */
+  owner: PlacementOwner;
   baseCenterX: number;
   baseCenterY: number;
   renderWidth: number;
@@ -144,15 +247,13 @@ export function buildSubpixelScaleOrPanFilters(options: {
   if (options.hasDynamicScale) {
     const sxP = options.sxPart.replace(/\bt\b/g, options.localTimeExpr);
     const syP = options.syPart.replace(/\bt\b/g, options.localTimeExpr);
-    const xLocalRaw = compileEnvelopeToFfmpegExpr({
-      envelope: options.xEnv,
+    const xLocalRaw = compilePlacementChannelExpr(options.owner, "x_pct", {
       timeBaseOffsetMs: 0,
       mode: "pixel_offset",
       baseCenterPx: 0,
       canvasDimPx: options.renderWidth,
     });
-    const yLocalRaw = compileEnvelopeToFfmpegExpr({
-      envelope: options.yEnv,
+    const yLocalRaw = compilePlacementChannelExpr(options.owner, "y_pct", {
       timeBaseOffsetMs: 0,
       mode: "pixel_offset",
       baseCenterPx: 0,
@@ -160,10 +261,10 @@ export function buildSubpixelScaleOrPanFilters(options: {
     });
     const dxP = xLocalRaw
       ? xLocalRaw.replace(/\bt\b/g, options.localTimeExpr)
-      : String(Number(((options.staticXPct / 100) * options.renderWidth).toFixed(4)));
+      : String(Number(((placementStaticValue(options.owner, "x_pct") / 100) * options.renderWidth).toFixed(4)));
     const dyP = yLocalRaw
       ? yLocalRaw.replace(/\bt\b/g, options.localTimeExpr)
-      : String(Number(((options.staticYPct / 100) * options.renderHeight).toFixed(4)));
+      : String(Number(((placementStaticValue(options.owner, "y_pct") / 100) * options.renderHeight).toFixed(4)));
 
     const x0 = `(W*(1-(${sxP}))/2)+(${dxP})`;
     const x1 = `(W*(1+(${sxP}))/2)+(${dxP})`;
@@ -176,16 +277,18 @@ export function buildSubpixelScaleOrPanFilters(options: {
     ];
   }
 
-  if (options.xEnv || options.yEnv) {
-    const xLocalRaw = compileEnvelopeToFfmpegExpr({
-      envelope: options.xEnv,
+  // An x/y envelope entry with no points also takes this path (its sub-pixel offset is 0).
+  if (
+    placementChannelHasEnvelopeInput(options.owner, "x_pct") ||
+    placementChannelHasEnvelopeInput(options.owner, "y_pct")
+  ) {
+    const xLocalRaw = compilePlacementChannelExpr(options.owner, "x_pct", {
       timeBaseOffsetMs: 0,
       mode: "pixel_offset",
       baseCenterPx: options.baseCenterX,
       canvasDimPx: options.renderWidth,
     });
-    const yLocalRaw = compileEnvelopeToFfmpegExpr({
-      envelope: options.yEnv,
+    const yLocalRaw = compilePlacementChannelExpr(options.owner, "y_pct", {
       timeBaseOffsetMs: 0,
       mode: "pixel_offset",
       baseCenterPx: options.baseCenterY,

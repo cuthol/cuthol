@@ -70,6 +70,105 @@ export const DIAGNOSTICS = {
       `First inspect the diff with 'cuthol workspace changes show', then run 'cuthol workspace changes adopt' or 'cuthol workspace changes revert' and retry the operation.`
     ),
 
+  COMPOSITION_SCAFFOLD_WOULD_OVERWRITE: (compDir: string, files: string[], detail?: string) =>
+    createDiagnostic(
+      "CUTHOL-G215",
+      "G2_ASSETS",
+      "ERROR",
+      `Scaffolding '${compDir}' would overwrite ${files.length} file(s) that were edited after Cuthol wrote them: ${files.slice(0, 5).join(", ")}${files.length > 5 ? ` (+${files.length - 5})` : ""}. Nothing was written${detail ? `; ${detail}` : ""}.`,
+      detail
+        ? `Keep the edited files, or move them out of the folder before scaffolding again.`
+        : `Keep your edits (pick another --comp-dir), or pass --force to overwrite them; a forced scaffold is one journal revision and 'cuthol workspace journal undo' brings the edited files back.`
+    ),
+
+  // --- Effect system (reserved, src/effects/effect_types.ts): CUTHOL-G170..G189 definitions,
+  // presets, layers and envelopes (schema/verify) · CUTHOL-G530..G549 shader pass and effect
+  // render · CUTHOL-G694..G699 effect visibility in Cuthol Live. G119 (envelope on a
+  // non-animatable param) keeps its meaning for every backend. ---
+  // [fx:A G170–G179] effect catalog, keyframe points, value at t
+  ENVELOPE_BEAT_NO_GRID: (assetHandle: string) =>
+    createDiagnostic(
+      "CUTHOL-G170",
+      "G1_SCHEMA",
+      "ERROR",
+      `No cached beat grid for asset '${assetHandle}'; beat times cannot be resolved.`,
+      `Run 'cuthol library beats --asset ${assetHandle}' first, then retry with '--beat <n> --beats-of ${assetHandle}'.`,
+      assetHandle
+    ),
+  ENVELOPE_BEAT_NO_PLACEMENT: (assetHandle: string) =>
+    createDiagnostic(
+      "CUTHOL-G171",
+      "G3_TIMING",
+      "ERROR",
+      `Asset '${assetHandle}' is not placed on any lane cue; a beat time has no timeline position.`,
+      `Place the asset with 'cuthol lane add-cue --asset ${assetHandle}' first, then retry.`,
+      assetHandle
+    ),
+  ENVELOPE_BEAT_AMBIGUOUS: (assetHandle: string, cueIds: string[]) =>
+    createDiagnostic(
+      "CUTHOL-G172",
+      "G3_TIMING",
+      "ERROR",
+      `Asset '${assetHandle}' is placed on ${cueIds.length} cues (${cueIds.join(", ")}); a beat number is ambiguous.`,
+      `Trim the project to a single placement of '${assetHandle}', or write the keyframe with an explicit '--at <t>' time instead.`,
+      assetHandle
+    ),
+  ENVELOPE_BEAT_INDEX_INVALID: (assetHandle: string, beat: number) =>
+    createDiagnostic(
+      "CUTHOL-G173",
+      "G1_SCHEMA",
+      "ERROR",
+      `Beat ${beat} is outside the cached grid of asset '${assetHandle}'.`,
+      `List the grid with 'cuthol library beats --asset ${assetHandle}' and pick a beat between 1 and the grid count.`,
+      assetHandle
+    ),
+  ENVELOPE_POINT_MISSING: (targetId: string, parameter: string, offsetMs: number) =>
+    createDiagnostic(
+      "CUTHOL-G174",
+      "G1_SCHEMA",
+      "ERROR",
+      `No keyframe of '${parameter}' at ${offsetMs}ms on '${targetId}'.`,
+      `List the points with 'cuthol spine envelope --clip ${targetId} --param ${parameter}' (read path) or add one with 'cuthol spine envelope point add'.`,
+      targetId
+    ),
+  ENVELOPE_POINT_VALUE_INVALID: (targetId: string, parameter: string) =>
+    createDiagnostic(
+      "CUTHOL-G175",
+      "G1_SCHEMA",
+      "ERROR",
+      `Keyframe value of '${parameter}' on '${targetId}' is not a finite number.`,
+      `Pass '--value <number>' with a finite value.`,
+      targetId
+    ),
+  ENVELOPE_VALUE_UNRESOLVABLE: (targetId: string, parameter: string) =>
+    createDiagnostic(
+      "CUTHOL-G176",
+      "G1_SCHEMA",
+      "ERROR",
+      `Parameter '${parameter}' on '${targetId}' has no envelope and no static value.`,
+      `Add a keyframe with 'cuthol spine envelope point add --clip ${targetId} --param ${parameter} --at <t> --value <n>'.`,
+      targetId
+    ),
+  // [fx:B G180–G189] mask and motion blur
+  INVALID_MASK_SPEC: (clipId: string, detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G180",
+      "G1_SCHEMA",
+      "ERROR",
+      `Invalid mask on '${clipId}' (${detail}).`,
+      `Use 'cuthol spine mask --clip ${clipId} --shape rect|ellipse|split --center-x 0..200 --center-y 0..200 --width 1..200 --height 1..200 [--feather 0..400] [--invert|--no-invert]'.`,
+      clipId
+    ),
+  INVALID_MOTION_BLUR_SPEC: (clipId: string, detail: string) =>
+    createDiagnostic(
+      "CUTHOL-G181",
+      "G1_SCHEMA",
+      "ERROR",
+      `Invalid motion blur on '${clipId}' (${detail}).`,
+      `Use 'cuthol spine motion-blur --clip ${clipId} --shutter 0..360 --subframes 2..16' or '--off'.`,
+      clipId
+    ),
+
   // --- Cuthol Live: CUTHOL-G601..G619 ---
   // Blocks: G601 lock (contract) · G602–G605 server/inbox · G606–G608 window/timeline ·
   // G609–G612 live preview/proxies · G613–G615 progress/config · G616–G617 notes · G618–G619 human edits.
@@ -1181,7 +1280,7 @@ export const DIAGNOSTICS = {
       "G4_STAGE",
       "WARN",
       `'${field}' on '${itemId}' is not applied to the render in this version.`,
-      `Leave this field at its default. On spine clips, static and enveloped brightness/contrast/saturation, color temperature and LUT reach the render, as do block-based 'color.*' envelopes; motion blur and masks do not.`,
+      `Leave this field at its default. On spine clips, masks, motion blur, static and enveloped brightness/contrast/saturation, color temperature and LUT reach the render, as do block-based 'color.*' envelopes.`,
       itemId
     ),
 
@@ -1549,25 +1648,31 @@ export const DIAGNOSTICS = {
   // ---------------------------------------------------------------------------------------------------
 
   // --- Spine fx: codes CUTHOL-G118, CUTHOL-G119, CUTHOL-G411 ---
-  SPINE_FX_INVALID: (clipId: string, fxId: string, kind: string, detail: string, suggestion?: string) =>
+  // The G118/G119 texts name the owner id, so the same codes serve spine clips (`sp_XX`)
+  // and lane cues (`cue_XX`) sharing the one fx stage.
+  SPINE_FX_INVALID: (ownerId: string, fxId: string, kind: string, detail: string, suggestion?: string) =>
     createDiagnostic(
       "CUTHOL-G118",
       "G1_SCHEMA",
       "ERROR",
-      `Effect '${fxId}' ('${kind}') on clip '${clipId}' is invalid: ${detail}`,
+      `Effect '${fxId}' ('${kind}') on '${ownerId}' is invalid: ${detail}`,
       suggestion ??
-        `Remove it with 'cuthol spine fx remove --clip ${clipId} --fx ${fxId}', or fix it with 'cuthol spine fx set --clip ${clipId} --fx ${fxId} --param name=value'.`,
-      clipId
+        (ownerId.startsWith("cue_")
+          ? `Remove it with 'cuthol spine fx remove --item ${ownerId} --fx ${fxId}', or fix it with 'cuthol spine fx set --item ${ownerId} --fx ${fxId} --param name=value'.`
+          : `Remove it with 'cuthol spine fx remove --item ${ownerId} --fx ${fxId}', or fix it with 'cuthol spine fx set --item ${ownerId} --fx ${fxId} --param name=value'.`),
+      ownerId
     ),
 
-  SPINE_FX_ENVELOPE_UNSUPPORTED: (clipId: string, parameter: string, reason: string) =>
+  SPINE_FX_ENVELOPE_UNSUPPORTED: (ownerId: string, parameter: string, reason: string) =>
     createDiagnostic(
       "CUTHOL-G119",
       "G1_SCHEMA",
       "ERROR",
-      `Envelope '${parameter}' on clip '${clipId}' cannot be applied: ${reason}`,
-      `Remove the envelope or move it to an envelopable parameter ('cuthol spine envelope --clip ${clipId} --param <name> --points <...>'); the extension declares which parameters are envelopable ('animatable').`,
-      clipId
+      `Envelope '${parameter}' on '${ownerId}' cannot be applied: ${reason}`,
+      ownerId.startsWith("cue_")
+        ? `Remove the envelope or move it to an envelopable parameter ('cuthol spine envelope --item ${ownerId} --param <name> --points <...>'); the extension declares which parameters are envelopable ('animatable').`
+        : `Remove the envelope or move it to an envelopable parameter ('cuthol spine envelope --item ${ownerId} --param <name> --points <...>'); the extension declares which parameters are envelopable ('animatable').`,
+      ownerId
     ),
 
   SPINE_FX_EXTENSION_DRIFTED: (
@@ -1585,6 +1690,65 @@ export const DIAGNOSTICS = {
       `Effect '${fxId}' (${ref}) on clip '${clipId}' is compiling against a different extension than pinned (in sequence: ${pinnedLabel}, on disk: ${actualLabel}).`,
       `Run 'cuthol extension enable --name ${extName}' to accept the change and move to the new version.`,
       clipId
+    ),
+
+  // [p1fx:W0 G264–G266] cue fx stage
+  CUE_FX_TEXT_UNSUPPORTED: (cueId: string) =>
+    createDiagnostic(
+      "CUTHOL-G264",
+      "G1_SCHEMA",
+      "ERROR",
+      `Effect chain on text cue '${cueId}' is not supported yet; the cue carries an 'fx' entry but text cues have no fx stage in this version.`,
+      `Remove the 'fx' list from the cue in the sequence JSON; text cue fx arrives in a later wave.`,
+      cueId
+    ),
+  CUE_FX_AUDIO_UNSUPPORTED: (cueId: string, kind: string) =>
+    createDiagnostic(
+      "CUTHOL-G265",
+      "G1_SCHEMA",
+      "ERROR",
+      `Effect chain on audio cue '${cueId}' (kind '${kind}') is not supported: audio cues have no pixel chain for fx to run on.`,
+      `Remove the 'fx' list from the cue in the sequence JSON.`,
+      cueId
+    ),
+  CUE_FX_KIND_UNSUPPORTED: (cueId: string, kind: string) =>
+    createDiagnostic(
+      "CUTHOL-G266",
+      "G1_SCHEMA",
+      "ERROR",
+      `Effect chain on cue '${cueId}' (kind '${kind}') is not supported: this cue kind has no pixel chain for fx to run on.`,
+      `Remove the 'fx' list from the cue in the sequence JSON.`,
+      cueId
+    ),
+  CUE_FX_AUDIO_NOT_ALLOWED: (cueId: string, kind: string) =>
+    createDiagnostic(
+      "CUTHOL-G271",
+      "G1_SCHEMA",
+      "ERROR",
+      `Effect chain on audio cue '${cueId}' (kind '${kind}') is not supported: audio cues have no pixel chain for fx to run on.`,
+      `Use 'cuthol spine fx' on a spine clip or a visual lane cue instead; audio shaping lives in the audio chain.`,
+      cueId
+    ),
+  // [p1fx:A G267–G270] fx stage render
+  COMPOSITION_TEMPORAL_FX_SINGLEFRAME: (cueId: string, filter: string) =>
+    createDiagnostic(
+      "CUTHOL-G267",
+      "G1_SCHEMA",
+      "WARN",
+      `Temporal effect '${filter}' on composition cue '${cueId}' sees one repeated frame in a single-frame compile ('monitor frame'): 'monitor frame' differs from 'render' there.`,
+      `Compare temporal effects on composition cues with a multi-frame render instead of 'monitor frame'.`,
+      cueId
+    ),
+  // [p1fx:B G271–G275] fx surface
+  // [p1fx:C G276–G279] text cue fx
+  CUE_FX_TEXT_LAYER_EMPTY: (cueId: string) =>
+    createDiagnostic(
+      "CUTHOL-G276",
+      "G1_SCHEMA",
+      "ERROR",
+      `Effect chain on text cue '${cueId}' produced no text layer; the cue carries active fx but its text is empty.`,
+      `Give the cue text or remove the 'fx' list from the cue in the sequence JSON.`,
+      cueId
     ),
 
   // ---------------------------------------------------------------------------------------------------
@@ -2094,6 +2258,35 @@ export const DIAGNOSTICS = {
       "Open the sheet for the kept cells; read the remaining pins from the note lines."
     ),
 
+  // [p2mo:W0 G280–G282] motion layers on placement: resolver, `motion` kind, pixel-stage predicate
+  // [p2mo:A G283-G287] layer combination and expressions
+  PLACEMENT_EXPR_TOO_COMPLEX: (points: number, cap: number) =>
+    createDiagnostic(
+      "CUTHOL-G283",
+      "G4_STAGE",
+      "ERROR",
+      `Placement envelope with ${points} points exceeds the expression budget (cap ${cap}); the combined graph would fail in ffmpeg.`,
+      "Split the envelope into fewer points or shorter clips before rendering."
+    ),
+  // [p2mo:B G288–G291] motion surface and verify
+  MOTION_OPACITY_CLAMPED: (item: string, range: string, layers: string) =>
+    createDiagnostic(
+      "CUTHOL-G288",
+      "G4_STAGE",
+      "WARN",
+      `Item ${item} channel opacity combined range ${range} above 1 (it is clamped) via layers ${layers}.`,
+      "Lower the base or layer opacity so the combined range stays within [0, 1]."
+    ),
+  MOTION_SCALE_ZERO: (item: string, channel: string, range: string, layers: string) =>
+    createDiagnostic(
+      "CUTHOL-G289",
+      "G4_STAGE",
+      "WARN",
+      `Item ${item} channel ${channel} combined range ${range} crosses or touches 0 via layers ${layers}.`,
+      "Keep the combined scale away from 0; a zero scale collapses the item."
+    ),
+  // [p2mo:C G292–G293] live window
+  // [p2mo:D G294–G297] moving text
   // [fix:A G530–G534] render output
   // [fix:B G692–G696] live server (reserved; B1 needs no new diagnostic: failures keep the G612 contract)
   LIVE_NOTE_COORDS_PIN_SCOPED: (frame: number, kept: number, total: number) =>
@@ -2114,6 +2307,10 @@ export const DIAGNOSTICS = {
     ),
   // [fix:C G642–G646] live window
   // [fix:D G250–G254] ingest, brief, scaffold
+  // [b040:A G255–G256] placement readers
+  // [b040:B G257–G259] fx chain checks
+  // [b040:C G260–G261] motion blur across segments
+  // [b040:D G262–G263] composition transparency staging
 
   // ---------------------------------------------------------------------------------------------------
 } as const;

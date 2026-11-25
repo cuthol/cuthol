@@ -30,7 +30,6 @@ export const MAIN_SKILL_NAME = "cuthol";
 export const SKILL_MARKER_FILE = ".cuthol-skill.json";
 export const SKILLS_AUTO_ENV = "CUTHOL_SKILLS_AUTO";
 export const SKILLS_DIR_ENV = "CUTHOL_SKILLS_DIR";
-const AUTO_INSTALL_MARKER_REL = path.join(".cuthol", "skills-installed.json");
 
 let cachedPackageVersion: string | null = null;
 
@@ -626,123 +625,35 @@ export function listSkillsStatus(options?: {
 }
 
 // ---------------------------------------------------------------------------
-// Automatic install: runs on every CLI command and MCP start; silent and fast
-// once this package version is installed (a single small marker read).
+// Skills attention rule: shared by the MCP hint and the doctor warning.
+// Skills are written only by an explicit user command, never automatically.
 // ---------------------------------------------------------------------------
 
-export interface AutoInstallMarker {
-  version: string;
-  /** Cheap fingerprint of the package skills tree (paths, sizes, mtimes), so edits within one version re-install. */
-  skills_fingerprint?: string;
-  targets: string[];
-  installed_at: string;
+/**
+ * Ids of detected tools the user should hear about: tools with at least one
+ * `outdated` skill, or — when no detected tool has any Cuthol skill at all —
+ * every detected tool. `modified` (the user's own edits) never fires, and a
+ * tool the user did not choose is never named for a merely `missing` skill.
+ */
+export function skillsWarningIds(report: SkillsStatusReport): string[] {
+  const detected = report.targets.filter((t) => t.detected);
+  const outdated = detected.filter((t) => t.skills.some((s) => s.status === "outdated")).map((t) => t.id);
+  if (outdated.length > 0) return outdated;
+  const anyPresent = detected.some((t) => t.skills.some((s) => s.status !== "missing"));
+  if (!anyPresent) return detected.map((t) => t.id);
+  return [];
 }
 
-/** Stat-only fingerprint of the package skills tree (no file contents read). */
-export function skillsTreeFingerprint(skillsDir: string): string {
-  const hash = crypto.createHash("sha256");
-  const walk = (dir: string, rel: string): void => {
-    let entries: fs.Dirent[];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-    for (const e of entries) {
-      const abs = path.join(dir, e.name);
-      const r = rel ? `${rel}/${e.name}` : e.name;
-      if (e.isDirectory()) walk(abs, r);
-      else if (e.isFile()) {
-        try {
-          const st = fs.statSync(abs);
-          hash.update(`${r}|${st.size}|${Math.floor(st.mtimeMs)}
-`);
-        } catch {
-          // unreadable entry: leave it out
-        }
-      }
-    }
-  };
-  walk(skillsDir, "");
-  return hash.digest("hex").slice(0, 16);
+/** The one-line MCP hint naming the given tool ids (the reader relays it, never runs it). */
+export function formatSkillsHint(ids: string[]): string {
+  return `Cuthol skills are outdated or not installed for: ${ids.join(", ")}. They are not installed automatically; the user can run 'cuthol skills install --agent <id>' for the tool they use (set CUTHOL_SKILLS_AUTO=0 to hide this).`;
 }
 
-export function readAutoInstallMarker(homeDir?: string): AutoInstallMarker | null {
-  try {
-    const parsed = JSON.parse(
-      fs.readFileSync(path.join(homeDir ?? resolveHomeDir(), AUTO_INSTALL_MARKER_REL), "utf8")
-    ) as Partial<AutoInstallMarker>;
-    if (typeof parsed.version !== "string" || !Array.isArray(parsed.targets)) return null;
-    return {
-      version: parsed.version,
-      ...(typeof parsed.skills_fingerprint === "string" ? { skills_fingerprint: parsed.skills_fingerprint } : {}),
-      targets: parsed.targets.filter((t): t is string => typeof t === "string"),
-      installed_at: typeof parsed.installed_at === "string" ? parsed.installed_at : "",
-    };
-  } catch {
-    return null;
-  }
-}
-
-function isAutoInstallDisabled(): boolean {
+/** True unless the user set `CUTHOL_SKILLS_AUTO=0` (tests and Cuthol's own child processes set it). */
+export function isSkillsHintHidden(): boolean {
   const raw = process.env[SKILLS_AUTO_ENV];
   if (raw === undefined) return false;
   return ["0", "false", "off", "no", "disable", "disabled"].includes(raw.trim().toLowerCase());
-}
-
-/**
- * Install Cuthol skills into every detected agent tool when this package version
- * has not been installed yet. Returns the one-line note for the user, or null when
- * nothing was done. Never throws: a failure must not break the running command.
- */
-export function maybeAutoInstallSkills(options?: {
-  homeDir?: string;
-  skillsDir?: string;
-  packageVersion?: string;
-}): string | null {
-  try {
-    if (isAutoInstallDisabled()) return null;
-    const home = options?.homeDir ?? resolveHomeDir();
-    const skillsDir = options?.skillsDir ?? resolvePackageSkillsDir();
-    const packageVersion = options?.packageVersion ?? readPackageVersion();
-    const markerPath = path.join(home, AUTO_INSTALL_MARKER_REL);
-    const detected = detectAgentTargets(home);
-    const prev = readAutoInstallMarker(home);
-    const fingerprint = skillsTreeFingerprint(skillsDir);
-    if (
-      prev &&
-      prev.version === packageVersion &&
-      prev.skills_fingerprint === fingerprint &&
-      detected.every((t) => prev.targets.includes(t.id))
-    ) {
-      return null;
-    }
-    const report = installSkills({
-      targets: detected.map((t) => ({ ...t, detected: true }) as SelectedTarget),
-      skillsDir,
-      packageVersion,
-    });
-    try {
-      fs.mkdirSync(path.dirname(markerPath), { recursive: true });
-      const marker: AutoInstallMarker = {
-        version: packageVersion,
-        skills_fingerprint: fingerprint,
-        targets: detected.map((t) => t.id),
-        installed_at: new Date().toISOString(),
-      };
-      fs.writeFileSync(markerPath, JSON.stringify(marker, null, 2), "utf8");
-    } catch {
-      // A best-effort stamp; the install itself already succeeded or reported errors.
-    }
-    const changed = report.targets.filter(
-      (t) => !t.error && t.installed.length + t.updated.length + t.removed_stale.length > 0
-    );
-    if (changed.length === 0) return null;
-    return `Installed Cuthol skills for: ${changed.map((t) => t.id).join(", ")}. Start a new session to load them.`;
-  } catch {
-    return null;
-  }
 }
 
 // ---------------------------------------------------------------------------

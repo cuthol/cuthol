@@ -1,4 +1,23 @@
 // Inspector: read-only details of the selected clip, cue or scene.
+const PLACEMENT_CHANNELS = ["x_pct", "y_pct", "scale_x", "scale_y", "rotation_deg", "opacity"];
+
+/** One "Motion" row for an item with active motion layers, or null. Animated channels get `~`. */
+export function motionRow(item) {
+  const layers = ((item && item.fx) ?? []).filter((e) => e && e.kind === "motion" && e.enabled !== false);
+  if (layers.length === 0) return null;
+  const parts = layers.map((e) => {
+    const chans = PLACEMENT_CHANNELS.filter(
+      (c) => (e.params ?? {})[c] !== undefined || (item.envelopes ?? []).some((x) => x.parameter === `fx.${e.id}.${c}`)
+    );
+    const labels = chans.map((c) => {
+      const env = (item.envelopes ?? []).find((x) => x.parameter === `fx.${e.id}.${c}`);
+      return env && Array.isArray(env.points) && env.points.length > 0 ? `${c}~` : c;
+    });
+    return `${e.id}${labels.length ? `(${labels.join(", ")})` : ""}`;
+  });
+  return ["Motion", parts.join(" · ")];
+}
+
 /** @param {HTMLElement|null} root  @param {import('./app.js').LiveContext} ctx */
 export function mount(root, ctx) {
   if (!root) return;
@@ -47,28 +66,38 @@ export function mount(root, ctx) {
     }
     if (hit.kind === "clip") {
       const c = hit.clip;
-      return [
+      const rows = [
         ["Duration", `${timecode(c.duration_ms ?? 0)} · ${c.duration_ms ?? 0} ms`],
         ["Position", timecode(c.timeline_in_ms ?? 0)],
         ["Source in/out", `${timecode(c.source_in_ms ?? 0)} → ${timecode(c.source_out_ms ?? 0)}`],
         ["Scale", `${pct(c.placement?.scale_x)} × ${pct(c.placement?.scale_y)}`],
         ["Opacity", pct(c.placement?.opacity)],
+      ];
+      const motion = motionRow(c);
+      if (motion) rows.push(motion);
+      rows.push(
         ["Rate", c.playback?.rate != null ? `${c.playback.rate}×` : "—"],
         ["Asset", c.asset_handle ?? "—"],
         ["Lane", "Spine"],
-      ];
+      );
+      return rows;
     }
     const q = hit.cue;
     const comp = q.composition ? `${q.composition.composition_dir ?? ""}` : null;
-    return [
+    const rows = [
       ["Duration", `${timecode(q.duration_ms ?? 0)} · ${q.duration_ms ?? 0} ms`],
       ["Position", timecode(q.anchor ? cueStartApprox(q) : (q.at_ms ?? 0))],
       ["Kind", q.kind ?? "—"],
       ["Scale", `${pct(q.placement?.scale_x)} × ${pct(q.placement?.scale_y)}`],
       ["Opacity", pct(q.placement?.opacity)],
+    ];
+    const motion = motionRow(q);
+    if (motion) rows.push(motion);
+    rows.push(
       ["Asset / Comp", comp || q.asset_handle || "—"],
       ["Lane", hit.lane?.id ?? "—"],
-    ];
+    );
+    return rows;
   }
 
   function cueStartApprox(q) {

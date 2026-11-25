@@ -16,7 +16,8 @@ import {
   RenderPreset
 } from "../compositor/compiler.js";
 import {
-  createSubprocessFailureDiagnostic, CutholError
+  createSubprocessFailureDiagnostic, CutholError, estimateCommandLineLength,
+  type VerificationGateId
 } from "../core/diagnostics.js";
 import { CutholSequence } from "../core/schema.js";
 import { WorkspacePaths } from "../core/workspace.js";
@@ -43,6 +44,8 @@ interface SingleFrameFfmpegPlan {
   durationMs: number;
   clampedMs: number;
   bboxTargets: Array<{ bboxPath: string; pngPath: string }>;
+  /** Full filter graph when it is passed from a file; null when inline. */
+  filterScript: string | null;
 }
 
 export function runParallelFfmpegJobsSync(
@@ -207,14 +210,14 @@ function buildSingleFrameFfmpegPlanFromCompiledPlan(
 
   const optimizedInputArgs = videoInputGroups.flat();
   const filterWithSelect = `${videoFilterComplex};${plan.videoOutPad}trim=start=${snappedSec},setpts=PTS-STARTPTS,scale=in_color_matrix=bt709:out_color_matrix=bt709,format=rgb24[v_single_out]`;
+  const { args: filterArgs, filterScript } = singleFrameFilterArgs(filterWithSelect, optimizedInputArgs);
 
   return {
     ffArgs: [
       "-v",
       "error",
       ...optimizedInputArgs,
-      "-filter_complex",
-      filterWithSelect,
+      ...filterArgs,
       "-map",
       "[v_single_out]",
       "-t",
@@ -234,7 +237,25 @@ function buildSingleFrameFfmpegPlanFromCompiledPlan(
     durationMs: plan.totalDurationMs,
     clampedMs,
     bboxTargets,
+    filterScript,
   };
+}
+
+/**
+ * Long graphs exceed the Windows command-line limit (see the render path in
+ * `render_encode.ts`): they are passed from a file (`-/filter_complex <file>`).
+ * The placeholder is replaced with the real path by the caller, which owns
+ * the ffmpeg run and deletes the file afterwards.
+ */
+export function singleFrameFilterArgs(
+  filterWithSelect: string,
+  optimizedInputArgs: string[]
+): { args: string[]; filterScript: string | null } {
+  const useFilterScript =
+    filterWithSelect.length > 4000 ||
+    estimateCommandLineLength("ffmpeg", optimizedInputArgs) + filterWithSelect.length > 12000;
+  if (!useFilterScript) return { args: ["-filter_complex", filterWithSelect], filterScript: null };
+  return { args: ["-/filter_complex", "__CUTHOL_SINGLE_FRAME_FILTER__"], filterScript: filterWithSelect };
 }
 
 /**
@@ -245,7 +266,8 @@ export function renderMultipleCompositeFramesRgb24(
   seq: CutholSequence,
   paths: WorkspacePaths,
   timestampsMs: number[],
-  preset: RenderPreset = "draft_480p"
+  preset: RenderPreset = "draft_480p",
+  options?: { skipGates?: VerificationGateId[] }
 ): Array<{
   rgbBuf: Buffer;
   width: number;
@@ -256,7 +278,14 @@ export function renderMultipleCompositeFramesRgb24(
 }> {
   if (timestampsMs.length === 0) return [];
 
-  const verification = verifySequence(seq, paths, ["G1_SCHEMA", "G2_ASSETS", "G3_TIMING"]);
+  // The monitor frame/sheet path renders instants of an already-open project;
+  // asset checks (G2) re-probe every library file and dominate the run, so the
+  // frame caller skips them while schema and timing gates still run.
+  const skipGates = new Set<VerificationGateId>(options?.skipGates ?? []);
+  const frameGates: VerificationGateId[] = (["G1_SCHEMA", "G2_ASSETS", "G3_TIMING"] as const).filter(
+    (g) => !skipGates.has(g)
+  );
+  const verification = verifySequence(seq, paths, frameGates);
   if (!verification.ok) {
     const firstErr = verification.diagnostics.find((d) => d.severity === "ERROR")!;
     throw new CutholError(firstErr);
@@ -330,6 +359,35 @@ export function renderMultipleCompositeFramesRgb24(
     }
   }
 
+  // Materialize long filter graphs to files so the command line stays short.
+  const filterScriptPaths: string[] = [];
+  try {
+    fs.mkdirSync(paths.blobsDir, { recursive: true });
+  } catch {
+    // fall back to the OS temp dir below
+  }
+  for (let i = 0; i < plans.length; i++) {
+    const p = plans[i];
+    if (p.filterScript === null) continue;
+    let scriptPath = "";
+    try {
+      scriptPath = path.join(
+        paths.blobsDir,
+        `single_frame_${process.pid}_${Date.now()}_${i}.filter.txt`
+      );
+      fs.writeFileSync(scriptPath, p.filterScript, "utf8");
+    } catch {
+      scriptPath = path.join(
+        os.tmpdir(),
+        `cuthol_single_frame_${process.pid}_${Date.now()}_${i}.filter.txt`
+      );
+      fs.writeFileSync(scriptPath, p.filterScript, "utf8");
+    }
+    filterScriptPaths.push(scriptPath);
+    const at = p.ffArgs.indexOf("__CUTHOL_SINGLE_FRAME_FILTER__");
+    if (at >= 0) p.ffArgs[at] = scriptPath;
+  }
+
   const frameJobs: ParallelFfmpegJob[] = plans.map((p) => ({ args: p.ffArgs, cwd: p.cwd }));
   const bboxJobs: ParallelFfmpegJob[] = uncachedBboxPngs.map((pngPath) => ({
     args: [
@@ -355,7 +413,18 @@ export function renderMultipleCompositeFramesRgb24(
     ...plans.map((p) => p.pixelCount * 4 + 2 * 1024 * 1024),
     ...uncachedBboxPngs.map(() => 320 * 180 * 4 + 65536),
   ];
-  const allResults = runParallelFfmpegJobsSync(allJobs, allMaxBuffers);
+  let allResults: ParallelFfmpegJobResult[];
+  try {
+    allResults = runParallelFfmpegJobsSync(allJobs, allMaxBuffers);
+  } finally {
+    for (const scriptPath of filterScriptPaths) {
+      try {
+        if (fs.existsSync(scriptPath)) fs.unlinkSync(scriptPath);
+      } catch {
+        // ignore cleanup error
+      }
+    }
+  }
   const jobResults = allResults.slice(0, plans.length);
   const bboxResults = allResults.slice(plans.length);
 
@@ -471,9 +540,10 @@ export function renderSingleCompositeFrameRgb24(
   seq: CutholSequence,
   paths: WorkspacePaths,
   atMs: number,
-  preset: RenderPreset = "draft_480p"
+  preset: RenderPreset = "draft_480p",
+  options?: { skipGates?: VerificationGateId[] }
 ): { rgbBuf: Buffer; width: number; height: number; durationMs: number; clampedMs: number } {
-  const res = renderMultipleCompositeFramesRgb24(seq, paths, [atMs], preset)[0];
+  const res = renderMultipleCompositeFramesRgb24(seq, paths, [atMs], preset, options)[0];
   return {
     rgbBuf: res.rgbBuf,
     width: res.width,

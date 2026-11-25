@@ -33,11 +33,14 @@ import {
 import { formatWorkspaceOpenSummary, loadSequence } from "../core/workspace.js";
 import {
   buildSkillsCatalogSection,
+  formatSkillsHint,
+  isSkillsHintHidden,
   LEGACY_GUIDE_FILES,
-  maybeAutoInstallSkills,
+  listSkillsStatus,
   resolveGuideTopic,
   resolvePackageSkillsDir,
   scanSkills,
+  skillsWarningIds,
 } from "../core/skills_install.js";
 import { detectExternalChanges, formatExternalNotice, formatExternalReminder } from "../core/external_changes.js";
 import { resolveExtension } from "../extensions/manager.js";
@@ -147,7 +150,7 @@ export interface CutholMcpServerOptions {
   structuredOutput?: boolean;
   cliPath?: string;
   onNotification?: (notif: JsonRpcNotification) => void;
-  /** One-line note (e.g. skills auto-install) prepended to the first tool response only. */
+  /** One-line note (the skills hint) prepended to the first tool response only. */
   skillsNote?: string | null;
 }
 
@@ -340,7 +343,7 @@ export class CutholMcpServer {
 
   /**
    * Executes one tool call and returns an MCP tool result. Never throws.
-   * A pending skills-install note is prepended to the first response only.
+   * A pending skills hint is prepended to the first response only.
    */
   public async callTool(toolName: string, rawArgs: unknown, ctx: CallContext = {}): Promise<McpToolResult> {
     const result = await this.callToolInner(toolName, rawArgs, ctx);
@@ -866,17 +869,31 @@ export const CUTHOL_MCP_TOOLS = TOOL_SPECS.map((t) => buildToolDefinition(t));
 /** All catalogued actions (for documentation and tests). */
 export const CUTHOL_MCP_ACTIONS = ACTION_SPECS;
 
+/**
+ * The one-line skills hint for this session, or null when nothing should be
+ * shown. Never throws: an unreadable home folder must not break the server.
+ */
+export function computeSkillsHint(): string | null {
+  try {
+    // CUTHOL_SKILLS_AUTO=0 hides the hint; any other value changes nothing.
+    if (isSkillsHintHidden()) return null;
+    const ids = skillsWarningIds(listSkillsStatus());
+    return ids.length > 0 ? formatSkillsHint(ids) : null;
+  } catch {
+    return null;
+  }
+}
+
 export function startMcpStdioServer(options: Omit<CutholMcpServerOptions, "onNotification"> = {}): void {
   const write = (msg: unknown): void => {
     process.stdout.write(`${JSON.stringify(msg)}\n`);
   };
-  const autoSkillsNote = maybeAutoInstallSkills();
   const server = new CutholMcpServer({
     progressive: process.env.CUTHOL_MCP_PROGRESSIVE === "1",
     structuredOutput: process.env.CUTHOL_MCP_STRUCTURED === "1",
     defaultDir: options.defaultDir ?? process.env.CUTHOL_WORKSPACE,
     ...options,
-    skillsNote: options.skillsNote ?? autoSkillsNote,
+    skillsNote: options.skillsNote ?? computeSkillsHint(),
     onNotification: write,
   });
   // A newer build on disk restarts the server from disk and relays to it (see mcp_reload.ts).

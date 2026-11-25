@@ -280,14 +280,19 @@ test("2. G409 warns when a stored treatment or lane-cue color envelope is not ap
       ]
     )
   );
-  for (const field of ["treatments.motion_blur", "treatments.mask"]) {
-    g409(dirty, "sp_dirty", field);
-  }
-  // temperature, LUT and colour envelopes are compiled on spine clips now, so G409 must not name them
-  // (a missing LUT file is G414, covered in color_grade.test.ts).
+  // mask and motion blur render on spine clips now, so G409 must not name them.
   const dirtyG409 = verifySequence(dirty).diagnostics.filter(
     (d) => d.code === "CUTHOL-G409" && d.subject_id === "sp_dirty"
   );
+  for (const field of ["treatments.motion_blur", "treatments.mask"]) {
+    assert.equal(
+      dirtyG409.some((d) => d.what.includes(`'${field}'`)),
+      false,
+      `G409 must not name ${field} on a spine clip`
+    );
+  }
+  // temperature, LUT and colour envelopes are compiled on spine clips now, so G409 must not name them
+  // (a missing LUT file is G414, covered in color_grade.test.ts).
   for (const field of [
     "treatments.color_grade.temperature_k",
     "treatments.color_grade.lut_uri",
@@ -301,7 +306,7 @@ test("2. G409 warns when a stored treatment or lane-cue color envelope is not ap
       `${field} is compiled on spine clips and must not raise G409`
     );
   }
-  assert.equal(dirtyG409.length, 2, "only motion_blur and mask remain unapplied on the spine clip");
+  assert.equal(dirtyG409.length, 0, "mask and motion blur render, so nothing on the spine clip warns");
 
   const plain = createEmptySequence({ projectId: "g409d", title: "g409d", aspect: "16:9", fps: 30 });
   plain.library.push(footage("vid_01"));

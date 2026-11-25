@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { CutholDiagnostic, CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
-import { createDefaultTreatments, CutholSequence, LaneCue, LibraryItem } from "../core/schema.js";
+import { CutholSequence, LaneCue, LibraryItem } from "../core/schema.js";
 import { isVerticalStage, OPEN_STANDARDS } from "../core/standards.js";
 import { resolveCueStartMs } from "../core/timeline.js";
 import { WorkspacePaths } from "../core/workspace.js";
@@ -20,9 +20,20 @@ import {
   isSupportedColorTemperature,
   resolveGradeLutPath,
 } from "../compositor/compile_spine_color.js";
+import { placementChannelAnimates, placementChannelRange, placementStaticValue } from "../sequence/placement_resolve.js";
+
+/**
+ * The opacity an occlusion skip test reads: the static value, except for an item
+ * whose opacity animates (base or motion layers), where the range's max decides.
+ * For items that do not animate the range collapses to the static value, so output is unchanged.
+ */
+function occlusionOpacity(cue: LaneCue | CutholSequence["spine"]["clips"][number]): number {
+  if (!placementChannelAnimates(cue, "opacity")) return placementStaticValue(cue, "opacity");
+  return placementChannelRange(cue, "opacity").max;
+}
 import { MediaLedger } from "../library/ledger.js";
 import { LoudnessMetrics } from "../library/loudness.js";
-import { measureCuePixelBox, PixelBoundingBox } from "./gates.js";
+import { measureCuePixelBox, measureCueSafeZoneBox, PixelBoundingBox } from "./gates.js";
 
 const UNAPPLIED_COLOR_ENVELOPE = new Set<string>([
   "treatments.color_grade.brightness",
@@ -67,25 +78,14 @@ function validateSpineColorGrade(
   }
 }
 
-/** Motion blur, mask and lane colour envelopes are stored but not compiled. */
+/** Lane colour envelopes are stored but not compiled; spine mask and motion blur render. */
 function warnUnappliedRenderFields(
   seq: CutholSequence,
   diagnostics: CutholDiagnostic[],
   paths?: WorkspacePaths
 ): void {
-  const defaults = createDefaultTreatments();
   for (const clip of seq.spine.clips) {
     const fields: string[] = [];
-    const blur = clip.treatments.motion_blur;
-    const defaultBlur = defaults.motion_blur;
-    if (
-      blur.enabled !== defaultBlur.enabled ||
-      blur.shutter_deg !== defaultBlur.shutter_deg ||
-      blur.subframes !== defaultBlur.subframes
-    ) {
-      fields.push("treatments.motion_blur");
-    }
-    if (clip.treatments.mask !== null) fields.push("treatments.mask");
     validateSpineColorGrade(clip, diagnostics, paths);
     for (const field of fields) {
       diagnostics.push(DIAGNOSTICS.RENDER_FIELD_NOT_APPLIED(clip.id, field));
@@ -272,20 +272,21 @@ export function verifyG4Stage(
 
       // Check Safe Zones & Reading Speed on Title / Caption cues
       if (cue.kind === "title" || cue.kind === "caption" || cue.typography) {
-        if (box.left < safeLeft) {
-          diagnostics.push(DIAGNOSTICS.SAFE_ZONE_VIOLATION(cue.id, "left", safeLeft - box.left));
+        const safeBox = measureCueSafeZoneBox(seq.stage, cue, assetAr, paths?.rootDir);
+        if (safeBox.left < safeLeft) {
+          diagnostics.push(DIAGNOSTICS.SAFE_ZONE_VIOLATION(cue.id, "left", safeLeft - safeBox.left));
         }
-        if (box.right > safeRight) {
+        if (safeBox.right > safeRight) {
           diagnostics.push(
-            DIAGNOSTICS.SAFE_ZONE_VIOLATION(cue.id, "right", box.right - safeRight)
+            DIAGNOSTICS.SAFE_ZONE_VIOLATION(cue.id, "right", safeBox.right - safeRight)
           );
         }
-        if (box.top < safeTop) {
-          diagnostics.push(DIAGNOSTICS.SAFE_ZONE_VIOLATION(cue.id, "top", safeTop - box.top));
+        if (safeBox.top < safeTop) {
+          diagnostics.push(DIAGNOSTICS.SAFE_ZONE_VIOLATION(cue.id, "top", safeTop - safeBox.top));
         }
-        if (box.bottom > safeBottom) {
+        if (safeBox.bottom > safeBottom) {
           diagnostics.push(
-            DIAGNOSTICS.SAFE_ZONE_VIOLATION(cue.id, "bottom", box.bottom - safeBottom)
+            DIAGNOSTICS.SAFE_ZONE_VIOLATION(cue.id, "bottom", safeBox.bottom - safeBottom)
           );
         }
 
@@ -328,7 +329,7 @@ export function verifyG4Stage(
       if (other.cue.id === textItem.cue.id) continue;
       if (other.zIndex < textItem.zIndex) continue;
       if (other.zIndex === textItem.zIndex && other.orderIndex <= textItem.orderIndex) continue;
-      if (other.cue.placement.opacity < 0.3) continue;
+      if (occlusionOpacity(other.cue) < 0.3) continue;
 
       // Check temporal overlap
       const timeOverlap = Math.min(textItem.endMs, other.endMs) - Math.max(textItem.startMs, other.startMs);
@@ -351,7 +352,7 @@ export function verifyG4Stage(
         height: seq.stage.height,
       };
       for (const clip of seq.spine.clips) {
-        if (clip.placement.opacity < 0.3) continue;
+        if (occlusionOpacity(clip) < 0.3) continue;
         const clipStart = clip.timeline_in_ms;
         const clipEnd = clipStart + clip.duration_ms;
         const timeOverlap = Math.min(textItem.endMs, clipEnd) - Math.max(textItem.startMs, clipStart);

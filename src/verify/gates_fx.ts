@@ -8,31 +8,29 @@ import type { CutholSequence, ExtensionEffectRef } from "../core/schema.js";
 import type { WorkspacePaths } from "../core/workspace.js";
 import type { VideoGraphCompileContext } from "../compositor/compiler.js";
 import {
-  buildSpineClipFxFilters,
-  spineClipNeedsFxCheck,
-} from "../compositor/compile_spine_fx.js";
+  buildItemFxStage,
+  itemFxNeedsCheck,
+} from "../compositor/compile_fx_stage.js";
+import { MOTION_FX_KIND } from "../effects/effect_types.js";
 import { getSequenceEffectRegistry } from "../extensions/ext_effects.js";
+import { verifyMotionLayers } from "./gates_motion.js";
 
 export function verifySpineFx(
   seq: CutholSequence,
   paths: WorkspacePaths | undefined,
   diagnostics: CutholDiagnostic[]
 ): void {
-  if (!seq.spine.clips.some(spineClipNeedsFxCheck)) return;
-  // The fx stage only reads `seq` and `paths.rootDir` from the context; the remaining compile fields and the
-  // per-clip asset/color arguments below are unused by stage 4 (kept for the stage call shape).
+  const owners: Array<{ id: string; fx?: import("../core/schema.js").ClipFxSpec[]; envelopes: import("../core/schema.js").ParameterEnvelope[] }> = [
+    ...seq.spine.clips,
+    ...seq.lanes.flatMap((lane) => lane.cues),
+  ];
+  if (!owners.some((o) => itemFxNeedsCheck(o))) return;
+  // The fx stage only validates entry params and envelopes here.
   const ctx = { seq, paths } as VideoGraphCompileContext;
-  for (const clip of seq.spine.clips) {
-    if (!spineClipNeedsFxCheck(clip)) continue;
+  for (const owner of owners) {
+    if (!itemFxNeedsCheck(owner)) continue;
     try {
-      buildSpineClipFxFilters(ctx, {
-        clip,
-        asset: undefined as never,
-        absAssetPath: "",
-        clipColorSpec: undefined as never,
-        targetW: 0,
-        targetH: 0,
-      });
+      buildItemFxStage(ctx, { owner, receivedPixFmt: "yuv420p", itemHasAlpha: false });
     } catch (err) {
       if (err instanceof CutholError && err.diagnostic) {
         diagnostics.push(err.diagnostic);
@@ -41,12 +39,15 @@ export function verifySpineFx(
       throw err;
     }
   }
+  verifyMotionLayers(seq, diagnostics);
   const rootDir = paths?.rootDir;
   if (!rootDir) return;
   let reg: ReturnType<typeof getSequenceEffectRegistry> | null = null;
-  for (const clip of seq.spine.clips) {
-    for (const fx of clip.fx ?? []) {
-      if (fx.enabled === false || !fx.kind.startsWith("ext:")) continue;
+  for (const owner of owners) {
+    for (const fx of owner.fx ?? []) {
+      // Motion entries are placement layers validated against the built-in `motion` definition
+      // in `buildItemFxStage` above; they never carry extension drift.
+      if (fx.enabled === false || fx.kind === MOTION_FX_KIND || !fx.kind.startsWith("ext:")) continue;
       reg ??= getSequenceEffectRegistry(seq, rootDir);
       const def = reg.fx.get(fx.kind as ExtensionEffectRef);
       if (def && !def.pinned_match) {
@@ -54,7 +55,7 @@ export function verifySpineFx(
         const pinnedLabel = pinned ? `v${pinned.version} (${pinned.content_hash.slice(0, 8)})` : "no record";
         diagnostics.push(
           DIAGNOSTICS.SPINE_FX_EXTENSION_DRIFTED(
-            clip.id,
+            owner.id,
             fx.id,
             def.ref,
             def.extension,

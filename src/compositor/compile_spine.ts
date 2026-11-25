@@ -4,7 +4,7 @@
 //   1. timing      compile_spine_timing.ts      trim, rate / speed ramp, fps, tail pad
 //   2. geometry    (here)                       crop, fit (contain/cover/fill) scale, mirror
 //   3. colour      compile_spine_color.ts       color_grade, colour envelopes, LUT, temperature
-//   4. fx          compile_spine_fx.ts          per-clip effect chain (`clip.fx`, built-in or extension)
+//   4. fx          compile_fx_stage.ts          per-clip effect chain (`clip.fx`, built-in or extension)
 //   5. alpha       (here)                       chroma cutout or RGBA conversion, rotation, opacity
 //   6. transitions compile_spine_transition.ts  outgoing then incoming filters
 //   7. edge        compile_spine_edge.ts        `placement.edge` fill before the clip is moved
@@ -15,12 +15,17 @@ import { CutholSequence, isStillGraphic, TransitionSpec } from "../core/schema.j
 import { buildCueOverlayEnableExpr } from "../core/frame_time.js";
 import { buildSpineClipTimingFilters, computeSpineClipEffectiveRate } from "./compile_spine_timing.js";
 import { buildSpineClipColorFilters } from "./compile_spine_color.js";
-import { buildSpineClipFxFilters } from "./compile_spine_fx.js";
+import { buildItemFxStage, emitFxStageParts, fxStageWouldKeepAlpha, itemCarriesAlphaAtFx, SPINE_FX_ENTRY_CONVERTER, SPINE_FX_RGBA_EXIT, spineFxReceivedPixFmt } from "./compile_fx_stage.js";
 import {
   applySpineClipEdgeToOverlay,
   buildSpineClipEdgeFilters,
   spineClipEdgeRequiresRgba,
 } from "./compile_spine_edge.js";
+import {
+  buildSpineClipMaskFilters,
+  buildSpineClipMotionBlurFilters,
+  spineClipMaskRequiresRgba,
+} from "./compile_spine_mask.js";
 import {
   applyIncomingTransitionPosition,
   applyOutgoingTransitionPosition,
@@ -38,10 +43,18 @@ import {
   BT709_SETPARAMS,
 } from "./compile_color.js";
 import {
-  compileEnvelopeToFfmpegExpr,
+  compilePlacementChannelExpr,
   buildSubpixelScaleOrPanFilters,
   buildSeekableMediaInput,
 } from "./compile_filters.js";
+import {
+  PLACEMENT_CHANNELS,
+  placementAnimatesAny,
+  placementChannelHasEnvelopeInput,
+  placementHasAnyEnvelopeInput,
+  placementLayers,
+  placementStaticValue,
+} from "../sequence/placement_resolve.js";
 import type { DrawnVisualLayer, VideoGraphCompileContext } from "./compiler.js";
 
 type SpineClipSpec = CutholSequence["spine"]["clips"][number];
@@ -70,8 +83,8 @@ function buildSpineClipFilterChain(
   clipPad: string;
   spHasDynScale: boolean;
   spRotExpr: string | null;
-  xEnv: EnvelopeSpec | undefined;
-  yEnv: EnvelopeSpec | undefined;
+  xEnv: boolean;
+  yEnv: boolean;
   baseCenterX: number;
   baseCenterY: number;
   spSpatialFilters: string[];
@@ -105,28 +118,26 @@ function buildSpineClipFilterChain(
     incomingTransition,
   } = params;
 
-  const spSxEnv = clip.envelopes.find((e) => e.parameter === "placement.scale_x");
-  const spSyEnv = clip.envelopes.find((e) => e.parameter === "placement.scale_y");
-  const spSxExpr = compileEnvelopeToFfmpegExpr({ envelope: spSxEnv, timeBaseOffsetMs: 0, mode: "raw" });
-  const spSyExpr = compileEnvelopeToFfmpegExpr({ envelope: spSyEnv, timeBaseOffsetMs: 0, mode: "raw" });
+  const spSxExpr = compilePlacementChannelExpr(clip, "scale_x", { timeBaseOffsetMs: 0, mode: "raw" });
+  const spSyExpr = compilePlacementChannelExpr(clip, "scale_y", { timeBaseOffsetMs: 0, mode: "raw" });
   const incomingScaleFactor = incomingTransitionScaleFactor(incomingTransition);
   const spHasDynScale = Boolean(spSxExpr || spSyExpr || incomingScaleFactor);
-  const xEnv = clip.envelopes.find((e) => e.parameter === "placement.x_pct");
-  const yEnv = clip.envelopes.find((e) => e.parameter === "placement.y_pct");
+  const xEnv = placementChannelHasEnvelopeInput(clip, "x_pct");
+  const yEnv = placementChannelHasEnvelopeInput(clip, "y_pct");
 
   const targetW = spHasDynScale
     ? renderWidth
-    : Math.max(8, Math.round((renderWidth * Math.abs(clip.placement.scale_x)) / 2) * 2);
+    : Math.max(8, Math.round((renderWidth * Math.abs(placementStaticValue(clip, "scale_x"))) / 2) * 2);
   const targetH = spHasDynScale
     ? renderHeight
-    : Math.max(8, Math.round((renderHeight * Math.abs(clip.placement.scale_y)) / 2) * 2);
-  const spRadAbs = (Math.abs(clip.placement.rotation_deg) * Math.PI) / 180;
+    : Math.max(8, Math.round((renderHeight * Math.abs(placementStaticValue(clip, "scale_y"))) / 2) * 2);
+  const spRadAbs = (Math.abs(placementStaticValue(clip, "rotation_deg")) * Math.PI) / 180;
   const spEffW =
-    Math.abs(clip.placement.rotation_deg) > 0.01
+    Math.abs(placementStaticValue(clip, "rotation_deg")) > 0.01
       ? Math.round(targetW * Math.abs(Math.cos(spRadAbs)) + targetH * Math.abs(Math.sin(spRadAbs)))
       : targetW;
   const spEffH =
-    Math.abs(clip.placement.rotation_deg) > 0.01
+    Math.abs(placementStaticValue(clip, "rotation_deg")) > 0.01
       ? Math.round(targetW * Math.abs(Math.sin(spRadAbs)) + targetH * Math.abs(Math.cos(spRadAbs)))
       : targetH;
   const baseCenterX = Math.round((renderWidth - spEffW) / 2);
@@ -142,6 +153,8 @@ function buildSpineClipFilterChain(
     srcOutSec,
     effectiveRate,
   });
+  // Stage 1b: motion blur (shutter over source frames, before geometry)
+  vFilters.push(...buildSpineClipMotionBlurFilters(clip));
   const spSpatialFilterStartIdx = vFilters.length;
   const clipColorSpec = resolveSourceColorSpec(asset.probe, absAssetPath);
   if (clipColorSpec.isRgb) {
@@ -176,10 +189,20 @@ function buildSpineClipFilterChain(
   if (clip.placement.mirror_y) vFilters.push("vflip");
 
   // Stage 3: colour
-  vFilters.push(...buildSpineClipColorFilters(ctx, { clip, asset, absAssetPath, clipColorSpec }));
-  // Stage 4: per-clip fx chain
+  const colorFilters = buildSpineClipColorFilters(ctx, { clip, asset, absAssetPath, clipColorSpec });
+  vFilters.push(...colorFilters);
+  // Stage 4: per-clip fx chain (one stage shared with lane cues). `keep` entries hold
+  // the clip's alpha aside when it carries one at this point (alpha png / alpha mov).
+  const receivedPixFmt = spineFxReceivedPixFmt(clipColorSpec, asset, colorFilters);
+  const itemHasAlpha = itemCarriesAlphaAtFx(receivedPixFmt, clipColorSpec, asset);
+  const fxParts = buildItemFxStage(ctx, { owner: clip, receivedPixFmt, itemHasAlpha });
+  // Index of the fx stage's exit converter; switched to an RGBA exit below when the chain stays RGBA.
+  const { exitFilterIdx: fxExitIdx } = emitFxStageParts(ctx, vFilters, fxParts);
+
+  // Stage 4b: mask (in the clip's own frame, before placement, so it moves with the clip).
+  // The first mask filter establishes the alpha plane when the chain is still planar YUV.
   vFilters.push(
-    ...buildSpineClipFxFilters(ctx, { clip, asset, absAssetPath, clipColorSpec, targetW, targetH })
+    ...buildSpineClipMaskFilters({ clip, clipColorSpec, targetW, targetH, renderWidth })
   );
 
   // Stage 5: alpha
@@ -197,31 +220,21 @@ function buildSpineClipFilterChain(
   }
 
   // Apply rotation_deg / envelopes with dynamic output bounding box
-  const spRotEnv = clip.envelopes.find((e) => e.parameter === "placement.rotation_deg");
-  const spRotExpr = compileEnvelopeToFfmpegExpr({
-    envelope: spRotEnv,
-    timeBaseOffsetMs: 0,
-    mode: "raw",
-  });
+  const spRotExpr = compilePlacementChannelExpr(clip, "rotation_deg", { timeBaseOffsetMs: 0, mode: "raw" });
   if (spRotExpr) {
     const radExpr = `((${spRotExpr})*PI/180)`;
     vFilters.push(`rotate=a='${radExpr}':ow='rotw(${radExpr})':oh='roth(${radExpr})':c=none`);
-  } else if (Math.abs(clip.placement.rotation_deg) > 0.01) {
-    const rad = ((clip.placement.rotation_deg * Math.PI) / 180).toFixed(4);
+  } else if (Math.abs(placementStaticValue(clip, "rotation_deg")) > 0.01) {
+    const rad = ((placementStaticValue(clip, "rotation_deg") * Math.PI) / 180).toFixed(4);
     vFilters.push(`rotate=${rad}:ow='rotw(${rad})':oh='roth(${rad})':c=none`);
   }
 
-  const spOpEnv = clip.envelopes.find((e) => e.parameter === "placement.opacity");
-  const spOpExpr = compileEnvelopeToFfmpegExpr({
-    envelope: spOpEnv,
-    timeBaseOffsetMs: 0,
-    mode: "raw",
-  });
+  const spOpExpr = compilePlacementChannelExpr(clip, "opacity", { timeBaseOffsetMs: 0, mode: "raw" });
   if (spOpExpr) {
     const opExprT = spOpExpr.replace(/\bt\b/g, "T");
     vFilters.push(`geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='clip(alpha(X,Y)*(${opExprT}),0,255)'`);
-  } else if (clip.placement.opacity < 0.999) {
-    vFilters.push(`colorchannelmixer=aa=${clip.placement.opacity.toFixed(3)}`);
+  } else if (placementStaticValue(clip, "opacity") < 0.999) {
+    vFilters.push(`colorchannelmixer=aa=${placementStaticValue(clip, "opacity").toFixed(3)}`);
   }
 
   return appendSpineClipTransitionsAndScale(ctx, {
@@ -254,6 +267,7 @@ function buildSpineClipFilterChain(
     clipColorSpec,
     spRgbaIdx,
     spUsesRgba,
+    fxExitIdx,
   });
 }
 
@@ -278,8 +292,8 @@ function appendSpineClipTransitionsAndScale(
     spHasDynScale: boolean;
     spRotExpr: string | null;
     spOpExpr: string | null;
-    xEnv: EnvelopeSpec | undefined;
-    yEnv: EnvelopeSpec | undefined;
+    xEnv: boolean;
+    yEnv: boolean;
     baseCenterX: number;
     baseCenterY: number;
     targetW: number;
@@ -289,13 +303,15 @@ function appendSpineClipTransitionsAndScale(
     clipColorSpec: ReturnType<typeof resolveSourceColorSpec>;
     spRgbaIdx: number;
     spUsesRgba: boolean;
+    /** Index of the fx stage's exit converter in `vFilters`, or -1 without fx. */
+    fxExitIdx: number;
   }
 ): {
   clipPad: string;
   spHasDynScale: boolean;
   spRotExpr: string | null;
-  xEnv: EnvelopeSpec | undefined;
-  yEnv: EnvelopeSpec | undefined;
+  xEnv: boolean;
+  yEnv: boolean;
   baseCenterX: number;
   baseCenterY: number;
   spSpatialFilters: string[];
@@ -340,6 +356,7 @@ function appendSpineClipTransitionsAndScale(
     spSpatialFilterStartIdx,
     clipColorSpec,
     spRgbaIdx,
+    fxExitIdx,
   } = params;
   let { spUsesRgba } = params;
 
@@ -352,15 +369,15 @@ function appendSpineClipTransitionsAndScale(
       ? `abs(${spSxExpr})*(${incomingScaleFactor})`
       : `abs(${spSxExpr})`
     : incomingScaleFactor
-      ? `${Math.abs(clip.placement.scale_x)}*(${incomingScaleFactor})`
-      : String(Math.abs(clip.placement.scale_x));
+      ? `${Math.abs(placementStaticValue(clip, "scale_x"))}*(${incomingScaleFactor})`
+      : String(Math.abs(placementStaticValue(clip, "scale_x")));
   const syPart = spSyExpr
     ? incomingScaleFactor
       ? `abs(${spSyExpr})*(${incomingScaleFactor})`
       : `abs(${spSyExpr})`
     : incomingScaleFactor
-      ? `${Math.abs(clip.placement.scale_y)}*(${incomingScaleFactor})`
-      : String(Math.abs(clip.placement.scale_y));
+      ? `${Math.abs(placementStaticValue(clip, "scale_y"))}*(${incomingScaleFactor})`
+      : String(Math.abs(placementStaticValue(clip, "scale_y")));
 
   // Opaque, full-frame, untransformed, transition-less, envelope-less footage spine clips skip the RGBA round-trip.
   if (
@@ -372,23 +389,31 @@ function appendSpineClipTransitionsAndScale(
     !/\.(?:png|webp|gif|mov)$/i.test(absAssetPath) &&
     clip.placement.fit_mode !== "contain" &&
     !spRotExpr &&
-    Math.abs(clip.placement.rotation_deg) <= 0.01 &&
+    Math.abs(placementStaticValue(clip, "rotation_deg")) <= 0.01 &&
     !spOpExpr &&
-    clip.placement.opacity >= 0.999 &&
+    placementStaticValue(clip, "opacity") >= 0.999 &&
     !(outTrans && outTrans.duration_ms > 0) &&
     !(incomingTransition && incomingTransition.duration_ms > 0) &&
     !spHasDynScale &&
     !xEnv &&
     !yEnv &&
-    !clip.envelopes.some((e) => e.parameter.startsWith("placement.")) &&
-    Math.abs(clip.placement.scale_x - 1) < 1e-3 &&
-    Math.abs(clip.placement.scale_y - 1) < 1e-3 &&
-    Math.abs(clip.placement.x_pct) < 0.01 &&
-    Math.abs(clip.placement.y_pct) < 0.01 &&
-    !spineClipEdgeRequiresRgba(clip)
+    !placementHasAnyEnvelopeInput(clip) &&
+    Math.abs(placementStaticValue(clip, "scale_x") - 1) < 1e-3 &&
+    Math.abs(placementStaticValue(clip, "scale_y") - 1) < 1e-3 &&
+    Math.abs(placementStaticValue(clip, "x_pct")) < 0.01 &&
+    Math.abs(placementStaticValue(clip, "y_pct")) < 0.01 &&
+    !spineClipEdgeRequiresRgba(clip) &&
+    !spineClipMaskRequiresRgba(clip)
   ) {
     vFilters.splice(spRgbaIdx, 1);
     spUsesRgba = false;
+  }
+  // Every stage after fx works on RGBA: hand RGBA over directly instead of YUV and back.
+  if (spUsesRgba && fxExitIdx >= 0) {
+    if (!vFilters[fxExitIdx]?.startsWith(SPINE_FX_ENTRY_CONVERTER)) {
+      throw new Error(`internal: fx exit converter of ${clip.id} moved before the RGBA decision`);
+    }
+    vFilters[fxExitIdx] = SPINE_FX_RGBA_EXIT;
   }
 
   // Stage 7: edge mode
@@ -402,10 +427,7 @@ function appendSpineClipTransitionsAndScale(
       hasDynamicScale: spHasDynScale,
       sxPart,
       syPart,
-      xEnv,
-      yEnv,
-      staticXPct: clip.placement.x_pct,
-      staticYPct: clip.placement.y_pct,
+      owner: clip,
       baseCenterX,
       baseCenterY,
       renderWidth,
@@ -456,8 +478,8 @@ function overlaySpineClip(
     clipPad: string;
     spHasDynScale: boolean;
     spRotExpr: string | null;
-    xEnv: EnvelopeSpec | undefined;
-    yEnv: EnvelopeSpec | undefined;
+    xEnv: boolean;
+    yEnv: boolean;
     baseCenterX: number;
     baseCenterY: number;
     spSpatialFilters: string[];
@@ -489,31 +511,29 @@ function overlaySpineClip(
     ? spRotExpr
       ? `(W-w)/2`
       : String(baseCenterX)
-    : compileEnvelopeToFfmpegExpr({
-        envelope: xEnv,
+    : compilePlacementChannelExpr(clip, "x_pct", {
         timeBaseOffsetMs: clip.timeline_in_ms,
         mode: "pixel_offset",
         baseCenterPx: baseCenterX,
         canvasDimPx: renderWidth,
       }) ??
       (spRotExpr
-        ? `(W-w)/2+${Math.round((clip.placement.x_pct / 100) * renderWidth)}`
-        : String(Math.round(baseCenterX + (clip.placement.x_pct / 100) * renderWidth)));
+        ? `(W-w)/2+${Math.round((placementStaticValue(clip, "x_pct") / 100) * renderWidth)}`
+        : String(Math.round(baseCenterX + (placementStaticValue(clip, "x_pct") / 100) * renderWidth)));
 
   let yExpr = spHasDynScale
     ? spRotExpr
       ? `(H-h)/2`
       : String(baseCenterY)
-    : compileEnvelopeToFfmpegExpr({
-        envelope: yEnv,
+    : compilePlacementChannelExpr(clip, "y_pct", {
         timeBaseOffsetMs: clip.timeline_in_ms,
         mode: "pixel_offset",
         baseCenterPx: baseCenterY,
         canvasDimPx: renderHeight,
       }) ??
       (spRotExpr
-        ? `(H-h)/2+${Math.round((clip.placement.y_pct / 100) * renderHeight)}`
-        : String(Math.round(baseCenterY + (clip.placement.y_pct / 100) * renderHeight)));
+        ? `(H-h)/2+${Math.round((placementStaticValue(clip, "y_pct") / 100) * renderHeight)}`
+        : String(Math.round(baseCenterY + (placementStaticValue(clip, "y_pct") / 100) * renderHeight)));
 
   // Edge mode may change the drawn frame size / content offset
   ({ xExpr, yExpr } = applySpineClipEdgeToOverlay(ctx, { clip, xExpr, yExpr, hasDynamicScale: spHasDynScale }));
@@ -560,11 +580,27 @@ export function compileSpineClip(ctx: VideoGraphCompileContext, i: number): void
 
   const clipStartMs = clip.timeline_in_ms;
   const clipEndMs = clip.timeline_in_ms + clip.duration_ms + holdTailMs;
+  // A still clip whose fx stage would contain an `alpha_keep` part (labelled split/merge
+  // pads) is not baked: `stillSpec.spatialFilters` is a linear list and cannot carry the
+  // wrapper. Plain-chain fx still bakes.
+  const stillFxKeepsAlpha =
+    isStillGraphic(asset) &&
+    fxStageWouldKeepAlpha(seq, paths?.rootDir as string | undefined, clip);
+  // Every envelope counts as today (colour, gain, pixel fx, empty entries) except the
+  // `fx.<id>.*` envelopes of motion layers; a motion-animated channel takes the clip out
+  // of the bake via the resolver condition below.
+  const stillMotionIds = new Set(placementLayers(clip).map((l) => l.id));
+  const stillHasNonMotionEnvelope = clip.envelopes.some((e) => {
+    const m = /^fx\.([^.]+)\./.exec(e.parameter);
+    return !(m && stillMotionIds.has(m[1]));
+  });
   const isStaticStillClip =
     isStillGraphic(asset) &&
-    clip.envelopes.length === 0 &&
+    !stillHasNonMotionEnvelope &&
     (!clip.transition_out || clip.transition_out.duration_ms <= 0) &&
-    (!incomingTransition || incomingTransition.duration_ms <= 0);
+    (!incomingTransition || incomingTransition.duration_ms <= 0) &&
+    !stillFxKeepsAlpha &&
+    !placementAnimatesAny(clip, PLACEMENT_CHANNELS);
   const drawnSpineLayer: DrawnVisualLayer = {
     id: clip.id,
     startMs: clipStartMs,

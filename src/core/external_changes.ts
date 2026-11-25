@@ -433,11 +433,138 @@ export function writeRevertSidecar(paths: WorkspacePaths, sidecar: RevertSidecar
   );
 }
 
+// --- Forced composition scaffold: per-revision sidecar for journal undo/redo ---
+
+/** One file a forced scaffold wrote: its content before (null when it was added) and after. */
+export interface ScaffoldSidecarFile {
+  rel: string;
+  kind: "added" | "modified";
+  pre_sha: string | null;
+  post_sha: string;
+}
+
+/**
+ * Written with the revision that carries a forced scaffold. `operation` is that revision's journal
+ * operation string; undo/redo only act when it matches, so a sidecar can never fire on a later
+ * revision that reuses the number (and pruning deletes it with the revision anyway).
+ */
+export interface ScaffoldSidecar {
+  version: 1;
+  revision: number;
+  operation: string;
+  /** Composition folder, project-relative when inside the project. */
+  dir: string;
+  files: ScaffoldSidecarFile[];
+}
+
+function scaffoldSidecarName(rev: number): string {
+  return `scaffold_rev_${String(rev).padStart(4, "0")}.json`;
+}
+
+export function readScaffoldSidecar(paths: WorkspacePaths, rev: number): ScaffoldSidecar | null {
+  try {
+    const parsed = JSON.parse(
+      fs.readFileSync(path.join(extStateDir(paths), scaffoldSidecarName(rev)), "utf8")
+    ) as ScaffoldSidecar;
+    if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.files)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+export function writeScaffoldSidecar(paths: WorkspacePaths, sidecar: ScaffoldSidecar): void {
+  writeFileAtomically(path.join(extStateDir(paths), scaffoldSidecarName(sidecar.revision)), JSON.stringify(sidecar));
+}
+
+/** Stores `content` as a content blob and returns its sha256. */
+export function storeContentBlob(paths: WorkspacePaths, content: Buffer): string {
+  const sha = hashBuffer(content);
+  ensureContentBlob(paths, sha, content);
+  return sha;
+}
+
+/** sha256 of a file, or null when it does not exist / cannot be read. */
+export function fileSha(absFile: string): string | null {
+  try {
+    return hashBuffer(fs.readFileSync(absFile));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * After Cuthol itself wrote into a mounted composition folder (forced scaffold), record that disk
+ * state as the revision's known state for the composition(s) mounted from `absDir`, so the write is
+ * not reported as an external change. No-op when the folder is not mounted.
+ */
+export function blessCompositionDirAtRevision(
+  paths: WorkspacePaths,
+  seq: CutholSequence,
+  revision: number,
+  absDir: string
+): void {
+  const target = path.resolve(absDir);
+  const keys = listMountedCompositions(seq, paths.rootDir)
+    .filter((c) => path.resolve(c.absDir) === target)
+    .map((c) => c.key);
+  if (keys.length === 0) return;
+  const committed = readRevManifest(paths, revision);
+  const fresh = snapshotCompDiskState(seq, paths, committed);
+  const merged: Record<string, CompKnownState> = { ...(committed?.compositions ?? {}) };
+  for (const key of keys) {
+    if (fresh[key]) merged[key] = fresh[key];
+  }
+  writeRevManifest(paths, revision, merged);
+}
+
+function restoreScaffoldTraversal(
+  paths: WorkspacePaths,
+  direction: "undo" | "redo",
+  sidecar: ScaffoldSidecar
+): string | null {
+  const absDir = path.isAbsolute(sidecar.dir) ? sidecar.dir : path.resolve(paths.rootDir, sidecar.dir);
+  const restored: string[] = [];
+  const skipped: string[] = [];
+  for (const f of sidecar.files) {
+    const full = path.join(absDir, f.rel);
+    const now = fileSha(full);
+    const expect = direction === "undo" ? f.post_sha : f.pre_sha;
+    if (now !== expect) {
+      skipped.push(f.rel);
+      continue;
+    }
+    try {
+      if (direction === "undo" && f.kind === "added") {
+        fs.unlinkSync(full);
+      } else {
+        const targetSha = direction === "undo" ? f.pre_sha! : f.post_sha;
+        const content = readContentBlob(paths, targetSha);
+        if (!content) {
+          skipped.push(`${f.rel} (stored content missing)`);
+          continue;
+        }
+        fs.mkdirSync(path.dirname(full), { recursive: true });
+        writeFileAtomically(full, content);
+      }
+      restored.push(f.rel);
+    } catch {
+      skipped.push(f.rel);
+    }
+  }
+  if (restored.length === 0 && skipped.length === 0) return null;
+  const verb = direction === "undo" ? "restored the files the scaffold overwrote" : "re-applied the scaffold";
+  return (
+    `${sidecar.dir}: ${verb} (${restored.length})` +
+    (skipped.length > 0 ? `; left alone because they changed since: ${skipped.slice(0, 5).join(", ")}` : "")
+  );
+}
+
 /** Deletes known-state files of pruned (undone-then-overwritten) revisions. */
 export function pruneExtchangeRevisions(paths: WorkspacePaths, prunedRevs: number[]): void {
   const dir = extStateDir(paths);
   for (const rev of prunedRevs) {
-    for (const name of [revManifestName(rev), revertSidecarName(rev)]) {
+    for (const name of [revManifestName(rev), revertSidecarName(rev), scaffoldSidecarName(rev)]) {
       try {
         fs.unlinkSync(path.join(dir, name));
       } catch {
@@ -1861,6 +1988,11 @@ export function restoreForJournalTraversal(
       if (note) notes.push({ revision: rev, note });
     } else if (op.startsWith(REVERT_OPERATION_PREFIX)) {
       const note = restoreRevertTraversal(paths, direction, rev, targetRevision);
+      if (note) notes.push({ revision: rev, note });
+    }
+    const scaffold = readScaffoldSidecar(paths, rev);
+    if (scaffold && scaffold.operation === op) {
+      const note = restoreScaffoldTraversal(paths, direction, scaffold);
       if (note) notes.push({ revision: rev, note });
     }
   }

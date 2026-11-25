@@ -16,6 +16,7 @@ import {
 } from "./blocks.js";
 import { deltaE2000, rgbToLab } from "./math.js";
 import { evaluateEnvelopeAt } from "../sequence/spine_envelope.js";
+import { placementHasAnyEnvelopeInput, placementStaticValue } from "../sequence/placement_resolve.js";
 import { probeStandaloneVideoColorMetadata, resolveSourceColorSpec } from "../library/probe.js";
 import { buildSourceScaleFilter } from "../compositor/compile_color.js";
 import { inputTransformFilters } from "./input_transform.js";
@@ -150,14 +151,14 @@ function geometryModeOf(
     pl.crop === null &&
     !pl.mirror_x &&
     !pl.mirror_y &&
-    pl.rotation_deg === 0 &&
-    pl.x_pct === 0 &&
-    pl.y_pct === 0 &&
-    pl.scale_x === 1 &&
-    pl.scale_y === 1;
+    placementStaticValue(clip, "rotation_deg") === 0 &&
+    placementStaticValue(clip, "x_pct") === 0 &&
+    placementStaticValue(clip, "y_pct") === 0 &&
+    placementStaticValue(clip, "scale_x") === 1 &&
+    placementStaticValue(clip, "scale_y") === 1;
   if (!isDefault) return "custom";
   // Animated geometry moves the crop window: do not replicate a moving frame.
-  if (envelopes.some((e) => e.parameter.startsWith("placement."))) return "custom";
+  if (placementHasAnyEnvelopeInput({ placement: clip.placement, envelopes, fx: clip.fx })) return "custom";
   return "default-cover";
 }
 
@@ -237,7 +238,8 @@ function checkFrameVf(
   asset: CutholSequence["library"][number] | undefined
 ): string {
   const colorProbe = asset?.probe ?? probeStandaloneVideoColorMetadata(file);
-  const spec = resolveSourceColorSpec(colorProbe, file);
+  // No full-range pin here: this one-shot decode keeps `yuvj*` and converts once (see frames.ts).
+  const spec = { ...resolveSourceColorSpec(colorProbe, file), fitPixFmt: undefined };
   const pre = asset ? inputTransformFilters(asset) : [];
   return [
     ...pre,

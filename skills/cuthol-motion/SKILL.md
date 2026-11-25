@@ -24,7 +24,10 @@ audio energy and cuts **in the composition's own seconds** (0 = cue start).
    `assets/cuthol-runtime.js`, `assets/cuthol-data.js`. Other presets
    (`counter`, `beat_cards`, `audio_glow`, `cut_phases`, `lower_third`,
    `title_card`, `stat_callout`, `badge_overlay`) are examples to read and
-   adapt. Full template: `references/api.md`.
+   adapt. Full template: `references/api.md`. Scaffolding again over a
+   folder whose files you edited stops with G215 (nothing written); pass
+   `force=true` only to discard those edits (`workspace.journal undo` brings
+   them back).
 2. Write your animation into `index.html` — with your file tools, or
    `composition.write(comp_dir, content)` over MCP (`composition.read` reads;
    both are MCP-only, no CLI form).

@@ -6,7 +6,12 @@
 // the overlay offset (centered base + x/y percent). Per-frame placement values come from
 // the cue envelopes evaluated at the frame's local time.
 import { LaneCue } from "../core/schema.js";
-import { evaluateEnvelopeAt } from "../sequence/spine.js";
+import {
+  placementChannelAnimates,
+  placementStaticValue,
+  placementValueAt,
+  type PlacementChannel,
+} from "../sequence/placement_resolve.js";
 
 export interface CoordsBox {
   x: number;
@@ -32,24 +37,18 @@ export interface CoordsMapContext {
 
 /** Placement values at a frame's local cue time (envelopes evaluated, statics otherwise). */
 export function resolvePlacementAtLocalMs(cue: LaneCue, localMs: number): ResolvedPlacement {
-  const at = (param: string, fallback: number): number => {
-    const env = cue.envelopes.find((e) => e.parameter === param);
-    if (!env || env.points.length === 0) return fallback;
-    const v = evaluateEnvelopeAt(env, localMs);
-    return Number.isFinite(v) ? v : fallback;
-  };
+  const at = (channel: PlacementChannel): number => placementValueAt(cue, channel, localMs, { nonFinite: "static" });
   return {
-    x_pct: at("placement.x_pct", cue.placement.x_pct),
-    y_pct: at("placement.y_pct", cue.placement.y_pct),
-    scale_x: at("placement.scale_x", cue.placement.scale_x),
-    scale_y: at("placement.scale_y", cue.placement.scale_y),
-    rotation_deg: at("placement.rotation_deg", cue.placement.rotation_deg),
+    x_pct: at("x_pct"),
+    y_pct: at("y_pct"),
+    scale_x: at("scale_x"),
+    scale_y: at("scale_y"),
+    rotation_deg: at("rotation_deg"),
   };
 }
 
-function hasEnvelope(cue: LaneCue, param: string): boolean {
-  const env = cue.envelopes.find((e) => e.parameter === param);
-  return Boolean(env && env.points.length > 0);
+function hasEnvelope(cue: LaneCue, channel: PlacementChannel): boolean {
+  return placementChannelAnimates(cue, channel);
 }
 
 function evenRoundedTarget(stageDim: number, scale: number): number {
@@ -101,7 +100,7 @@ export function mapLocalBoxToStage(
   // Scale filter target (`compile_lane.ts` targetW/targetH): static scale uses the
   // even-rounded size; dynamic (enveloped) scale keeps the full frame and scales
   // in-stream with exact values, which equals the static formula with per-frame values.
-  const hasDynScale = hasEnvelope(cue, "placement.scale_x") || hasEnvelope(cue, "placement.scale_y");
+  const hasDynScale = hasEnvelope(cue, "scale_x") || hasEnvelope(cue, "scale_y");
   const targetW = hasDynScale ? stageWidth : evenRoundedTarget(stageWidth, sx);
   const targetH = hasDynScale ? stageHeight : evenRoundedTarget(stageHeight, sy);
   const scaledX = (ox * targetW) / Math.max(1, stageWidth);
@@ -155,7 +154,9 @@ export function mapLocalBoxToStage(
   // Overlay offset (`compile_lane.ts` xExpr/yExpr). Static placement rounds to whole
   // pixels; enveloped parameters evaluate exactly (the compiler carries the sub-pixel
   // part in-stream and the overlay position evaluates the same expression).
-  const staticRot = Number.isFinite(cue.placement.rotation_deg) ? cue.placement.rotation_deg : 0;
+  const staticRot = Number.isFinite(placementStaticValue(cue, "rotation_deg"))
+    ? placementStaticValue(cue, "rotation_deg")
+    : 0;
   const staticRotAbs = (Math.abs(staticRot) * Math.PI) / 180;
   const staticEffW =
     Math.abs(staticRot) > 0.01
@@ -167,15 +168,15 @@ export function mapLocalBoxToStage(
       : targetH;
   const baseCenterX = Math.round((stageWidth - staticEffW) / 2);
   const baseCenterY = Math.round((stageHeight - staticEffH) / 2);
-  const staticDx = Number.isFinite(cue.placement.x_pct)
-    ? (cue.placement.x_pct / 100) * stageWidth
+  const staticDx = Number.isFinite(placementStaticValue(cue, "x_pct"))
+    ? (placementStaticValue(cue, "x_pct") / 100) * stageWidth
     : 0;
-  const staticDy = Number.isFinite(cue.placement.y_pct)
-    ? (cue.placement.y_pct / 100) * stageHeight
+  const staticDy = Number.isFinite(placementStaticValue(cue, "y_pct"))
+    ? (placementStaticValue(cue, "y_pct") / 100) * stageHeight
     : 0;
-  const hasXEnv = hasEnvelope(cue, "placement.x_pct");
-  const hasYEnv = hasEnvelope(cue, "placement.y_pct");
-  const hasRotEnv = hasEnvelope(cue, "placement.rotation_deg");
+  const hasXEnv = hasEnvelope(cue, "x_pct");
+  const hasYEnv = hasEnvelope(cue, "y_pct");
+  const hasRotEnv = hasEnvelope(cue, "rotation_deg");
   const dxNow = (dxPct / 100) * stageWidth;
   const dyNow = (dyPct / 100) * stageHeight;
 

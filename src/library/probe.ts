@@ -100,6 +100,31 @@ export interface SourceColorSpec {
   inRange: FfmpegColorRange;
   sourceRule: "tagged" | "heuristic_hd" | "heuristic_sd" | "rgb" | "hf_default";
   note?: string;
+  /**
+   * Pixel formats the fit scale may output (`|`-separated), when ffmpeg's own choice must be
+   * restricted. Set for full-range `yuvj*` sources: ffmpeg keeps a `yuvj*` input in its full-range
+   * format (ignoring `out_range=tv`) unless a later filter rejects it, so the range conversion would
+   * move depending on which filters follow. Excluding the `yuvj*` formats makes it happen in the fit
+   * scale, while the next filter still picks its own format from the list (a single forced format
+   * would add a default-precision converter whenever the next filter wants another one, e.g. the
+   * LUT stage's 4:4:4).
+   */
+  fitPixFmt?: string;
+}
+
+/** 8-bit pixel formats a full-range `yuvj*` source may leave the fit scale in: everything but `yuvj*`. */
+export const NON_FULL_RANGE_FIT_PIX_FMTS = [
+  "yuv420p", "yuv422p", "yuv444p", "yuv440p", "yuv411p", "yuv410p",
+  "yuva420p", "yuva422p", "yuva444p", "gray",
+  "gbrp", "gbrap", "rgb24", "bgr24", "rgba", "bgra", "argb", "abgr", "rgb0", "bgr0", "0rgb", "0bgr",
+].join("|");
+
+/**
+ * Limited-range twin of a full-range `yuvj*` pixel format (`yuvj420p` → `yuv420p`); any other
+ * format is returned unchanged.
+ */
+export function limitedRangePixFmt(pixFmt: string): string {
+  return pixFmt.startsWith("yuvj") ? `yuv${pixFmt.slice(4)}` : pixFmt;
 }
 
 const probeMemoryCacheBySha = new Map<string, ProbeMetadata>();
@@ -123,6 +148,17 @@ function normalizeColorTag(raw?: unknown): string | null {
 }
 
 export function resolveSourceColorSpec(
+  probe?: Partial<ProbeMetadata> | null,
+  filePath?: string,
+  options?: { isHyperFramesBlob?: boolean }
+): SourceColorSpec {
+  const spec = resolveSourceColorSpecBase(probe, filePath, options);
+  const pix = (probe?.pix_fmt ?? "").toLowerCase().trim();
+  if (!spec.isRgb && pix.startsWith("yuvj")) spec.fitPixFmt = NON_FULL_RANGE_FIT_PIX_FMTS;
+  return spec;
+}
+
+function resolveSourceColorSpecBase(
   probe?: Partial<ProbeMetadata> | null,
   filePath?: string,
   options?: { isHyperFramesBlob?: boolean }

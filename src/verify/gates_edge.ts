@@ -2,14 +2,9 @@
 // G4_STAGE block (one line in gates.ts); the G121 finding is still attributed to G1_SCHEMA.
 import { CutholDiagnostic, DIAGNOSTICS } from "../core/diagnostics.js";
 import { CutholSequence } from "../core/schema.js";
+import { placementAnimatesAny, type PlacementChannel } from "../sequence/placement_resolve.js";
 
-const MOTION_PARAMETERS = new Set([
-  "placement.x_pct",
-  "placement.y_pct",
-  "placement.scale_x",
-  "placement.scale_y",
-  "placement.rotation_deg",
-]);
+const MOTION_CHANNELS: readonly PlacementChannel[] = ["x_pct", "y_pct", "scale_x", "scale_y", "rotation_deg"];
 
 /**
  * True when the clip's resting placement already covers the whole stage and nothing ever moves it: no pan/scale/
@@ -23,7 +18,7 @@ function isStaticFullCover(seq: CutholSequence, index: number): boolean {
   if (Math.abs(p.x_pct) >= 0.01 || Math.abs(p.y_pct) >= 0.01) return false;
   if (Math.abs(p.rotation_deg) >= 0.01) return false;
   if (p.fit_mode === "contain") return false;
-  if (clip.envelopes.some((e) => e.points.length > 0 && MOTION_PARAMETERS.has(e.parameter))) return false;
+  if (placementAnimatesAny(clip, MOTION_CHANNELS)) return false;
   if (clip.transition_out && clip.transition_out.duration_ms > 0) return false;
   const incoming = index > 0 ? seq.spine.clips[index - 1].transition_out : null;
   if (incoming && incoming.duration_ms > 0) return false;

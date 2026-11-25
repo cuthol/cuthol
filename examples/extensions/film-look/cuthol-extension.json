@@ -20,6 +20,7 @@
     },
     "rgb_split": {
       "description": "Opposite red/blue channel shift (chromatic aberration).",
+      "alpha": "process",
       "params": {
         "shift_r": { "type": "number", "default": 6, "min": -40, "max": 40 },
         "shift_b": { "type": "number", "default": -6, "min": -40, "max": 40 }
@@ -28,6 +29,7 @@
     },
     "soft_focus": {
       "description": "Plain blur (static strength).",
+      "alpha": "process",
       "params": {
         "sigma": { "type": "number", "default": 2, "min": 0, "max": 20 }
       },

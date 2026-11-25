@@ -15,16 +15,18 @@ import {
   AGENT_IDS,
   SKILL_MARKER_FILE,
   detectAgentTargets,
+  formatSkillsHint,
   installSkills,
+  isSkillsHintHidden,
   isValidAgentId,
   listSkillsStatus,
-  maybeAutoInstallSkills,
-  readAutoInstallMarker,
   removeSkills,
   resolvePackageSkillsDir,
   resolveSelectedTargets,
   scanSkills,
+  skillsWarningIds,
 } from "../core/skills_install.js";
+import { computeSkillsHint, CutholMcpServer } from "../mcp/server.js";
 
 const CLI = path.resolve(process.cwd(), "dist/cli.js");
 const HOME_VARS = ["HOME", "USERPROFILE", "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR", "CODEX_HOME"] as const;
@@ -307,99 +309,181 @@ test("skills install: --dir installs into a custom skills folder", () => {
   assert.equal((JSON.parse(checked.stdout) as { up_to_date: boolean }).up_to_date, true);
 });
 
-test("skills install: auto-install runs once on first command, then stays silent", () => {
-  const home = makeTempHome("cuthol-skills-auto-");
+function listFilesRecursiveForProof(root: string): string[] {
+  const out: string[] = [];
+  const stack: string[] = [root];
+  while (stack.length > 0) {
+    const current = stack.pop() as string;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) stack.push(full);
+      else out.push(path.relative(root, full));
+    }
+  }
+  return out.sort();
+}
+
+test("skills install: no CLI command and no MCP start writes into agent tool folders", async () => {
+  const home = makeTempHome("cuthol-skills-noauto-");
   fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
   fs.mkdirSync(path.join(home, ".codex"), { recursive: true });
-
-  const first = runCli(["skills", "list"], home, { CUTHOL_SKILLS_AUTO: "1" });
-  assert.equal(first.status, 0, first.stderr || first.stdout);
-  assert.match(
-    first.stderr,
-    /Installed Cuthol skills for: claude-code, codex\. Start a new session to load them\./
-  );
-  assert.ok(fs.existsSync(path.join(home, ".claude", "skills", "cuthol", "SKILL.md")));
-  assert.ok(fs.existsSync(path.join(home, ".codex", "skills", "cuthol", "SKILL.md")));
-  const markerFile = path.join(home, ".cuthol", "skills-installed.json");
-  assert.ok(fs.existsSync(markerFile));
-
-  const second = runCli(["skills", "list"], home, { CUTHOL_SKILLS_AUTO: "1" });
-  assert.equal(second.status, 0, second.stderr || second.stdout);
-  assert.doesNotMatch(second.stderr, /Installed Cuthol skills for/);
-});
-
-test("skills install: CUTHOL_SKILLS_AUTO=0 disables auto-install", () => {
-  const home = makeTempHome("cuthol-skills-auto-off-");
-  fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
-  const res = runCli(["skills", "list"], home, { CUTHOL_SKILLS_AUTO: "0" });
-  assert.equal(res.status, 0, res.stderr || res.stdout);
+  for (const value of ["1", "unset"]) {
+    const before = listFilesRecursiveForProof(home);
+    const savedAuto = process.env.CUTHOL_SKILLS_AUTO;
+    if (value === "unset") delete process.env.CUTHOL_SKILLS_AUTO;
+    else process.env.CUTHOL_SKILLS_AUTO = value;
+    try {
+      // No `setup` here: its dry run asks the real `claude` CLI on PATH for a
+      // version, and that external tool writes its own files under the home
+      // folder. `setup` is covered by the dedicated tests below.
+      for (const args of [["skills", "list"], ["skills", "check"], ["doctor"], ["help"]]) {
+        const res = runCli(args, home, { CI: "1" });
+        assert.equal(res.status, 0, `${args.join(" ")}: ${res.stderr || res.stdout}`);
+      }
+    } finally {
+      if (savedAuto === undefined) delete process.env.CUTHOL_SKILLS_AUTO;
+      else process.env.CUTHOL_SKILLS_AUTO = savedAuto;
+    }
+    const restore = redirectHome(home);
+    try {
+      if (value === "unset") delete process.env.CUTHOL_SKILLS_AUTO;
+      else process.env.CUTHOL_SKILLS_AUTO = value;
+      const server = new CutholMcpServer({ skillsNote: computeSkillsHint() });
+      await server.callTool("no-such-tool", {});
+    } finally {
+      restore();
+    }
+    const after = listFilesRecursiveForProof(home);
+    assert.deepEqual(after, before, `CUTHOL_SKILLS_AUTO=${value}: files appeared under the temp home`);
+  }
   assert.ok(!fs.existsSync(path.join(home, ".claude", "skills")));
+  assert.ok(!fs.existsSync(path.join(home, ".codex", "skills")));
   assert.ok(!fs.existsSync(path.join(home, ".cuthol", "skills-installed.json")));
 });
 
-test("skills install: auto-install failure never breaks the command", () => {
-  const home = makeTempHome("cuthol-skills-auto-fail-");
-  fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
-  const res = runCli(["help"], home, {
-    CUTHOL_SKILLS_AUTO: "1",
-    CUTHOL_SKILLS_DIR: path.join(home, "does-not-exist"),
-  });
-  assert.equal(res.status, 0, res.stderr || res.stdout);
-  assert.match(res.stdout, /Cuthol/);
-
-  const restore = redirectHome(home);
-  try {
-    process.env.CUTHOL_SKILLS_DIR = path.join(home, "does-not-exist");
-    withAuto("1", () => {
-      assert.equal(maybeAutoInstallSkills(), null);
-    });
-    delete process.env.CUTHOL_SKILLS_DIR;
-  } finally {
-    restore();
-  }
-});
-
-test("skills install: settled auto-install hook overhead is milliseconds", () => {
-  const home = makeTempHome("cuthol-skills-auto-fast-");
+test("skills install: CUTHOL_SKILLS_AUTO=0 hides the hint, other values change nothing", () => {
+  const home = makeTempHome("cuthol-skills-autoval-");
   const restore = redirectHome(home);
   try {
     fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
-    withAuto("1", () => {
-      const note = maybeAutoInstallSkills();
-      assert.ok(note && note.includes("claude-code"));
-      assert.ok(readAutoInstallMarker());
-      const started = performance.now();
-      const runs = 5;
-      for (let i = 0; i < runs; i++) {
-        assert.equal(maybeAutoInstallSkills(), null);
-      }
-      const avgMs = (performance.now() - started) / runs;
-      console.log(`auto-install settled hook: ${avgMs.toFixed(2)} ms/run`);
-      assert.ok(avgMs < 100, `settled hook took ${avgMs.toFixed(2)} ms/run`);
+    withAuto("0", () => {
+      assert.equal(isSkillsHintHidden(), true);
+      assert.equal(computeSkillsHint(), null);
     });
+    for (const value of ["1", "true", "yes"]) {
+      withAuto(value, () => {
+        assert.equal(isSkillsHintHidden(), false);
+      });
+    }
+    delete process.env.CUTHOL_SKILLS_AUTO;
+    assert.equal(isSkillsHintHidden(), false);
   } finally {
     restore();
   }
 });
 
-test("skills install: auto-install re-runs when the package skills change within one version", () => {
-  const home = makeTempHome("cuthol-skills-edit-");
-  fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
-  const pkg = makeTempHome("cuthol-skills-pkg-");
-  fs.mkdirSync(path.join(pkg, "demo"), { recursive: true });
-  const skillFile = path.join(pkg, "demo", "SKILL.md");
-  fs.writeFileSync(skillFile, "---\nname: demo\ndescription: first\n---\n\n# Demo\n", "utf8");
+test("skills install: outdated skills warn; modified skills never warn", () => {
+  const home = makeTempHome("cuthol-skills-warnrule-");
   const restore = redirectHome(home);
   try {
-    withAuto("1", () => {
-      assert.match(maybeAutoInstallSkills({ homeDir: home, skillsDir: pkg, packageVersion: "9.9.9" }) ?? "", /claude-code/);
-      assert.equal(maybeAutoInstallSkills({ homeDir: home, skillsDir: pkg, packageVersion: "9.9.9" }), null);
-      fs.writeFileSync(skillFile, "---\nname: demo\ndescription: second, longer text\n---\n\n# Demo v2\n", "utf8");
-      assert.match(maybeAutoInstallSkills({ homeDir: home, skillsDir: pkg, packageVersion: "9.9.9" }) ?? "", /claude-code/);
-      const installed = fs.readFileSync(path.join(home, ".claude", "skills", "demo", "SKILL.md"), "utf8");
-      assert.match(installed, /Demo v2/);
-    });
+    fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
+    fs.mkdirSync(path.join(home, ".codex"), { recursive: true });
+    installSkills({ packageVersion: "0.0.1-test" });
+    // A user edit in one tool: with the same package version that tool has
+    // only installed/modified skills, so nothing fires for it.
+    fs.appendFileSync(path.join(home, ".codex", "skills", "cuthol", "SKILL.md"), "\n<!-- user note -->\n");
+    const edited = listSkillsStatus({ packageVersion: "0.0.1-test" });
+    assert.deepEqual(skillsWarningIds(edited), []);
+    // A version change marks the untouched skills outdated, which does fire.
+    const stale = listSkillsStatus({ packageVersion: "0.0.2-test" });
+    assert.deepEqual(skillsWarningIds(stale), ["claude-code", "codex"]);
+    const hint = formatSkillsHint(["claude-code"]);
+    assert.ok(hint.includes("claude-code"));
+    assert.ok(hint.includes("cuthol skills install --agent <id>"));
+    assert.ok(hint.includes("CUTHOL_SKILLS_AUTO=0"));
   } finally {
     restore();
   }
+});
+
+test("skills install: MCP hint fires once when skills are missing, never when current", async () => {
+  const home = makeTempHome("cuthol-skills-mcphint-");
+  const restore = redirectHome(home);
+  try {
+    fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
+    delete process.env.CUTHOL_SKILLS_AUTO;
+    const missing = computeSkillsHint();
+    assert.ok(missing?.includes("claude-code"), `hint must name the tool: ${missing}`);
+    const server = new CutholMcpServer({ skillsNote: missing });
+    const first = await server.callTool("no-such-tool", {});
+    assert.ok(
+      typeof first.content[0]?.text === "string" && first.content[0].text.startsWith(missing as string),
+      "first tool response carries the hint"
+    );
+    const second = await server.callTool("no-such-tool", {});
+    assert.ok(
+      typeof second.content[0]?.text === "string" && !second.content[0].text.includes("Cuthol skills are outdated"),
+      "second tool response carries no hint"
+    );
+    withAuto("0", () => {
+      assert.equal(computeSkillsHint(), null);
+    });
+    installSkills();
+    assert.equal(computeSkillsHint(), null, "no hint when skills are current");
+  } finally {
+    restore();
+  }
+});
+
+test("skills install: hint computation never throws", () => {
+  const home = makeTempHome("cuthol-skills-hintthrow-");
+  const restore = redirectHome(home);
+  try {
+    fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
+    fs.writeFileSync(path.join(home, ".claude", "skills"), "blocking file", "utf8");
+    delete process.env.CUTHOL_SKILLS_AUTO;
+    assert.doesNotThrow(() => computeSkillsHint());
+  } finally {
+    restore();
+  }
+});
+
+test("skills install: install and setup --apply without --agent write nothing and print the per-tool command", () => {
+  const home = makeTempHome("cuthol-skills-noagent-");
+  fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
+  fs.mkdirSync(path.join(home, ".codex"), { recursive: true });
+  const installed = runCli(["skills", "install"], home, { CUTHOL_SKILLS_AUTO: "0", CI: "1" });
+  assert.equal(installed.status, 0, installed.stderr || installed.stdout);
+  const env = JSON.parse(installed.stdout) as { targets: unknown[]; commands: string[] };
+  assert.deepEqual(env.targets, []);
+  assert.ok(env.commands.some((c) => c === "cuthol skills install --agent claude-code"));
+  assert.ok(env.commands.some((c) => c === "cuthol skills install --agent codex"));
+  assert.ok(!fs.existsSync(path.join(home, ".claude", "skills")));
+  assert.ok(!fs.existsSync(path.join(home, ".codex", "skills")));
+
+  const dry = runCli(["setup"], home, { CUTHOL_SKILLS_AUTO: "0", CI: "1" });
+  assert.equal(dry.status, 0, dry.stderr || dry.stdout);
+  assert.match(dry.stdout, /skills claude-code: /);
+  assert.match(dry.stdout, /cuthol skills install --agent claude-code/);
+  assert.ok(!fs.existsSync(path.join(home, ".claude", "skills")));
+});
+
+test("skills install: setup --agent applies the skills step for that tool only", () => {
+  const home = makeTempHome("cuthol-skills-setupagent-");
+  fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
+  fs.mkdirSync(path.join(home, ".codex"), { recursive: true });
+  const applied = runCli(["setup", "--agent", "claude-code", "--apply"], home, {
+    CUTHOL_SKILLS_AUTO: "0",
+    CI: "1",
+  });
+  assert.equal(applied.status, 0, applied.stderr || applied.stdout);
+  assert.match(applied.stdout, /skills claude-code: /);
+  assert.ok(fs.existsSync(path.join(home, ".claude", "skills", "cuthol", "SKILL.md")));
+  assert.ok(!fs.existsSync(path.join(home, ".codex", "skills")));
 });

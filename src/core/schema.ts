@@ -202,6 +202,8 @@ export interface ClipFxSpec {
   params: Record<string, EffectParamValue>;
   /** Omitted = true. */
   enabled?: boolean;
+  /** Set when a preset wrote this entry. Informational: render never reads it. */
+  preset?: import("../effects/effect_types.js").PresetProvenance;
 }
 
 export interface ParameterEnvelope {
@@ -217,6 +219,9 @@ export interface ParameterEnvelope {
     | "treatments.color_grade.contrast"
     | "treatments.color_grade.saturation"
     | `fx.${string}.${string}`
+    /** Mask and motion blur fields: `treatments.mask.<field>`, `treatments.motion_blur.<field>`. */
+    | `treatments.mask.${string}`
+    | `treatments.motion_blur.${string}`
     /** Colour stage parameter: `color.<block>.<field>`, `color.<block>.amount`, `color.hsl.<id>.<field>`. */
     | `color.${string}`;
   points: ParameterEnvelopePoint[];
@@ -321,6 +326,8 @@ export interface LaneCue {
   composition_audio?: CompositionAudioMode;
   /** Colour stage of a visual (footage/image) cue, same model as a spine clip's `treatments.color`. */
   color?: ColorStageSpec;
+  /** Per-cue effect chain, applied in order, same model as a spine clip's `fx`. Omitted = none. */
+  fx?: ClipFxSpec[];
   envelopes: ParameterEnvelope[];
 }
 

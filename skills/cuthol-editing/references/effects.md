@@ -21,6 +21,15 @@ missing/unreadable/outside-project is G414 and blocks render). A keyframed
 brightness/contrast/saturation envelope (CLI `cuthol spine envelope --param
 treatments.color_grade.*`) overrides the matching constant in the render.
 
+## Effect catalog (`spine.fx_catalog`)
+
+`fx_catalog()` — every available effect on one line:
+`kind role=<clip|transition> backend=<ffmpeg|shader|spine> live=<native|server>
+animatable=[...] params={name:type[min..max]=default,...}`. Builtins: transitions
+`dissolve`, `fade`, `wipe_left`, `wipe_right`, `slide_up`, `zoom_in` and the raw
+`ffmpeg` chain (`params.filter`); plus each enabled extension's `fx` and
+`transitions` (`ext:<ext>/<name>` with manifest params/`animatable`).
+
 ## Per-clip effects (`spine.fx`)
 
 `fx_add(clip, kind|filter, params?)` / `fx_set(clip, fx, params?|filter?)` /
@@ -31,6 +40,57 @@ filter graph after colour (source asset untouched, transcript bindings stay).
 Params merge on set; ids are `fx_XX` per clip. Animate only manifest-declared
 `animatable` params via `envelope(clip, param="fx.<id>.<param>", ...)` (G119
 otherwise). Unknown kinds/params are G118, drifted extensions warn G411.
+`fx_set(clip, fx, enabled=false)` disables an entry without removing it
+(`true` re-enables); `fx_list` groups `motion` layers separately.
+
+## Motion layers (`kind="motion"`)
+
+A `motion` fx entry is not a pixel effect: it is a placement layer on the same
+item (spine clip or lane cue). Add one per moving part, animate it with points
+on `fx.<id>.<channel>`, stack two or more; list order is the combine order.
+Channels: `x_pct`, `y_pct`, `scale_x`, `scale_y`, `rotation_deg`, `opacity`.
+`x_pct`/`y_pct`/`rotation_deg` add onto the base (and onto each other);
+`scale_x`/`scale_y`/`opacity` multiply; combined opacity clamps to `[0, 1]`.
+Params hold the static layer value (additive channels default 0,
+multiplicative default 1); a `fx.<id>.<channel>` envelope overrides the static
+value while it has points. `spine.transform` stays the base; layers never touch
+the source asset.
+
+Verify warns (never blocks): combined opacity above 1 is G288 (it is clamped);
+a combined `scale_x`/`scale_y` range crossing or touching 0 is G289.
+
+Read the result: `value(item, param="placement.<channel>", at)` returns the
+effective value plus its breakdown (base value and each layer's value at that
+time; the terms combine to the effective value by the rule above);
+`value(item, param="fx.<id>.<channel>", at)` returns that layer's own value.
+The `brief` canvas lens shows the combined static values with a
+`motion: fx_02(scale_x, opacity), fx_03(x_pct~)` note (`~` = animated);
+`fx_list` shows the same grouping.
+
+Worked example — slow zoom plus a beat punch on one clip (8 s, 30 fps,
+punch at 3.2 s):
+
+```
+cuthol spine fx add --item sp_01 --kind motion --param scale_x=1 --param scale_y=1
+cuthol spine envelope --item sp_01 --param fx.fx_02.scale_x --points "0ms:1.0,8000ms:1.15" --easing ease_in_out
+cuthol spine envelope --item sp_01 --param fx.fx_02.scale_y --points "0ms:1.0,8000ms:1.15" --easing ease_in_out
+cuthol spine fx add --item sp_01 --kind motion --param scale_x=1 --param scale_y=1
+cuthol spine envelope point add --item sp_01 --param fx.fx_03.scale_x --at 0ms --value 1.0
+cuthol spine envelope point add --item sp_01 --param fx.fx_03.scale_y --at 0ms --value 1.0
+cuthol spine envelope point add --item sp_01 --param fx.fx_03.scale_x --at 3200ms --value 1.08
+cuthol spine envelope point add --item sp_01 --param fx.fx_03.scale_y --at 3200ms --value 1.08
+cuthol spine envelope point add --item sp_01 --param fx.fx_03.scale_x --at 3233ms --value 1.0
+cuthol spine envelope point add --item sp_01 --param fx.fx_03.scale_y --at 3233ms --value 1.0
+cuthol spine value --item sp_01 --param placement.scale_x --at 0ms
+cuthol spine value --item sp_01 --param placement.scale_x --at 3200ms
+cuthol spine value --item sp_01 --param placement.scale_x --at 8000ms
+```
+
+The zoom layer multiplies the base scale by 1.0 → 1.15; the punch layer
+multiplies by 1.0 except one frame of 1.08 at the beat (the leading 0 ms
+point matters: envelope evaluation holds the first point value before it, so
+without it the punch would read 1.08 from the start). The 3200 ms readout is
+`zoom(3200ms) x 1.08` and the other two are the zoom value alone.
 
 ## Transitions (`spine.transition`)
 
@@ -66,6 +126,27 @@ rejected at input and by verify.
 Envelope uses beyond motion: duck a music hit with a short `audio_chain.gain_db`
 dip, dip to black with an `opacity` envelope, cut music instantly with a 50 ms
 gain drop, punch in with two scale points 1 frame apart.
+
+## Single keyframes (`spine.envelope_point_add|move|remove`)
+
+`envelope_point_add(clip, param, at, value?, sequence_time?, beat?, beats_of?, easing?)`
+— one keyframe at a time (same validation as `envelope`: unknown params G140,
+times within the item G305); adding at an existing time replaces that point.
+`envelope_point_move(clip, param, at|from, to, value?)` moves one point;
+`envelope_point_remove(clip, param, at)` deletes one point (last point removes
+the envelope entry). `--at` is item-local by default; `--sequence-time` takes
+timeline time (stage tempo included); `--beat <n> --beats-of <aud_XX>` takes a
+beat from that asset's cached grid (no grid: G170; unplaced: G171; placed twice:
+G172). Example: `cuthol spine envelope point add --clip sp_01 --param
+placement.opacity --at 500ms --value 0.5`.
+
+## Value at t (`spine.value`)
+
+`value(item, param, at, sequence_time?)` — render-free value at a time:
+placement params through the placement resolver, other envelopes through the
+envelope evaluator, else the static field or fx param (`source: envelope |
+static`). Example: `cuthol spine value --item sp_01 --param placement.opacity
+--at 500ms`.
 
 ## Reframe (`spine.reframe`)
 

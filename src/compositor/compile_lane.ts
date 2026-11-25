@@ -1,6 +1,4 @@
 // Per-lane filter-graph compilation: HyperFrames composition cues, visual asset cues, and lane typography (split out of compiler.ts).
-import crypto from "node:crypto";
-import fs from "node:fs";
 import path from "node:path";
 import { resolveCueStartMs } from "../core/timeline.js";
 import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
@@ -15,7 +13,7 @@ import {
   resolveSourceColorSpec,
   SourceColorSpec,
 } from "../library/probe.js";
-import { compileTypographyAssFile } from "./ass_generator.js";
+import { compileLaneTypography } from "./compile_lane_typography.js";
 import { syncCompositionBridgeFiles } from "./bridge_exporter.js";
 import {
   isDraftNativeOverlayCapture,
@@ -40,12 +38,28 @@ import {
   BT709_SETPARAMS,
 } from "./compile_color.js";
 import {
-  compileEnvelopeToFfmpegExpr,
+  compilePlacementChannelExpr,
   buildSubpixelScaleOrPanFilters,
   buildSeekableMediaInput,
-  escapeFfmpegFilterPath,
 } from "./compile_filters.js";
+import {
+  buildItemFxStage,
+  emitFxStageParts,
+  fxStageWouldKeepAlpha,
+  itemCarriesAlphaAtFx,
+  itemFxNeedsCheck,
+  pixelFxEntries,
+  spineFxReceivedPixFmt,
+} from "./compile_fx_stage.js";
 import type { DrawnVisualLayer, VideoGraphCompileContext } from "./compiler.js";
+import {
+  PLACEMENT_CHANNELS,
+  placementAnimatesAny,
+  placementChannelHasEnvelopeInput,
+  placementHasAnyEnvelopeInput,
+  placementLayers,
+  placementStaticValue,
+} from "../sequence/placement_resolve.js";
 
 type LaneSpec = CutholSequence["lanes"][number];
 type LaneCueSpec = LaneSpec["cues"][number];
@@ -142,6 +156,9 @@ function prepareCompositionCueInput(
 } {
   const { seq, paths, renderWidth, renderHeight, fps, compileOptions } = ctx;
   const composition = cue.composition!;
+  // With an active fx chain the cue keeps its own frame: the effect must not hit a baked
+  // background, so the opaque-ification below (backdrop or still slice) is skipped.
+  const cueHasActiveFx = pixelFxEntries(cue).length > 0;
   try {
     syncCompositionBridgeFiles(seq, cue, paths);
   } catch {
@@ -156,16 +173,16 @@ function prepareCompositionCueInput(
   const frameDurMs = 1000 / Math.max(1, fps);
 
   const isFullFrameUnscaled =
-    Math.abs(cue.placement.scale_x - 1) < 1e-3 &&
-    Math.abs(cue.placement.scale_y - 1) < 1e-3 &&
-    Math.abs(cue.placement.x_pct) < 1e-3 &&
-    Math.abs(cue.placement.y_pct) < 1e-3 &&
-    Math.abs(cue.placement.rotation_deg) < 1e-3 &&
-    cue.placement.opacity >= 0.999 &&
+    Math.abs(placementStaticValue(cue, "scale_x") - 1) < 1e-3 &&
+    Math.abs(placementStaticValue(cue, "scale_y") - 1) < 1e-3 &&
+    Math.abs(placementStaticValue(cue, "x_pct")) < 1e-3 &&
+    Math.abs(placementStaticValue(cue, "y_pct")) < 1e-3 &&
+    Math.abs(placementStaticValue(cue, "rotation_deg")) < 1e-3 &&
+    placementStaticValue(cue, "opacity") >= 0.999 &&
     !cue.placement.crop &&
     !cue.placement.mirror_x &&
     !cue.placement.mirror_y &&
-    !cue.envelopes.some((e) => e.parameter.startsWith("placement."));
+    !placementHasAnyEnvelopeInput(cue);
 
   const overlappingUnder = ctx.drawnVisualLayers.filter(
     (l) => l.startMs < cueEndMs && l.endMs > cueStartMs
@@ -235,7 +252,7 @@ function prepareCompositionCueInput(
         : undefined;
 
     const keepAlpha = ctx.preset === "master_alpha";
-    if (compMode !== "scene_host" && isFullFrameUnscaled && !hasMovingUnderneath && !keepAlpha) {
+    if (compMode !== "scene_host" && isFullFrameUnscaled && !hasMovingUnderneath && !keepAlpha && !cueHasActiveFx) {
       if (overlappingUnder.length === 0) {
         effectiveTransparent = false;
         opaqueBackdropColor = seq.stage.backdrop.color;
@@ -375,27 +392,25 @@ function compileCompositionLaneCue(
     effectiveTransparent,
   } = prepareCompositionCueInput(ctx, cue, cueStartMs, cueEndMs);
 
-  const hfSxEnv = cue.envelopes.find((e) => e.parameter === "placement.scale_x");
-  const hfSyEnv = cue.envelopes.find((e) => e.parameter === "placement.scale_y");
-  const hfSxExpr = compileEnvelopeToFfmpegExpr({ envelope: hfSxEnv, timeBaseOffsetMs: 0, mode: "raw" });
-  const hfSyExpr = compileEnvelopeToFfmpegExpr({ envelope: hfSyEnv, timeBaseOffsetMs: 0, mode: "raw" });
+  const hfSxExpr = compilePlacementChannelExpr(cue, "scale_x", { timeBaseOffsetMs: 0, mode: "raw" });
+  const hfSyExpr = compilePlacementChannelExpr(cue, "scale_y", { timeBaseOffsetMs: 0, mode: "raw" });
   const hfHasDynScale = Boolean(hfSxExpr || hfSyExpr);
-  const xEnv = cue.envelopes.find((e) => e.parameter === "placement.x_pct");
-  const yEnv = cue.envelopes.find((e) => e.parameter === "placement.y_pct");
+  const hasXEnv = placementChannelHasEnvelopeInput(cue, "x_pct");
+  const hasYEnv = placementChannelHasEnvelopeInput(cue, "y_pct");
 
   const targetW = hfHasDynScale
     ? renderWidth
-    : Math.max(8, Math.round((renderWidth * Math.abs(cue.placement.scale_x)) / 2) * 2);
+    : Math.max(8, Math.round((renderWidth * Math.abs(placementStaticValue(cue, "scale_x"))) / 2) * 2);
   const targetH = hfHasDynScale
     ? renderHeight
-    : Math.max(8, Math.round((renderHeight * Math.abs(cue.placement.scale_y)) / 2) * 2);
-  const hfRadAbs = (Math.abs(cue.placement.rotation_deg) * Math.PI) / 180;
+    : Math.max(8, Math.round((renderHeight * Math.abs(placementStaticValue(cue, "scale_y"))) / 2) * 2);
+  const hfRadAbs = (Math.abs(placementStaticValue(cue, "rotation_deg")) * Math.PI) / 180;
   const hfEffW =
-    Math.abs(cue.placement.rotation_deg) > 0.01
+    Math.abs(placementStaticValue(cue, "rotation_deg")) > 0.01
       ? Math.round(targetW * Math.abs(Math.cos(hfRadAbs)) + targetH * Math.abs(Math.sin(hfRadAbs)))
       : targetW;
   const hfEffH =
-    Math.abs(cue.placement.rotation_deg) > 0.01
+    Math.abs(placementStaticValue(cue, "rotation_deg")) > 0.01
       ? Math.round(targetW * Math.abs(Math.sin(hfRadAbs)) + targetH * Math.abs(Math.cos(hfRadAbs)))
       : targetH;
   const baseCenterX = Math.round((renderWidth - hfEffW) / 2);
@@ -417,33 +432,34 @@ function compileCompositionLaneCue(
   const hfFilters: string[] = [buildSourceScaleFilter(targetW, targetH, hfColorSpec)];
   if (cue.placement.mirror_x) hfFilters.push("hflip");
   if (cue.placement.mirror_y) hfFilters.push("vflip");
-  const hfRotEnv = cue.envelopes.find((e) => e.parameter === "placement.rotation_deg");
-  const hfRotExpr = compileEnvelopeToFfmpegExpr({
-    envelope: hfRotEnv,
-    timeBaseOffsetMs: 0,
-    mode: "raw",
-  });
-  const hfOpEnv = cue.envelopes.find((e) => e.parameter === "placement.opacity");
-  const hfOpExpr = compileEnvelopeToFfmpegExpr({
-    envelope: hfOpEnv,
-    timeBaseOffsetMs: 0,
-    mode: "raw",
-  });
+  const hfRotExpr = compilePlacementChannelExpr(cue, "rotation_deg", { timeBaseOffsetMs: 0, mode: "raw" });
+  const hfOpExpr = compilePlacementChannelExpr(cue, "opacity", { timeBaseOffsetMs: 0, mode: "raw" });
   // RGB sources (PNG sequence, single-frame PNG, FFV1 BGRA) stay in RGB until converted to BT.709 YUV;
   // YUV overlay blobs (ProRes / MP4) convert to RGBA using their resolved input color matrix.
   hfFilters.push(hfColorSpec.isRgb ? "format=rgba" : BT709_TO_RGBA);
+  // A composition cue runs fx right after `format=rgba`, on its own frame. In `scene_host`
+  // mode that frame is the whole hosted scene (the footage underneath is part of the cue).
+  // The cue is RGBA at this point, so `keep` entries always hold the alpha aside.
+  // Motion layers skip this stage (only pixel entries run here).
+  if (pixelFxEntries(cue).length > 0) {
+    emitFxStageParts(
+      ctx,
+      hfFilters,
+      buildItemFxStage(ctx, { owner: cue, receivedPixFmt: "rgba", itemHasAlpha: true })
+    );
+  }
   if (hfRotExpr) {
     const radExpr = `((${hfRotExpr})*PI/180)`;
     hfFilters.push(`rotate=a='${radExpr}':ow='rotw(${radExpr})':oh='roth(${radExpr})':c=none`);
-  } else if (Math.abs(cue.placement.rotation_deg) > 0.01) {
-    const rad = ((cue.placement.rotation_deg * Math.PI) / 180).toFixed(4);
+  } else if (Math.abs(placementStaticValue(cue, "rotation_deg")) > 0.01) {
+    const rad = ((placementStaticValue(cue, "rotation_deg") * Math.PI) / 180).toFixed(4);
     hfFilters.push(`rotate=${rad}:ow='rotw(${rad})':oh='roth(${rad})':c=none`);
   }
   if (hfOpExpr) {
     const opExprT = hfOpExpr.replace(/\bt\b/g, "T");
     hfFilters.push(`geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='clip(alpha(X,Y)*(${opExprT}),0,255)'`);
-  } else if (cue.placement.opacity < 0.999) {
-    hfFilters.push(`colorchannelmixer=aa=${cue.placement.opacity.toFixed(3)}`);
+  } else if (placementStaticValue(cue, "opacity") < 0.999) {
+    hfFilters.push(`colorchannelmixer=aa=${placementStaticValue(cue, "opacity").toFixed(3)}`);
   }
   const isSingleFrameHfPng =
     compileOptions?.singleFrameAtMs !== undefined &&
@@ -452,17 +468,14 @@ function compileCompositionLaneCue(
   const hfLocalTimeExpr = isSingleFrameHfPng
     ? Math.max(0, (compileOptions!.singleFrameAtMs! - cueStartMs) / 1000).toFixed(6)
     : `((in-1)/${fps})`;
-  const sxPart = hfSxExpr ? `abs(${hfSxExpr})` : String(Math.abs(cue.placement.scale_x));
-  const syPart = hfSyExpr ? `abs(${hfSyExpr})` : String(Math.abs(cue.placement.scale_y));
+  const sxPart = hfSxExpr ? `abs(${hfSxExpr})` : String(Math.abs(placementStaticValue(cue, "scale_x")));
+  const syPart = hfSyExpr ? `abs(${hfSyExpr})` : String(Math.abs(placementStaticValue(cue, "scale_y")));
   hfFilters.push(
     ...buildSubpixelScaleOrPanFilters({
       hasDynamicScale: hfHasDynScale,
       sxPart,
       syPart,
-      xEnv,
-      yEnv,
-      staticXPct: cue.placement.x_pct,
-      staticYPct: cue.placement.y_pct,
+      owner: cue,
       baseCenterX,
       baseCenterY,
       renderWidth,
@@ -490,31 +503,29 @@ function compileCompositionLaneCue(
     ? hfRotExpr
       ? `(W-w)/2`
       : String(baseCenterX)
-    : compileEnvelopeToFfmpegExpr({
-        envelope: xEnv,
+    : compilePlacementChannelExpr(cue, "x_pct", {
         timeBaseOffsetMs: cueStartMs,
         mode: "pixel_offset",
         baseCenterPx: baseCenterX,
         canvasDimPx: renderWidth,
       }) ??
       (hfRotExpr
-        ? `(W-w)/2+${Math.round((cue.placement.x_pct / 100) * renderWidth)}`
-        : String(Math.round(baseCenterX + (cue.placement.x_pct / 100) * renderWidth)));
+        ? `(W-w)/2+${Math.round((placementStaticValue(cue, "x_pct") / 100) * renderWidth)}`
+        : String(Math.round(baseCenterX + (placementStaticValue(cue, "x_pct") / 100) * renderWidth)));
 
   const yExpr = hfHasDynScale
     ? hfRotExpr
       ? `(H-h)/2`
       : String(baseCenterY)
-    : compileEnvelopeToFfmpegExpr({
-        envelope: yEnv,
+    : compilePlacementChannelExpr(cue, "y_pct", {
         timeBaseOffsetMs: cueStartMs,
         mode: "pixel_offset",
         baseCenterPx: baseCenterY,
         canvasDimPx: renderHeight,
       }) ??
       (hfRotExpr
-        ? `(H-h)/2+${Math.round((cue.placement.y_pct / 100) * renderHeight)}`
-        : String(Math.round(baseCenterY + (cue.placement.y_pct / 100) * renderHeight)));
+        ? `(H-h)/2+${Math.round((placementStaticValue(cue, "y_pct") / 100) * renderHeight)}`
+        : String(Math.round(baseCenterY + (placementStaticValue(cue, "y_pct") / 100) * renderHeight)));
 
   const alphaPreset = ctx.preset === "master_alpha";
   if (!effectiveTransparent && isFullFrameUnscaled && compileOptions?.singleFrameAtMs === undefined && !alphaPreset) {
@@ -539,6 +550,118 @@ function compileCompositionLaneCue(
     );
     ctx.currentVideoPad = nextPad;
   }
+}
+
+/**
+ * Per-frame placement chain shared by footage cues and moving text cues: rotation and
+ * opacity (envelope expressions in cue-local time, else the static value), dynamic
+ * scale/pan, and the timeline-time overlay position. The caller scales its layer to
+ * `targetW`x`targetH` first and converts it out of RGBA afterwards.
+ */
+export interface MovingPlacementChainOptions {
+  renderWidth: number;
+  renderHeight: number;
+  fps: number;
+  targetW: number;
+  targetH: number;
+  /** Cue-local seconds inside the layer chain (for example `((in-1)/30)`). */
+  localTimeExpr: string;
+  /** Timeline start of the cue in ms: the overlay position evaluates in timeline time. */
+  cueStartMs: number;
+}
+
+export interface MovingPlacementChain {
+  /** Rotation, opacity and dynamic scale/pan filters (cue-local time). */
+  vFilters: string[];
+  /** Timeline-time overlay position expressions. */
+  xExpr: string;
+  yExpr: string;
+  baseCenterX: number;
+  baseCenterY: number;
+}
+
+export function buildMovingPlacementChain(
+  cue: LaneCueSpec,
+  opts: MovingPlacementChainOptions
+): MovingPlacementChain {
+  const { renderWidth, renderHeight, targetW, targetH, cueStartMs } = opts;
+  const radAbs = (Math.abs(placementStaticValue(cue, "rotation_deg")) * Math.PI) / 180;
+  const effW =
+    Math.abs(placementStaticValue(cue, "rotation_deg")) > 0.01
+      ? Math.round(targetW * Math.abs(Math.cos(radAbs)) + targetH * Math.abs(Math.sin(radAbs)))
+      : targetW;
+  const effH =
+    Math.abs(placementStaticValue(cue, "rotation_deg")) > 0.01
+      ? Math.round(targetW * Math.abs(Math.sin(radAbs)) + targetH * Math.abs(Math.cos(radAbs)))
+      : targetH;
+  const baseCenterX = Math.round((renderWidth - effW) / 2);
+  const baseCenterY = Math.round((renderHeight - effH) / 2);
+
+  const vFilters: string[] = [];
+  const rotExpr = compilePlacementChannelExpr(cue, "rotation_deg", { timeBaseOffsetMs: 0, mode: "raw" });
+  if (rotExpr) {
+    const radExpr = `((${rotExpr})*PI/180)`;
+    vFilters.push(`rotate=a='${radExpr}':ow='rotw(${radExpr})':oh='roth(${radExpr})':c=none`);
+  } else if (Math.abs(placementStaticValue(cue, "rotation_deg")) > 0.01) {
+    const rad = ((placementStaticValue(cue, "rotation_deg") * Math.PI) / 180).toFixed(4);
+    vFilters.push(`rotate=${rad}:ow='rotw(${rad})':oh='roth(${rad})':c=none`);
+  }
+  const opExpr = compilePlacementChannelExpr(cue, "opacity", { timeBaseOffsetMs: 0, mode: "raw" });
+  if (opExpr) {
+    const opExprT = opExpr.replace(/\bt\b/g, "T");
+    vFilters.push(`geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='clip(alpha(X,Y)*(${opExprT}),0,255)'`);
+  } else if (placementStaticValue(cue, "opacity") < 0.999) {
+    vFilters.push(`colorchannelmixer=aa=${placementStaticValue(cue, "opacity").toFixed(3)}`);
+  }
+  const sxExpr = compilePlacementChannelExpr(cue, "scale_x", { timeBaseOffsetMs: 0, mode: "raw" });
+  const syExpr = compilePlacementChannelExpr(cue, "scale_y", { timeBaseOffsetMs: 0, mode: "raw" });
+  const hasDynamicScale = Boolean(sxExpr || syExpr);
+  const sxPart = sxExpr ? `abs(${sxExpr})` : String(Math.abs(placementStaticValue(cue, "scale_x")));
+  const syPart = syExpr ? `abs(${syExpr})` : String(Math.abs(placementStaticValue(cue, "scale_y")));
+  vFilters.push(
+    ...buildSubpixelScaleOrPanFilters({
+      hasDynamicScale,
+      sxPart,
+      syPart,
+      owner: cue,
+      baseCenterX,
+      baseCenterY,
+      renderWidth,
+      renderHeight,
+      localTimeExpr: opts.localTimeExpr,
+    })
+  );
+
+  const rotActive = Boolean(rotExpr);
+  const xExpr = hasDynamicScale
+    ? rotActive
+      ? `(W-w)/2`
+      : String(baseCenterX)
+    : compilePlacementChannelExpr(cue, "x_pct", {
+        timeBaseOffsetMs: cueStartMs,
+        mode: "pixel_offset",
+        baseCenterPx: baseCenterX,
+        canvasDimPx: renderWidth,
+      }) ??
+      (rotActive
+        ? `(W-w)/2+${Math.round((placementStaticValue(cue, "x_pct") / 100) * renderWidth)}`
+        : String(Math.round(baseCenterX + (placementStaticValue(cue, "x_pct") / 100) * renderWidth)));
+
+  const yExpr = hasDynamicScale
+    ? rotActive
+      ? `(H-h)/2`
+      : String(baseCenterY)
+    : compilePlacementChannelExpr(cue, "y_pct", {
+        timeBaseOffsetMs: cueStartMs,
+        mode: "pixel_offset",
+        baseCenterPx: baseCenterY,
+        canvasDimPx: renderHeight,
+      }) ??
+      (rotActive
+        ? `(H-h)/2+${Math.round((placementStaticValue(cue, "y_pct") / 100) * renderHeight)}`
+        : String(Math.round(baseCenterY + (placementStaticValue(cue, "y_pct") / 100) * renderHeight)));
+
+  return { vFilters, xExpr, yExpr, baseCenterX, baseCenterY };
 }
 
 function buildVisualAssetCueFilterChain(
@@ -598,32 +721,30 @@ function buildVisualAssetCueFilterChain(
     asset.probe.width > 0 && asset.probe.height > 0
       ? (asset.probe.width * cropWRatio) / (asset.probe.height * cropHRatio)
       : renderWidth / renderHeight;
-  const cueSxEnv = cue.envelopes.find((e) => e.parameter === "placement.scale_x");
-  const cueSyEnv = cue.envelopes.find((e) => e.parameter === "placement.scale_y");
-  const cueSxExpr = compileEnvelopeToFfmpegExpr({ envelope: cueSxEnv, timeBaseOffsetMs: 0, mode: "raw" });
-  const cueSyExpr = compileEnvelopeToFfmpegExpr({ envelope: cueSyEnv, timeBaseOffsetMs: 0, mode: "raw" });
+  const cueSxExpr = compilePlacementChannelExpr(cue, "scale_x", { timeBaseOffsetMs: 0, mode: "raw" });
+  const cueSyExpr = compilePlacementChannelExpr(cue, "scale_y", { timeBaseOffsetMs: 0, mode: "raw" });
   const cueHasDynScale = Boolean(cueSxExpr || cueSyExpr);
-  const xEnv = cue.envelopes.find((e) => e.parameter === "placement.x_pct");
-  const yEnv = cue.envelopes.find((e) => e.parameter === "placement.y_pct");
+  const hasXEnv = placementChannelHasEnvelopeInput(cue, "x_pct");
+  const hasYEnv = placementChannelHasEnvelopeInput(cue, "y_pct");
 
   // Compute targetH from cropped assetAr * scale_y
   const targetW = cueHasDynScale
     ? renderWidth
-    : Math.max(8, Math.round((renderWidth * Math.abs(cue.placement.scale_x)) / 2) * 2);
+    : Math.max(8, Math.round((renderWidth * Math.abs(placementStaticValue(cue, "scale_x"))) / 2) * 2);
   const targetH = cueHasDynScale
     ? Math.max(8, Math.round((renderWidth / assetAr) / 2) * 2)
-    : Math.max(8, Math.round(((renderWidth / assetAr) * Math.abs(cue.placement.scale_y)) / 2) * 2);
-  const cueRadAbs = (Math.abs(cue.placement.rotation_deg) * Math.PI) / 180;
-  const cueEffW =
-    Math.abs(cue.placement.rotation_deg) > 0.01
-      ? Math.round(targetW * Math.abs(Math.cos(cueRadAbs)) + targetH * Math.abs(Math.sin(cueRadAbs)))
-      : targetW;
-  const cueEffH =
-    Math.abs(cue.placement.rotation_deg) > 0.01
-      ? Math.round(targetW * Math.abs(Math.sin(cueRadAbs)) + targetH * Math.abs(Math.cos(cueRadAbs)))
-      : targetH;
-  const baseCenterX = Math.round((renderWidth - cueEffW) / 2);
-  const baseCenterY = Math.round((renderHeight - cueEffH) / 2);
+    : Math.max(8, Math.round(((renderWidth / assetAr) * Math.abs(placementStaticValue(cue, "scale_y"))) / 2) * 2);
+  // Per-frame placement (rotation, opacity, dynamic scale/pan, overlay position), shared
+  // with moving text cues: the same helper builds the chain from the cue's envelopes.
+  const cuePlacement = buildMovingPlacementChain(cue, {
+    renderWidth,
+    renderHeight,
+    fps,
+    targetW,
+    targetH,
+    localTimeExpr: `((in-1)/${fps})`,
+    cueStartMs,
+  });
 
   // Reset PTS to 0 right after `trim` (`setpts=PTS-STARTPTS`) so local keyframe
   // envelopes (`rotate`, `geq` opacity, `scale`) evaluate over `t = 0 .. cueDuration` even when `srcInMs > 0`.
@@ -681,42 +802,50 @@ function buildVisualAssetCueFilterChain(
   }
   if (cue.placement.mirror_x) vFilters.push("hflip");
   if (cue.placement.mirror_y) vFilters.push("vflip");
-  const cueRgbaIdx = vFilters.length;
-  let cueUsesRgba = true;
-  vFilters.push(cueColorSpec.isRgb ? "format=rgba" : BT709_TO_RGBA);
   const cueColorStageFilters = laneColorStageFilters(ctx, {
     cue,
     asset,
     envelopes: cue.envelopes,
     durationMs: cue.duration_ms,
   });
+  // Motion layers never enter the pixel stage (they only list in `placementLayers`).
+  const cueHasActiveFx = pixelFxEntries(cue).length > 0;
+  // A cue without a colour stage runs fx right after the fit scale and mirrors, in the
+  // source's own format (before the RGBA conversion below). `keep` entries hold the
+  // cue's alpha aside when it carries one at this point.
+  const cueFxPreReceived = spineFxReceivedPixFmt(cueColorSpec, asset, []);
+  const cueFxPreParts =
+    cueHasActiveFx && cueColorStageFilters.length === 0
+      ? buildItemFxStage(ctx, {
+          owner: cue,
+          receivedPixFmt: cueFxPreReceived,
+          itemHasAlpha: itemCarriesAlphaAtFx(cueFxPreReceived, cueColorSpec, asset),
+        })
+      : [];
+  if (cueFxPreParts.length > 0) {
+    emitFxStageParts(ctx, vFilters, cueFxPreParts);
+  }
+  const cueRgbaIdx = vFilters.length;
+  let cueUsesRgba = true;
+  vFilters.push(cueColorSpec.isRgb ? "format=rgba" : BT709_TO_RGBA);
   vFilters.push(...cueColorStageFilters);
+  // A cue with a colour stage runs fx right after it, in RGBA (order colour, then fx).
+  // The colour stage lands in RGBA, so the item always carries alpha at this point.
+  if (cueHasActiveFx && cueColorStageFilters.length > 0) {
+    emitFxStageParts(
+      ctx,
+      vFilters,
+      buildItemFxStage(ctx, {
+        owner: cue,
+        receivedPixFmt: spineFxReceivedPixFmt(cueColorSpec, asset, cueColorStageFilters),
+        itemHasAlpha: true,
+      })
+    );
+  }
 
-  const cueRotEnv = cue.envelopes.find((e) => e.parameter === "placement.rotation_deg");
-  const cueRotExpr = compileEnvelopeToFfmpegExpr({
-    envelope: cueRotEnv,
-    timeBaseOffsetMs: 0,
-    mode: "raw",
-  });
-  if (cueRotExpr) {
-    const radExpr = `((${cueRotExpr})*PI/180)`;
-    vFilters.push(`rotate=a='${radExpr}':ow='rotw(${radExpr})':oh='roth(${radExpr})':c=none`);
-  } else if (Math.abs(cue.placement.rotation_deg) > 0.01) {
-    const rad = ((cue.placement.rotation_deg * Math.PI) / 180).toFixed(4);
-    vFilters.push(`rotate=${rad}:ow='rotw(${rad})':oh='roth(${rad})':c=none`);
-  }
-  const cueOpEnv = cue.envelopes.find((e) => e.parameter === "placement.opacity");
-  const cueOpExpr = compileEnvelopeToFfmpegExpr({
-    envelope: cueOpEnv,
-    timeBaseOffsetMs: 0,
-    mode: "raw",
-  });
-  if (cueOpExpr) {
-    const opExprT = cueOpExpr.replace(/\bt\b/g, "T");
-    vFilters.push(`geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='clip(alpha(X,Y)*(${opExprT}),0,255)'`);
-  } else if (cue.placement.opacity < 0.999) {
-    vFilters.push(`colorchannelmixer=aa=${cue.placement.opacity.toFixed(3)}`);
-  }
+  const cueRotExpr = compilePlacementChannelExpr(cue, "rotation_deg", { timeBaseOffsetMs: 0, mode: "raw" });
+  const cueOpExpr = compilePlacementChannelExpr(cue, "opacity", { timeBaseOffsetMs: 0, mode: "raw" });
+  vFilters.push(...cuePlacement.vFilters);
   // Opaque, full-frame, untransformed, envelope-less B-roll footage cues skip the RGBA round-trip.
   if (
     process.env.CUTHOL_EXP_NORGBA !== "0" &&
@@ -726,44 +855,27 @@ function buildVisualAssetCueFilterChain(
     !/\.(?:png|webp|gif|mov)$/i.test(absAssetPath) &&
     cue.placement.fit_mode !== "contain" &&
     !cueRotExpr &&
-    Math.abs(cue.placement.rotation_deg) <= 0.01 &&
+    Math.abs(placementStaticValue(cue, "rotation_deg")) <= 0.01 &&
     !cueOpExpr &&
-    cue.placement.opacity >= 0.999 &&
+    placementStaticValue(cue, "opacity") >= 0.999 &&
     !cueHasDynScale &&
-    !xEnv &&
-    !yEnv &&
-    !cue.envelopes.some((e) => e.parameter.startsWith("placement.")) &&
+    !hasXEnv &&
+    !hasYEnv &&
+    !placementHasAnyEnvelopeInput(cue) &&
     cueColorStageFilters.length === 0 &&
+    (!cueHasActiveFx || !cueFxPreParts.some((p) => p.type === "alpha_keep")) &&
     targetW === renderWidth &&
     targetH === renderHeight &&
-    Math.abs(cue.placement.scale_x - 1) < 1e-3 &&
-    Math.abs(cue.placement.scale_y - 1) < 1e-3 &&
-    Math.abs(cue.placement.x_pct) < 0.01 &&
-    Math.abs(cue.placement.y_pct) < 0.01
+    Math.abs(placementStaticValue(cue, "scale_x") - 1) < 1e-3 &&
+    Math.abs(placementStaticValue(cue, "scale_y") - 1) < 1e-3 &&
+    Math.abs(placementStaticValue(cue, "x_pct")) < 0.01 &&
+    Math.abs(placementStaticValue(cue, "y_pct")) < 0.01
   ) {
     vFilters.splice(cueRgbaIdx, 1);
     cueUsesRgba = false;
   }
-  const sxPart = cueSxExpr ? `abs(${cueSxExpr})` : String(Math.abs(cue.placement.scale_x));
-  const syPart = cueSyExpr ? `abs(${cueSyExpr})` : String(Math.abs(cue.placement.scale_y));
   vFilters.push(
-    ...buildSubpixelScaleOrPanFilters({
-      hasDynamicScale: cueHasDynScale,
-      sxPart,
-      syPart,
-      xEnv,
-      yEnv,
-      staticXPct: cue.placement.x_pct,
-      staticYPct: cue.placement.y_pct,
-      baseCenterX,
-      baseCenterY,
-      renderWidth,
-      renderHeight,
-      localTimeExpr: `((in-1)/${fps})`,
-    })
-  );
-  vFilters.push(
-    cueUsesRgba || cueHasDynScale || xEnv || yEnv || ctx.preset === "master_alpha"
+    cueUsesRgba || cueHasDynScale || hasXEnv || hasYEnv || ctx.preset === "master_alpha"
       ? BT709_TO_YUVA420P
       : BT709_TO_YUV420P
   );
@@ -773,35 +885,7 @@ function buildVisualAssetCueFilterChain(
     vFilters.push(`trim=start=${winLeadStartSec}:end=${winEndPadSec}`);
   }
 
-  const xExpr = cueHasDynScale
-    ? cueRotExpr
-      ? `(W-w)/2`
-      : String(baseCenterX)
-    : compileEnvelopeToFfmpegExpr({
-        envelope: xEnv,
-        timeBaseOffsetMs: cueStartMs,
-        mode: "pixel_offset",
-        baseCenterPx: baseCenterX,
-        canvasDimPx: renderWidth,
-      }) ??
-      (cueRotExpr
-        ? `(W-w)/2+${Math.round((cue.placement.x_pct / 100) * renderWidth)}`
-        : String(Math.round(baseCenterX + (cue.placement.x_pct / 100) * renderWidth)));
-
-  const yExpr = cueHasDynScale
-    ? cueRotExpr
-      ? `(H-h)/2`
-      : String(baseCenterY)
-    : compileEnvelopeToFfmpegExpr({
-        envelope: yEnv,
-        timeBaseOffsetMs: cueStartMs,
-        mode: "pixel_offset",
-        baseCenterPx: baseCenterY,
-        canvasDimPx: renderHeight,
-      }) ??
-      (cueRotExpr
-        ? `(H-h)/2+${Math.round((cue.placement.y_pct / 100) * renderHeight)}`
-        : String(Math.round(baseCenterY + (cue.placement.y_pct / 100) * renderHeight)));
+  const { xExpr, yExpr } = cuePlacement;
 
   return {
     vFilters,
@@ -889,11 +973,25 @@ function compileAssetLaneCue(
     (cue.kind === "broll" || asset.kind === "graphic" || asset.kind === "footage")
   ) {
     const isStill = isStillGraphic(asset);
+    // A still cue whose fx stage would contain an `alpha_keep` part (labelled split/merge
+    // pads) is not baked: `stillSpec.spatialFilters` is a linear list.
+    const stillFxKeepsAlpha =
+      isStill && fxStageWouldKeepAlpha(seq, ctx.paths?.rootDir as string | undefined, cue);
+    // Every envelope counts as today (colour, gain, pixel fx, empty entries) except the
+    // `fx.<id>.*` envelopes of motion layers; a motion-animated channel takes the cue out
+    // of the bake via the resolver condition below.
+    const motionIds = new Set(placementLayers(cue).map((l) => l.id));
+    const hasNonMotionEnvelope = cue.envelopes.some((e) => {
+      const m = /^fx\.([^.]+)\./.exec(e.parameter);
+      return !(m && motionIds.has(m[1]));
+    });
     const layerKind: DrawnVisualLayer["kind"] =
       isStill &&
-      cue.envelopes.length === 0 &&
-      Math.abs(cue.placement.rotation_deg) < 1e-3 &&
-      cue.placement.opacity >= 0.999
+      !hasNonMotionEnvelope &&
+      Math.abs(placementStaticValue(cue, "rotation_deg")) < 1e-3 &&
+      placementStaticValue(cue, "opacity") >= 0.999 &&
+      !stillFxKeepsAlpha &&
+      !placementAnimatesAny(cue, PLACEMENT_CHANNELS)
         ? "still_graphic"
         : "moving";
     const drawnCueLayer: DrawnVisualLayer = {
@@ -974,58 +1072,6 @@ function compileAssetLaneCue(
   }
 }
 
-function compileLaneTypography(ctx: VideoGraphCompileContext, lane: LaneSpec): void {
-  const { seq, paths, preset } = ctx;
-  const laneAssHash = crypto
-    .createHash("sha256")
-    .update(JSON.stringify({ stage: seq.stage, spine: seq.spine.clips, lane }))
-    .digest("hex")
-    .slice(0, 8);
-  const assOutFile = path.join(
-    paths.blobsDir,
-    `typography_r${seq.meta.revision}_${lane.id}_${preset}_${laneAssHash}.ass`
-  );
-  const assResult = compileTypographyAssFile(seq, assOutFile, new Set([lane.id]));
-  if (assResult.hasTypographyCues) {
-    const rotatedTypoCues = lane.cues.filter(
-      (c) => Boolean(c.typography) && Math.abs(c.placement.rotation_deg) > 0.01
-    );
-    if (rotatedTypoCues.length > 0 && fs.existsSync(assResult.filePath)) {
-      let assContent = fs.readFileSync(assResult.filePath, "utf8");
-      for (const rc of rotatedTypoCues) {
-        const assAngle = Number((-rc.placement.rotation_deg).toFixed(2));
-        const stylePrefix = `Style: Style_${rc.id},`;
-        assContent = assContent
-          .split(/\r?\n/)
-          .map((line) => {
-            if (line.startsWith(stylePrefix)) {
-              const parts = line.split(",");
-              if (parts.length >= 14) {
-                parts[13] = String(assAngle);
-                return parts.join(",");
-              }
-            }
-            if (line.includes(`,Style_${rc.id},`) && line.includes("{\\an5\\pos(")) {
-              return line.replace(
-                /\{\\an5\\pos\(([^)]+)\)\}/g,
-                `{\\an5\\pos($1)\\frz${assAngle}}`
-              );
-            }
-            return line;
-          })
-          .join("\r\n");
-      }
-      fs.writeFileSync(assResult.filePath, assContent, "utf8");
-    }
-    ctx.assFilePaths.push(assResult.filePath);
-    const relAssPath = path.relative(paths.rootDir, assResult.filePath);
-    const escapedAssPath = escapeFfmpegFilterPath(relAssPath);
-    const nextPad = `[vc_${++ctx.vStepCounter}]`;
-    ctx.filterChains.push(`${ctx.currentVideoPad}ass=filename=${escapedAssPath},${BT709_SETPARAMS}${nextPad}`);
-    ctx.currentVideoPad = nextPad;
-  }
-}
-
 export function compileLane(ctx: VideoGraphCompileContext, lane: LaneSpec): void {
   if (lane.muted) return;
 
@@ -1041,6 +1087,23 @@ export function compileLane(ctx: VideoGraphCompileContext, lane: LaneSpec): void
     const cueEndSec = (cueEndMs / 1000).toFixed(3);
     const isCueInActiveWindow =
       !ctx.activeWin || cueOverlapsWindowMs(cueStartMs, cueEndMs, ctx.winStartMs, ctx.winEndMs);
+
+    // Fx on a cue without a pixel stage is never silently ignored: audio cues have no
+    // pixels to run fx on (text cues are checked in `compile_lane_typography.ts`, which the
+    // text wave owns).
+    if (itemFxNeedsCheck(cue)) {
+      if (cue.kind === "music" || cue.kind === "sfx" || cue.kind === "voiceover") {
+        throw new CutholError(DIAGNOSTICS.CUE_FX_AUDIO_UNSUPPORTED(cue.id, cue.kind));
+      }
+      if (!cue.asset_handle && !(cue.kind === "composition" && cue.composition)) {
+        // Text cues are owned by compile_lane_typography.ts: active fx becomes a transparent
+        // layer, anything else (no fx, only disabled entries) stays on the shared direct burn.
+        const isTextCue = cue.typography !== undefined && cue.typography.text.trim() !== "";
+        if (!isTextCue) {
+          throw new CutholError(DIAGNOSTICS.CUE_FX_KIND_UNSUPPORTED(cue.id, cue.kind));
+        }
+      }
+    }
 
     if (cue.typography && cue.typography.text.trim()) {
       ctx.drawnVisualLayers.push({

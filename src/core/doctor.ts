@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { FFMPEG_TESTED_MAJOR, getFfmpegVersionInfo } from "./ffmpeg_version.js";
 import { listInstalledBrowsers } from "../live/live_browsers.js";
 import { findLocalHyperFramesCliMjs } from "../compositor/hf_common.js";
-import { listSkillsStatus } from "./skills_install.js";
+import { listSkillsStatus, skillsWarningIds } from "./skills_install.js";
 import { resolveBundledGsapMinJs } from "./package_resolve.js";
 import { localSpeechInstallState } from "../speech/local_engine.js";
 
@@ -39,6 +39,8 @@ export interface DoctorProbes {
   deepgramKeyPresent?: boolean;
   elevenlabsKeyPresent?: boolean;
   skillsSummary?: string | null;
+  /** Structured skills report; when present the shared attention rule decides the warning. */
+  skillsReport?: ReturnType<typeof listSkillsStatus> | null;
   localSpeech?: "installed" | "not-installed" | "broken";
   localSpeechDetail?: string;
 }
@@ -217,6 +219,27 @@ export function checkLocalSpeech(probes: DoctorProbes = {}): DoctorCheck {
 }
 
 export function checkSkills(probes: DoctorProbes = {}): DoctorCheck {
+  // The structured report uses the same attention rule as the MCP hint:
+  // outdated skills, or no detected tool having any skill at all. The
+  // summary-string fallback keeps the same wording for hand-made probes.
+  const report = probes.skillsReport ?? null;
+  if (report) {
+    const ids = skillsWarningIds(report);
+    if (ids.length > 0) {
+      return {
+        id: "skills",
+        status: "warn",
+        found: `Cuthol skills are outdated or not installed for: ${ids.join(", ")}`,
+        fix: "Run 'cuthol skills install --agent <id>' for the tool you use and start a new agent session.",
+      };
+    }
+    return {
+      id: "skills",
+      status: "ok",
+      found: probes.skillsSummary ?? "skills up to date",
+      fix: "none",
+    };
+  }
   const summary = probes.skillsSummary ?? null;
   if (summary === null) {
     return {
@@ -231,7 +254,7 @@ export function checkSkills(probes: DoctorProbes = {}): DoctorCheck {
       id: "skills",
       status: "warn",
       found: summary,
-      fix: "Run 'cuthol skills install' and start a new agent session.",
+      fix: "Run 'cuthol skills install --agent <id>' for the tool you use and start a new agent session.",
     };
   }
   return { id: "skills", status: "ok", found: summary, fix: "none" };
@@ -272,10 +295,13 @@ function defaultProbes(): DoctorProbes {
     gsapPresent = false;
   }
   let skillsSummary: string | null = null;
+  let skillsReport: ReturnType<typeof listSkillsStatus> | null = null;
   try {
-    skillsSummary = summarizeSkillsStatus(listSkillsStatus());
+    skillsReport = listSkillsStatus();
+    skillsSummary = summarizeSkillsStatus(skillsReport);
   } catch {
     skillsSummary = null;
+    skillsReport = null;
   }
   return {
     ffmpegMajor: info.ffmpeg?.major ?? null,
@@ -290,6 +316,7 @@ function defaultProbes(): DoctorProbes {
     deepgramKeyPresent: (process.env.DEEPGRAM_API_KEY ?? "").trim().length > 0,
     elevenlabsKeyPresent: (process.env.ELEVENLABS_API_KEY ?? "").trim().length > 0,
     skillsSummary,
+    skillsReport,
   };
 }
 

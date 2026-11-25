@@ -14,6 +14,45 @@ const PROXY_POLL_MS = 2500;
 const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
 const dbToLin = (db) => (db === -Infinity ? 0 : Math.pow(10, (Number.isFinite(db) ? db : 0) / 20));
 
+/** Port of cubicBezierY/cubicBezierU (src/core/easing.ts); same Newton + bisection solver. */
+function cubicAt(b, u) {
+  const [x1, y1, x2, y2] = b;
+  const v = 1 - u;
+  return {
+    x: 3 * v * v * u * x1 + 3 * v * u * u * x2 + u * u * u,
+    y: 3 * v * v * u * y1 + 3 * v * u * u * y2 + u * u * u,
+    dx: 3 * v * v * x1 + 6 * v * u * (x2 - x1) + 3 * u * u * (1 - x2),
+  };
+}
+
+function cubicBezierU(b, x) {
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  let u = x;
+  for (let i = 0; i < 16; i++) {
+    const p = cubicAt(b, u);
+    if (Math.abs(p.x - x) < 1e-9) break;
+    if (Math.abs(p.dx) < 1e-9) break;
+    u = Math.min(1, Math.max(0, u - (p.x - x) / p.dx));
+  }
+  let lo = 0;
+  let hi = 1;
+  for (let i = 0; i < 48; i++) {
+    const p = cubicAt(b, u);
+    if (Math.abs(p.x - x) < 1e-12) break;
+    if (p.x < x) lo = u;
+    else hi = u;
+    u = (lo + hi) / 2;
+  }
+  return u;
+}
+
+function cubicBezierY(b, x) {
+  if (x <= 0) return 0;
+  if (x >= 1) return 1;
+  return cubicAt(b, cubicBezierU(b, x)).y;
+}
+
 /** Port of evaluateEnvelopeAt (src/sequence/spine_envelope.ts). */
 function evalEnvelope(env, offsetMs) {
   const pts = env?.points ?? [];
@@ -31,6 +70,7 @@ function evalEnvelope(env, offsetMs) {
         case "ease_out": e = 1 - (1 - t) * (1 - t); break;
         case "ease_in_out": e = t * t * (3 - 2 * t); break;
         case "hold": e = offsetMs >= b.offset_ms ? 1 : 0; break;
+        case "cubic_bezier": e = b.bezier ? cubicBezierY(b.bezier, t) : t; break;
         default: e = t; break;
       }
       return a.value + (b.value - a.value) * e;
@@ -41,7 +81,8 @@ function evalEnvelope(env, offsetMs) {
 
 function envValue(envelopes, parameter, offsetMs, fallback) {
   const env = (envelopes ?? []).find((e) => e.parameter === parameter);
-  return env ? evalEnvelope(env, offsetMs) : fallback;
+  if (!env || !Array.isArray(env.points) || env.points.length === 0) return fallback;
+  return evalEnvelope(env, offsetMs);
 }
 
 /** Port of buildNormalizedRampSegments + invertClipLocalMsToSourceOffset (src/sequence/spine_time.ts). */
@@ -121,15 +162,47 @@ function cueCovers(startMs, endMs, t) {
   return t >= startMs && t < endMs;
 }
 
-function effectivePlacement(item, localMs) {
+const ADD_CHANNELS = ["x_pct", "y_pct", "rotation_deg"];
+
+/** Layer value on one channel: the entry's own envelope when it has points, else its param, else identity. */
+function motionLayerValue(entry, envelopes, fxId, channel, localMs, identity) {
+  const env = (envelopes ?? []).find((e) => e.parameter === `fx.${fxId}.${channel}`);
+  if (env && Array.isArray(env.points) && env.points.length > 0) return evalEnvelope(env, localMs);
+  const raw = entry?.params?.[channel];
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "string" && raw.trim() !== "" && Number.isFinite(Number(raw))) return Number(raw);
+  return identity;
+}
+
+// Mirrors resolvePlacementValuesAt (src/sequence/placement_resolve.ts): the base
+// placement (or its placement.<channel> envelope) combined with the item's active
+// motion fx entries in list order. Additive channels (x_pct, y_pct, rotation_deg)
+// add the layer value; multiplicative channels (scale_x, scale_y, opacity) multiply
+// it; opacity is clamped to [0, 1] (a no-op when already inside).
+// Exported for tests; the window uses it internally.
+export function effectivePlacement(item, localMs) {
   const p = item.placement ?? {};
+  const envelopes = item.envelopes ?? [];
+  const out = {
+    x_pct: envValue(envelopes, "placement.x_pct", localMs, p.x_pct ?? 0),
+    y_pct: envValue(envelopes, "placement.y_pct", localMs, p.y_pct ?? 0),
+    scale_x: envValue(envelopes, "placement.scale_x", localMs, p.scale_x ?? 1),
+    scale_y: envValue(envelopes, "placement.scale_y", localMs, p.scale_y ?? 1),
+    rotation_deg: envValue(envelopes, "placement.rotation_deg", localMs, p.rotation_deg ?? 0),
+    opacity: envValue(envelopes, "placement.opacity", localMs, p.opacity ?? 1),
+  };
+  for (const fx of item.fx ?? []) {
+    if (!fx || fx.kind !== "motion" || fx.enabled === false) continue;
+    for (const channel of ADD_CHANNELS) {
+      out[channel] += motionLayerValue(fx, envelopes, fx.id, channel, localMs, 0);
+    }
+    for (const channel of ["scale_x", "scale_y", "opacity"]) {
+      out[channel] *= motionLayerValue(fx, envelopes, fx.id, channel, localMs, 1);
+    }
+  }
+  out.opacity = clamp(out.opacity, 0, 1);
   return {
-    x_pct: envValue(item.envelopes, "placement.x_pct", localMs, p.x_pct ?? 0),
-    y_pct: envValue(item.envelopes, "placement.y_pct", localMs, p.y_pct ?? 0),
-    scale_x: envValue(item.envelopes, "placement.scale_x", localMs, p.scale_x ?? 1),
-    scale_y: envValue(item.envelopes, "placement.scale_y", localMs, p.scale_y ?? 1),
-    rotation_deg: envValue(item.envelopes, "placement.rotation_deg", localMs, p.rotation_deg ?? 0),
-    opacity: envValue(item.envelopes, "placement.opacity", localMs, p.opacity ?? 1),
+    ...out,
     fit_mode: p.fit_mode ?? "cover",
     crop: p.crop ?? null,
     mirror_x: !!p.mirror_x,
@@ -469,7 +542,7 @@ export function mount(root, ctx) {
     if (g && (g.brightness !== 0 || g.contrast !== 1 || g.saturation !== 1 || g.temperature_k !== 6500 || g.lut_uri)) return true;
     const t = item.treatments;
     if (t && (t.cutout?.mode !== undefined && t.cutout.mode !== "none" || t.mask || t.motion_blur?.enabled || t.reframe?.enabled)) return true;
-    if (Array.isArray(item.fx) && item.fx.length > 0) return true;
+    if (Array.isArray(item.fx) && item.fx.some((e) => e && e.kind !== "motion")) return true;
     const tr = item.transition_out;
     if (tr && typeof tr.kind === "object") return true;
     if (tr && typeof tr.kind === "string" && !["dissolve", "fade"].includes(tr.kind)) return true;

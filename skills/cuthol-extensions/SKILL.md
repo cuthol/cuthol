@@ -57,7 +57,7 @@ when the extension touches the network), `helper` (`.js` path), `assets`
 | Composition helper | JS synced to each composition as `assets/cuthol-ext-<name>.js`, exposed on `window.__cuthol.ext.<name>` | `extension create --template helper` |
 | Asset pack | Fonts/images synced to `<composition>/assets/ext/<name>/…` | `--template assets` |
 | Media processor | `ffmpeg` filter chain or sandboxed `node` script turning a handle into a new asset (cached, journaled) | `--template processor_ffmpeg` / `processor_node` |
-| Clip effect (`fx`) | Named effect for `spine fx` with params and `animatable` subset | manifest `fx` section |
+| Clip effect (`fx`) | Named effect for `spine fx` with params, `animatable` subset and `alpha` class (`keep` default, `process`) | manifest `fx` section (fx stage: item's own fitted pixels, or RGBA after a colour stage; BT.709; `t` item-local seconds; `keep` holds alpha aside and merges it back, `process` runs on alpha too) |
 | Transition | Named spine transition (`ext:<name>/<kind>`) as ffmpeg templates | manifest `transitions` section |
 | Recipe | Parameterized multi-step Cuthol workflow, one atomic undo unit | `--template recipe` |
 | Planner | Sandboxed script proposing a variable-length cue patch from composition events + word timings (dry-run plan, atomic apply) | `--template planner` |

@@ -47,7 +47,7 @@ import {
   ScriptProbeJob,
   scriptRecordToDiagnostic,
 } from "../compositor/hf_script_errors.js";
-import { evaluateEnvelopeAt } from "../sequence/spine.js";
+import { resolvedPlacementCopyAt } from "../sequence/placement_resolve.js";
 import { measureCuePixelBox } from "../verify/gates.js";
 
 export interface FrameLumaMetrics {
@@ -347,25 +347,7 @@ export function annotateRgb24BufferToCanvas(
               : undefined;
 
           const localOffsetMs = Math.max(0, clampedMs - start);
-          let cueForBox: LaneCue = cue;
-          if (cue.envelopes.length > 0) {
-            const xEnv = cue.envelopes.find((e) => e.parameter === "placement.x_pct");
-            const yEnv = cue.envelopes.find((e) => e.parameter === "placement.y_pct");
-            const sxEnv = cue.envelopes.find((e) => e.parameter === "placement.scale_x");
-            const syEnv = cue.envelopes.find((e) => e.parameter === "placement.scale_y");
-            const rotEnv = cue.envelopes.find((e) => e.parameter === "placement.rotation_deg");
-            cueForBox = {
-              ...cue,
-              placement: {
-                ...cue.placement,
-                x_pct: xEnv ? evaluateEnvelopeAt(xEnv, localOffsetMs) : cue.placement.x_pct,
-                y_pct: yEnv ? evaluateEnvelopeAt(yEnv, localOffsetMs) : cue.placement.y_pct,
-                scale_x: sxEnv ? evaluateEnvelopeAt(sxEnv, localOffsetMs) : cue.placement.scale_x,
-                scale_y: syEnv ? evaluateEnvelopeAt(syEnv, localOffsetMs) : cue.placement.scale_y,
-                rotation_deg: rotEnv ? evaluateEnvelopeAt(rotEnv, localOffsetMs) : cue.placement.rotation_deg,
-              },
-            };
-          }
+          const cueForBox = resolveMonitorBoxCue(cue, localOffsetMs);
 
           // Pass rootDir so HyperFrames preset geometry is detected accurately
           const stageBox = measureCuePixelBox(seq.stage, cueForBox, assetAr, rootDir);
@@ -490,6 +472,15 @@ function collectCompositionScriptDiagnostics(
   return diags;
 }
 
+/**
+ * The cue the monitor box is measured on: placement channels resolved at the
+ * cue-local time, so the box matches what render draws. A point-less envelope
+ * entry yields the static value, like render.
+ */
+export function resolveMonitorBoxCue(cue: LaneCue, localOffsetMs: number): LaneCue {
+  return resolvedPlacementCopyAt(cue, localOffsetMs);
+}
+
 export function captureMonitorFrame(options: {
   workspaceDir: string;
   atMs: number;
@@ -505,7 +496,10 @@ export function captureMonitorFrame(options: {
     sequence,
     paths,
     options.atMs,
-    "draft_480p"
+    "draft_480p",
+    // The project is already open and its assets were checked on ingest/edit;
+    // re-probing every library file (G2) dominates the frame run.
+    { skipGates: ["G2_ASSETS"] }
   );
   const { canvas, metrics, diagnostic } = annotateRgb24BufferToCanvas(
     rgbBuf,
@@ -655,7 +649,8 @@ export function captureMonitorSheet(options: {
     sequence,
     paths,
     cellTimestampsMs,
-    "draft_480p"
+    "draft_480p",
+    { skipGates: ["G2_ASSETS"] }
   );
 
   for (let idx = 0; idx < totalCells; idx++) {

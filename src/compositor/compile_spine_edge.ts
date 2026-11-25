@@ -19,8 +19,14 @@
 // `contain` bars on an axis-aligned frame are filled with the same mode (they are part of the clip frame;
 // under a 90/270-degree static rotation the bar orientation is swapped accordingly).
 import type { CutholSequence } from "../core/schema.js";
-import { compileEnvelopeToFfmpegExpr } from "./compile_filters.js";
+import { compilePlacementChannelExpr } from "./compile_filters.js";
 import type { VideoGraphCompileContext } from "./compiler.js";
+import {
+  placementChannelAnimates,
+  placementChannelRange,
+  placementStaticValue,
+  type PlacementChannel,
+} from "../sequence/placement_resolve.js";
 
 type SpineClipSpec = CutholSequence["spine"]["clips"][number];
 type EdgeMode = "mirror" | "clamp";
@@ -54,16 +60,20 @@ function assertEdgeKind(edge: string, clip: SpineClipSpec): asserts edge is Edge
   }
 }
 
-/** Presence check that matches compile_spine.ts exactly (it keys off the compiled expression, not raw points). */
-function hasEnvelope(clip: SpineClipSpec, parameter: SpineClipSpec["envelopes"][number]["parameter"]): boolean {
-  const env = clip.envelopes.find((e) => e.parameter === parameter);
-  return compileEnvelopeToFfmpegExpr({ envelope: env, timeBaseOffsetMs: 0, mode: "raw" }) !== null;
+/** Presence check that matches compile_spine.ts exactly (the channel compiles to an expression). */
+function hasEnvelope(clip: SpineClipSpec, channel: PlacementChannel): boolean {
+  return placementChannelAnimates(clip, channel);
 }
 
-/** Envelope point values, or null when the parameter has no envelope (caller falls back to the static value). */
-function envelopeValues(clip: SpineClipSpec, parameter: SpineClipSpec["envelopes"][number]["parameter"]): number[] | null {
-  if (!hasEnvelope(clip, parameter)) return null;
-  return clip.envelopes.find((e) => e.parameter === parameter)!.points.map((p) => p.value);
+/**
+ * Base envelope point values, or null when the channel does not animate (caller falls back to the static
+ * value). Only the extremes are ever read, so this returns the range endpoints; motion layers will widen
+ * the range here once they exist.
+ */
+function envelopeValues(clip: SpineClipSpec, channel: PlacementChannel): number[] | null {
+  if (!hasEnvelope(clip, channel)) return null;
+  const range = placementChannelRange(clip, channel);
+  return [range.min, range.max];
 }
 
 /** Static-path target size; replicates compile_spine.ts (must stay in sync with it). */
@@ -110,13 +120,13 @@ interface RotationAnalysis {
 }
 
 function analyzeRotation(clip: SpineClipSpec): RotationAnalysis {
-  const thetaDeg = clip.placement.rotation_deg;
-  const rotEnv = clip.envelopes.find((e) => e.parameter === "placement.rotation_deg");
-  const rotExpr = compileEnvelopeToFfmpegExpr({ envelope: rotEnv, timeBaseOffsetMs: 0, mode: "raw" });
+  const thetaDeg = placementStaticValue(clip, "rotation_deg");
+  const range = placementChannelRange(clip, "rotation_deg");
+  const rotExpr = compilePlacementChannelExpr(clip, "rotation_deg", { timeBaseOffsetMs: 0, mode: "raw" });
   const hasRotEnv = rotExpr !== null;
   // Like every other placement parameter, an envelope replaces the static value (see compile_spine.ts).
-  const thetaMin = hasRotEnv ? Math.min(...rotEnv!.points.map((p) => p.value)) : thetaDeg;
-  const thetaMax = hasRotEnv ? Math.max(...rotEnv!.points.map((p) => p.value)) : thetaDeg;
+  const thetaMin = hasRotEnv ? range.min : thetaDeg;
+  const thetaMax = hasRotEnv ? range.max : thetaDeg;
   const m = ((thetaDeg % 90) + 90) % 90;
   const square = !hasRotEnv && (m < 0.01 || m > 89.99);
   return { thetaDeg, hasRotEnv, thetaMin, thetaMax, rotExpr, square };
@@ -302,8 +312,8 @@ export function planSpineClipEdge(
   const rot = analyzeRotation(clip);
   // compile_spine.ts always sizes from the static rotation (spEffW/spEffH), even with a rotation envelope.
   const { fw, fh } = rotatedFrameSize(targetW, targetH, rot.thetaDeg);
-  const xVals = envelopeValues(clip, "placement.x_pct") ?? [clip.placement.x_pct];
-  const yVals = envelopeValues(clip, "placement.y_pct") ?? [clip.placement.y_pct];
+  const xVals = envelopeValues(clip, "x_pct") ?? [placementStaticValue(clip, "x_pct")];
+  const yVals = envelopeValues(clip, "y_pct") ?? [placementStaticValue(clip, "y_pct")];
 
   if (!rot.hasRotEnv && (Math.abs(rot.thetaDeg) <= 0.01 || rot.square)) {
     // Strip path: the frame is (nearly) axis-aligned and fully opaque.
@@ -313,8 +323,8 @@ export function planSpineClipEdge(
       const travel = staticTravelRange(baseCX, baseCY, renderW, renderH, xVals, yVals);
       return { kind: "strip", pad: edgePadForStaticPath(renderW, renderH, fw, fh, travel) };
     }
-    const sxVals = envelopeValues(clip, "placement.scale_x") ?? [clip.placement.scale_x];
-    const syVals = envelopeValues(clip, "placement.scale_y") ?? [clip.placement.scale_y];
+    const sxVals = envelopeValues(clip, "scale_x") ?? [placementStaticValue(clip, "scale_x")];
+    const syVals = envelopeValues(clip, "scale_y") ?? [placementStaticValue(clip, "scale_y")];
     const transMin = incomingTransitionMinScale(ctx, clip);
     const sxMin = Math.max(MIN_DYNAMIC_SCALE, Math.min(...sxVals.map((v) => Math.abs(v))) * transMin);
     const syMin = Math.max(MIN_DYNAMIC_SCALE, Math.min(...syVals.map((v) => Math.abs(v))) * transMin);
@@ -552,8 +562,8 @@ export function applySpineClipEdgeToOverlay(
   const edge = clip.placement.edge;
   if (edge === undefined || edge === "transparent") return { xExpr, yExpr };
   assertEdgeKind(edge, clip);
-  const targetW = hasDynamicScale ? ctx.renderWidth : staticTargetSize(ctx.renderWidth, clip.placement.scale_x);
-  const targetH = hasDynamicScale ? ctx.renderHeight : staticTargetSize(ctx.renderHeight, clip.placement.scale_y);
+  const targetW = hasDynamicScale ? ctx.renderWidth : staticTargetSize(ctx.renderWidth, placementStaticValue(clip, "scale_x"));
+  const targetH = hasDynamicScale ? ctx.renderHeight : staticTargetSize(ctx.renderHeight, placementStaticValue(clip, "scale_y"));
   const plan = planSpineClipEdge(ctx, clip, targetW, targetH, hasDynamicScale);
   if (plan.kind === "none") return { xExpr, yExpr };
   if (plan.kind === "strip") {
@@ -575,7 +585,7 @@ export function applySpineClipEdgeToOverlay(
     return `(${expr})+${center / 2}-${dim}/2`;
   };
   return {
-    xExpr: reanchor(xExpr, hasEnvelope(clip, "placement.x_pct"), fw, "w"),
-    yExpr: reanchor(yExpr, hasEnvelope(clip, "placement.y_pct"), fh, "h"),
+    xExpr: reanchor(xExpr, hasEnvelope(clip, "x_pct"), fw, "w"),
+    yExpr: reanchor(yExpr, hasEnvelope(clip, "y_pct"), fh, "h"),
   };
 }

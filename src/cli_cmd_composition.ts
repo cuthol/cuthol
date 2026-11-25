@@ -3,10 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { syncAllCompositionBridges } from "./compositor/bridge_exporter.js";
 import { previewAndCheckComposition } from "./compositor/composition_preview.js";
-import {
-  HyperFramesPresetKind,
-  scaffoldHyperFramesComposition,
-} from "./compositor/hyperframes_bridge.js";
+import { HyperFramesPresetKind } from "./compositor/hyperframes_bridge.js";
+import { scaffoldCompositionGuarded } from "./compositor/scaffold_guard.js";
 import { CutholDiagnostic, CutholError, DIAGNOSTICS } from "./core/diagnostics.js";
 import { parseTimeMs } from "./core/time.js";
 
@@ -94,15 +92,19 @@ export function runCompositionCommand(ctx: CliCommandContext): CliCommandResult 
     const preset = (strFlag(flags, "preset", "counter") as HyperFramesPresetKind) ?? "counter";
     const props = parsePropsJsonFlag(strFlag(flags, "props", "{}")!, "composition.scaffold");
     const transparent = boolFlag(flags, "transparent", true) ?? true;
-    const res = scaffoldHyperFramesComposition({
-      targetDir: absCompDir,
-      width: sequence.stage.width,
-      height: sequence.stage.height,
-      fps: sequence.stage.fps,
-      durationMs,
-      preset,
-      props,
-      transparent,
+    const res = scaffoldCompositionGuarded({
+      workspaceDir,
+      force: boolFlag(flags, "force", false) ?? false,
+      scaffold: {
+        targetDir: absCompDir,
+        width: sequence.stage.width,
+        height: sequence.stage.height,
+        fps: sequence.stage.fps,
+        durationMs,
+        preset,
+        props,
+        transparent,
+      },
     });
     const durationWarning = bareDurationWarning(strFlag(flags, "duration"));
     emitEnvelopeJson(workspaceDir, "composition.scaffold", {

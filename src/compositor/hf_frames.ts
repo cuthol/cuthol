@@ -9,6 +9,7 @@ import { isPngSequenceBlobDir, resolveCachedCompositionVideoBlob, stageCompositi
 import { syncScalarVarsAndComputeCompositionHash } from "./hf_cache_state.js";
 import { copyDirRecursiveSync, findLocalHyperFramesCliMjs, hyperFramesProcessEnv } from "./hf_common.js";
 import { renderHyperFramesCompositionToMp4 } from "./hf_render.js";
+import { needsLegacyGreenSanitize, sanitizeLegacyGreenBackground, sanitizeStagedEntryHtml, stageSanitizedCopy } from "./hf_transparent.js";
 
 /**
  * Applies render-time scalar variable overrides to a staged composition copy by
@@ -289,14 +290,12 @@ export function renderHyperFramesSingleFramePng(options: {
   }
 
   const mode = options.mode ?? "overlay_alpha";
-  let htmlSource = fs.readFileSync(entryPath, "utf8");
-  if (options.transparent && mode !== "scene_host" && /(?:body|#root)\s*\{[^}]*?background\s*:\s*#00ff00\b/i.test(htmlSource)) {
-    htmlSource = htmlSource.replace(
-      /((?:body|#root)\s*\{[^}]*?)background\s*:\s*#00ff00\b/gi,
-      "$1background: transparent"
-    );
-    fs.writeFileSync(entryPath, htmlSource, "utf8");
-  }
+  const rawHtmlSource = fs.readFileSync(entryPath, "utf8");
+  const wantGreenStage =
+    options.transparent &&
+    mode !== "scene_host" &&
+    needsLegacyGreenSanitize(rawHtmlSource);
+  const htmlSource = wantGreenStage ? sanitizeLegacyGreenBackground(rawHtmlSource) : rawHtmlSource;
 
   const durationSec = Math.max(0.1, Number((options.durationMs / 1000).toFixed(3)));
   // Past the composition's own timeline the cue holds its last frame.
@@ -388,6 +387,7 @@ export function renderHyperFramesSingleFramePng(options: {
       targetHeight !== nativeHeight;
     let tempSceneHostDir: string | null = null;
     let tempVarsDir: string | null = null;
+    let greenStageDir: string | null = null;
     try {
       let targetSnapDir = absCompDir;
       if (needsStage) {
@@ -428,6 +428,20 @@ export function renderHyperFramesSingleFramePng(options: {
               fs.writeFileSync(stagedEntryPath, nextHtml, "utf8");
             }
           }
+        }
+      }
+      if (wantGreenStage) {
+        if (targetSnapDir === absCompDir) {
+          greenStageDir = stageSanitizedCopy({
+            absCompDir,
+            entryHtml: options.entryHtml,
+            blobsDir: options.blobsDir,
+            prefix: "hf_snap_green",
+            sanitizedHtml: htmlSource,
+          });
+          targetSnapDir = greenStageDir;
+        } else {
+          sanitizeStagedEntryHtml(targetSnapDir, options.entryHtml);
         }
       }
       const snapProc = spawnWatchedSync(
@@ -484,6 +498,13 @@ export function renderHyperFramesSingleFramePng(options: {
       if (tempVarsDir && fs.existsSync(tempVarsDir)) {
         try {
           fs.rmSync(tempVarsDir, { recursive: true, force: true });
+        } catch {
+          // ignore
+        }
+      }
+      if (greenStageDir && fs.existsSync(greenStageDir)) {
+        try {
+          fs.rmSync(greenStageDir, { recursive: true, force: true });
         } catch {
           // ignore
         }
@@ -551,18 +572,12 @@ export function renderHyperFramesBatchFramesPng(options: {
   }
 
   const mode = options.mode ?? "overlay_alpha";
-  let htmlSource = fs.readFileSync(entryPath, "utf8");
-  if (
+  const rawHtmlSource = fs.readFileSync(entryPath, "utf8");
+  const wantGreenStage =
     options.transparent &&
     mode !== "scene_host" &&
-    /(?:body|#root)\s*\{[^}]*?background\s*:\s*#00ff00\b/i.test(htmlSource)
-  ) {
-    htmlSource = htmlSource.replace(
-      /((?:body|#root)\s*\{[^}]*?)background\s*:\s*#00ff00\b/gi,
-      "$1background: transparent"
-    );
-    fs.writeFileSync(entryPath, htmlSource, "utf8");
-  }
+    needsLegacyGreenSanitize(rawHtmlSource);
+  const htmlSource = wantGreenStage ? sanitizeLegacyGreenBackground(rawHtmlSource) : rawHtmlSource;
 
   const durationSec = Math.max(0.1, Number((options.durationMs / 1000).toFixed(3)));
   // Past the composition's own timeline the cue holds its last frame.
@@ -669,6 +684,7 @@ export function renderHyperFramesBatchFramesPng(options: {
       targetHeight !== nativeHeight;
     let tempSceneHostDir: string | null = null;
     let tempVarsDir: string | null = null;
+    let greenStageDir: string | null = null;
     try {
       let targetSnapDir = absCompDir;
       if (needsStage) {
@@ -709,6 +725,20 @@ export function renderHyperFramesBatchFramesPng(options: {
               fs.writeFileSync(stagedEntryPath, nextHtml, "utf8");
             }
           }
+        }
+      }
+      if (wantGreenStage) {
+        if (targetSnapDir === absCompDir) {
+          greenStageDir = stageSanitizedCopy({
+            absCompDir,
+            entryHtml: options.entryHtml,
+            blobsDir: options.blobsDir,
+            prefix: "hf_snap_green",
+            sanitizedHtml: htmlSource,
+          });
+          targetSnapDir = greenStageDir;
+        } else {
+          sanitizeStagedEntryHtml(targetSnapDir, options.entryHtml);
         }
       }
 
@@ -787,6 +817,13 @@ export function renderHyperFramesBatchFramesPng(options: {
       if (tempVarsDir && fs.existsSync(tempVarsDir)) {
         try {
           fs.rmSync(tempVarsDir, { recursive: true, force: true });
+        } catch {
+          // ignore
+        }
+      }
+      if (greenStageDir && fs.existsSync(greenStageDir)) {
+        try {
+          fs.rmSync(greenStageDir, { recursive: true, force: true });
         } catch {
           // ignore
         }

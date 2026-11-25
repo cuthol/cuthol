@@ -112,7 +112,8 @@ function fakeClip(over: Partial<CutholSequence["spine"]["clips"][number]>): Cuth
 
 test("spine fx stage compiles the per-clip effect chain (P3)", () => {
   const ctx = {} as VideoGraphCompileContext;
-  const p = { asset: {} as never, absAssetPath: "", clipColorSpec: {} as never, targetW: 1920, targetH: 1080 };
+  const p = { asset: {} as never, absAssetPath: "", clipColorSpec: {} as never, targetW: 1920, targetH: 1080, receivedPixFmt: "yuv420p" };
+  const conv = "scale=in_color_matrix=bt709:out_color_matrix=bt709:flags=bicubic+accurate_rnd+full_chroma_int";
   assert.deepEqual(buildSpineClipFxFilters(ctx, { ...p, clip: fakeClip({}) }), []);
   assert.deepEqual(
     buildSpineClipFxFilters(ctx, { ...p, clip: fakeClip({ fx: [{ id: "fx_01", kind: "ffmpeg", params: { filter: "gblur=sigma=3" }, enabled: false }] }) }),
@@ -120,7 +121,21 @@ test("spine fx stage compiles the per-clip effect chain (P3)", () => {
   );
   assert.deepEqual(
     buildSpineClipFxFilters(ctx, { ...p, clip: fakeClip({ fx: [{ id: "fx_01", kind: "ffmpeg", params: { filter: "gblur=sigma=3" } }] }) }),
-    ["gblur=sigma=3"]
+    [conv, "gblur=sigma=3", `${conv}:out_range=tv,format=yuv420p`]
+  );
+  // Every entry gets its own accurate converter; the stage hands back the format it received.
+  assert.deepEqual(
+    buildSpineClipFxFilters(ctx, {
+      ...p,
+      receivedPixFmt: "rgba",
+      clip: fakeClip({
+        fx: [
+          { id: "fx_01", kind: "ffmpeg", params: { filter: "eq=gamma=1.1" } },
+          { id: "fx_02", kind: "ffmpeg", params: { filter: "rgbashift=rh=2" } },
+        ],
+      }),
+    }),
+    [conv, "eq=gamma=1.1", conv, "rgbashift=rh=2", `${conv},format=rgba`]
   );
   assert.throws(() =>
     buildSpineClipFxFilters(ctx, { ...p, clip: fakeClip({ fx: [{ id: "fx_01", kind: "nope", params: {} }] }) }),

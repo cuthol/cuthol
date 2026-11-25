@@ -18,7 +18,12 @@ import type { CutholSequence, EffectParamValue, TransitionSpec } from "../core/s
 import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
 import { compileCubicBezierEasedU, cubicBezierIssue } from "../core/easing.js";
 import type { VideoGraphCompileContext } from "./compiler.js";
-import { compileEnvelopeToFfmpegExpr } from "./compile_filters.js";
+import { compilePlacementChannelExpr } from "./compile_filters.js";
+import {
+  PLACEMENT_CHANNELS,
+  placementChannelHasEnvelopeInput,
+  placementStaticValue,
+} from "../sequence/placement_resolve.js";
 import {
   getSequenceEffectRegistry,
   isExtensionEffectRef,
@@ -138,23 +143,16 @@ function nextClipCoversStage(seq: CutholSequence, i: number, outTrans: Transitio
   return (
     nextClip !== null &&
     outTrans?.kind !== "zoom_in" &&
-    Math.abs(nextClip.placement.scale_x) >= 0.999 &&
-    Math.abs(nextClip.placement.scale_y) >= 0.999 &&
-    Math.abs(nextClip.placement.x_pct) < 0.01 &&
-    Math.abs(nextClip.placement.y_pct) < 0.01 &&
-    Math.abs(nextClip.placement.rotation_deg) < 0.01 &&
+    Math.abs(placementStaticValue(nextClip, "scale_x")) >= 0.999 &&
+    Math.abs(placementStaticValue(nextClip, "scale_y")) >= 0.999 &&
+    Math.abs(placementStaticValue(nextClip, "x_pct")) < 0.01 &&
+    Math.abs(placementStaticValue(nextClip, "y_pct")) < 0.01 &&
+    Math.abs(placementStaticValue(nextClip, "rotation_deg")) < 0.01 &&
     !nextClip.placement.crop &&
     nextClip.placement.fit_mode !== "contain" &&
-    nextClip.placement.opacity >= 0.999 &&
-    !nextClip.envelopes.some(
-      (e) =>
-        e.parameter === "placement.scale_x" ||
-        e.parameter === "placement.scale_y" ||
-        e.parameter === "placement.x_pct" ||
-        e.parameter === "placement.y_pct" ||
-        e.parameter === "placement.rotation_deg" ||
-        e.parameter === "placement.opacity"
-    )
+    placementStaticValue(nextClip, "opacity") >= 0.999 &&
+    // Any placement envelope entry counts, even one with no points.
+    !PLACEMENT_CHANNELS.some((c) => placementChannelHasEnvelopeInput(nextClip, c))
   );
 }
 
@@ -239,25 +237,17 @@ function extChainFrameSize(
   clip: SpineClipSpec
 ): { w: number; h: number } {
   const { renderWidth, renderHeight } = ctx;
-  const spSxExpr = compileEnvelopeToFfmpegExpr({
-    envelope: clip.envelopes.find((e) => e.parameter === "placement.scale_x"),
-    timeBaseOffsetMs: 0,
-    mode: "raw",
-  });
-  const spSyExpr = compileEnvelopeToFfmpegExpr({
-    envelope: clip.envelopes.find((e) => e.parameter === "placement.scale_y"),
-    timeBaseOffsetMs: 0,
-    mode: "raw",
-  });
+  const spSxExpr = compilePlacementChannelExpr(clip, "scale_x", { timeBaseOffsetMs: 0, mode: "raw" });
+  const spSyExpr = compilePlacementChannelExpr(clip, "scale_y", { timeBaseOffsetMs: 0, mode: "raw" });
   const dynamic = Boolean(spSxExpr || spSyExpr);
   const targetW = dynamic
     ? renderWidth
-    : Math.max(8, Math.round((renderWidth * Math.abs(clip.placement.scale_x)) / 2) * 2);
+    : Math.max(8, Math.round((renderWidth * Math.abs(placementStaticValue(clip, "scale_x"))) / 2) * 2);
   const targetH = dynamic
     ? renderHeight
-    : Math.max(8, Math.round((renderHeight * Math.abs(clip.placement.scale_y)) / 2) * 2);
-  const radAbs = (Math.abs(clip.placement.rotation_deg) * Math.PI) / 180;
-  if (Math.abs(clip.placement.rotation_deg) <= 0.01) return { w: targetW, h: targetH };
+    : Math.max(8, Math.round((renderHeight * Math.abs(placementStaticValue(clip, "scale_y"))) / 2) * 2);
+  const radAbs = (Math.abs(placementStaticValue(clip, "rotation_deg")) * Math.PI) / 180;
+  if (Math.abs(placementStaticValue(clip, "rotation_deg")) <= 0.01) return { w: targetW, h: targetH };
   return {
     w: Math.round(targetW * Math.abs(Math.cos(radAbs)) + targetH * Math.abs(Math.sin(radAbs))),
     h: Math.round(targetW * Math.abs(Math.sin(radAbs)) + targetH * Math.abs(Math.cos(radAbs))),

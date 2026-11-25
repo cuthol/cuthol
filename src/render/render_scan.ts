@@ -14,6 +14,7 @@ import { checkRenderedColor } from "../color/render_check.js";
 import { CutholSequence } from "../core/schema.js";
 import { evaluateRgb24FrameBlankness } from "../monitor/preview.js";
 import { evaluateEnvelopeAt } from "../sequence/spine.js";
+import { placementValueAt } from "../sequence/placement_resolve.js";
 import { outToSeqMs, outputDurationMs, tempoOf } from "../sequence/tempo.js";
 
 export interface BlankFrameEvent {
@@ -39,7 +40,7 @@ export interface PostRenderBlankScanResult {
   diagnostics: CutholDiagnostic[];
 }
 
-function isIntentionalFadeOrTransparentAtMs(
+export function isIntentionalFadeOrTransparentAtMs(
   seq: CutholSequence,
   clipIndex: number,
   tMs: number,
@@ -63,10 +64,7 @@ function isIntentionalFadeOrTransparentAtMs(
   }
 
   const localOffsetMs = Math.max(0, tMs - clip.timeline_in_ms);
-  const opEnv = clip.envelopes.find((e) => e.parameter === "placement.opacity");
-  const effectiveOpacity = opEnv
-    ? evaluateEnvelopeAt(opEnv, localOffsetMs)
-    : clip.placement.opacity;
+  const effectiveOpacity = placementValueAt(clip, "opacity", localOffsetMs);
   if (effectiveOpacity <= 0.2) return true;
 
   const brEnv = clip.envelopes.find((e) => e.parameter === "treatments.color_grade.brightness");

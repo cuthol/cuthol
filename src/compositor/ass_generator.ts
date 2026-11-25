@@ -15,6 +15,7 @@ import path from "node:path";
 import { snapAssEndMs, snapAssStartMs } from "../core/frame_time.js";
 import { resolveCueStartMs } from "../core/timeline.js";
 import { CutholSequence, LaneCue } from "../core/schema.js";
+import { placementStaticValue } from "../sequence/placement_resolve.js";
 
 /**
  * Converts a CSS hex color (`#RRGGBB`) and opacity (`0..1`) into ASS `&HAABBGGRR` format
@@ -104,7 +105,19 @@ export function wrapTypographyLines(
 export function compileTypographyAssFile(
   seq: CutholSequence,
   outputPath: string,
-  targetLaneIds?: Set<string>
+  targetLaneIds?: Set<string>,
+  options?: {
+    /** When set, only these cue ids are written (a single-cue file for an fx text layer, or one plain segment). */
+    targetCueIds?: Set<string>;
+    /** Subtracted from cue start/end before snapping, so an fx text layer on cue-local timestamps stays frame-exact. */
+    timeBaseMs?: number;
+    /**
+     * When set, the cue is written at the stage centre with scale 1 and full opacity,
+     * ignoring its stored placement: the per-frame placement chain positions the layer.
+     * Used for a moving text cue (placement animates), whose ASS is a neutral source.
+     */
+    neutralPlacement?: boolean;
+  }
 ): { hasTypographyCues: boolean; cuesCount: number; filePath: string } {
   const lines: string[] = [
     "[Script Info]",
@@ -129,23 +142,26 @@ export function compileTypographyAssFile(
     if (targetLaneIds && !targetLaneIds.has(lane.id)) continue;
     for (const cue of lane.cues) {
       if (!cue.typography || !cue.typography.text.trim()) continue;
+      if (options?.targetCueIds && !options.targetCueIds.has(cue.id)) continue;
       cueCounter++;
 
       const typo = cue.typography;
       const styleName = `Style_${cue.id}`;
+      const neutral = options?.neutralPlacement === true;
+      const neutralOpacity = neutral ? 1 : placementStaticValue(cue, "opacity");
       // Respect typo.font_family and sanitize commas
       const fontName = (typo.font_family || "Arial").replace(/,/g, "").trim() || "Arial";
-      const primaryColor = hexToAssColor(typo.color_hex, cue.placement.opacity);
+      const primaryColor = hexToAssColor(typo.color_hex, neutralOpacity);
       const outlineColor = typo.box_color_hex
         ? hexToAssColor(typo.box_color_hex, typo.box_opacity > 0 ? typo.box_opacity : 0.85)
-        : hexToAssColor(typo.stroke_color_hex ?? "#000000", cue.placement.opacity);
+        : hexToAssColor(typo.stroke_color_hex ?? "#000000", neutralOpacity);
       const backColor = hexToAssColor("#000000", 0.5);
       const borderStyle = typo.box_color_hex ? 3 : 1;
       const outlineWidth = typo.box_color_hex ? 14 : Math.max(1, typo.stroke_width_px);
       const shadowDepth = typo.box_color_hex ? 0 : 2;
       const boldFlag = typo.font_weight >= 600 ? -1 : 0;
-      const scaleX = Math.round(cue.placement.scale_x * 100);
-      const scaleY = Math.round(cue.placement.scale_y * 100);
+      const scaleX = neutral ? 100 : Math.round(placementStaticValue(cue, "scale_x") * 100);
+      const scaleY = neutral ? 100 : Math.round(placementStaticValue(cue, "scale_y") * 100);
       const marginSide = Math.round(
         seq.stage.width * ((100 - Math.min(95, Math.max(20, typo.max_width_pct))) / 200)
       );
@@ -154,13 +170,18 @@ export function compileTypographyAssFile(
         `Style: ${styleName},${fontName},${typo.font_size_px},${primaryColor},${primaryColor},${outlineColor},${backColor},${boldFlag},0,0,0,${scaleX},${scaleY},0,0,${borderStyle},${outlineWidth},${shadowDepth},5,${marginSide},${marginSide},20,1`
       );
 
-      const startMs = resolveCueStartMs(seq, cue);
+      const timeBaseMs = options?.timeBaseMs ?? 0;
+      const startMs = resolveCueStartMs(seq, cue) - timeBaseMs;
       const endMs = startMs + cue.duration_ms;
       const fps = Math.max(1, Math.round(seq.stage.fps));
       const fmtStart = (ms: number): string => formatAssTime(snapAssStartMs(ms, fps));
       const fmtEnd = (ms: number): string => formatAssTime(snapAssEndMs(ms, fps));
-      const posX = Math.round(seq.stage.width * 0.5 + (cue.placement.x_pct / 100) * seq.stage.width);
-      const posY = Math.round(seq.stage.height * 0.5 + (cue.placement.y_pct / 100) * seq.stage.height);
+      const posX = neutral
+        ? Math.round(seq.stage.width * 0.5)
+        : Math.round(seq.stage.width * 0.5 + (placementStaticValue(cue, "x_pct") / 100) * seq.stage.width);
+      const posY = neutral
+        ? Math.round(seq.stage.height * 0.5)
+        : Math.round(seq.stage.height * 0.5 + (placementStaticValue(cue, "y_pct") / 100) * seq.stage.height);
       const layer = Math.max(0, lane.z_index + 50);
 
       // Check if word-by-word active highlight is requested (skip any excised words with sequence_start_ms === null)
@@ -170,7 +191,7 @@ export function compileTypographyAssFile(
       );
 
       if (activeWords.length > 0 && typo.active_word_color_hex) {
-        const activeColor = hexToAssColor(typo.active_word_color_hex, cue.placement.opacity);
+        const activeColor = hexToAssColor(typo.active_word_color_hex, neutralOpacity);
         const normalColor = primaryColor;
         const safeWords = activeWords.map((tok) => escapeAssText(tok.word).trim());
 

@@ -47,6 +47,12 @@ const BOOLEAN_FLAGS = new Set([
   // [color boolean flags]
   "graded",
   "replace",
+  // [spine treatment boolean flags]
+  "full",
+  "invert",
+  "no-invert",
+  "clear",
+  "off",
   // [export boolean flags]
 ]);
 
@@ -140,6 +146,15 @@ export const KNOWN_CLI_FLAGS = new Set([
   "saturation",
   "temperature",
   "lut",
+  // spine treatment flags.
+  "shape",
+  "center-x",
+  "center-y",
+  "width",
+  "height",
+  "feather",
+  "shutter",
+  "subframes",
   "fit",
   "edge",
   "filter",
@@ -222,6 +237,10 @@ export const KNOWN_CLI_FLAGS = new Set([
   "asr",
   "tts",
   "agent",
+  // single-keyframe points and value-at-t
+  "value",
+  "beat",
+  "beats-of",
 ]);
 
 function levenshtein(a: string, b: string): number {
@@ -379,6 +398,8 @@ interface RestBudget {
   occupiedWhenTrue?: string[];
   /** One further positional, only when `rest[0]` is this token and the flag is absent. */
   extraWhenFirstIs?: { token: string; unlessFlag: string };
+  /** When `rest[0]` is one of these tokens, the positionals after it are checked against that budget instead. */
+  subcommands?: Record<string, RestBudget>;
   suggest?: string;
 }
 
@@ -412,7 +433,12 @@ const REST_BUDGETS: Record<string, RestBudget> = {
   "spine.transition": { max: 1, occupiedBy: ["clip"] },
   "spine.grade": { max: 1, occupiedBy: ["clip"] },
   "spine.fx": { max: 1 },
-  "spine.envelope": { max: 1, occupiedBy: ["clip", "id"] },
+  "spine.envelope": {
+    max: 1,
+    occupiedBy: ["clip", "id"],
+    // `spine envelope point <add|move|remove> [<item>]`
+    subcommands: { point: { max: 2, occupiedBy: ["clip", "id"], suggest: "cuthol spine envelope point add|move|remove --clip <sp_XX|cue_XX>" } },
+  },
   "spine.reframe": { max: 1, occupiedBy: ["clips", "clip"], occupiedWhenTrue: ["all-spine"] },
   "spine.mute": { max: 1, occupiedBy: ["clips", "clip"], occupiedWhenTrue: ["all-spine"] },
   "spine.unmute": { max: 1, occupiedBy: ["clips", "clip"], occupiedWhenTrue: ["all-spine"] },
@@ -482,7 +508,10 @@ export function assertNoExtraPositionals(
   rest: string[],
   flags: Record<string, string | boolean>
 ): void {
-  const spec = restBudgetFor(group, action);
+  const outer = restBudgetFor(group, action);
+  const sub = rest.length > 0 ? outer.subcommands?.[rest[0]] : undefined;
+  const spec = sub ?? outer;
+  if (sub) rest = rest.slice(1);
   if (spec.unbounded) return;
   let max = spec.max;
   const slotTaken =

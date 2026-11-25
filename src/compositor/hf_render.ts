@@ -14,6 +14,7 @@ import {
 import { OverlayBlobExt, resolveCachedCompositionVideoBlob, inspectPngSequenceDir, isValidVideoBlobOnDisk, stageCompositionRenderDir, readCompositionTimelineSec } from "./hf_blobs.js";
 import { syncScalarVarsAndComputeCompositionHash, readCompositionCacheState, writeCompositionCacheState, clearBridgeMetaLastDataChangeReason } from "./hf_cache_state.js";
 import { findLocalHyperFramesCliMjs, hyperFramesProcessEnv, renameWithRetrySync } from "./hf_common.js";
+import { needsLegacyGreenSanitize, sanitizeLegacyGreenBackground, sanitizeStagedEntryHtml, stageSanitizedCopy } from "./hf_transparent.js";
 import { recordCompositionAlphaBboxSidecar } from "./hf_frames.js";
 import { overlayCollector, readBlobMetaSummary, recordOverlayRenderOutcome, parseHyperFramesPipelineSummary, parseHyperFramesScriptErrorIsolated, buildHyperFramesFailureError } from "./hf_overlay_tracking.js";
 
@@ -92,18 +93,13 @@ export function renderHyperFramesCompositionToMp4(options: {
     ? resolveAlphaOverlayFormat(expectedFrames)
     : "mov";
 
-  let htmlSource = fs.readFileSync(entryPath, "utf8");
-  // Upgrade any legacy #00FF00 background on body/#root to true CSS `transparent` when rendering with alpha or stage backdrop
-  if (
+  const rawHtmlSource = fs.readFileSync(entryPath, "utf8");
+  // Upgrade any legacy #00FF00 background on body/#root to true CSS `transparent` when rendering with alpha or stage backdrop.
+  // The cleaned HTML lives only in memory and in staged work-folder copies; the user's entry file on disk is never rewritten.
+  const wantGreenStage =
     (useTrueAlpha || options.opaqueBackdropColor || options.backdropImagePath) &&
-    /(?:body|#root)\s*\{[^}]*?background\s*:\s*#00ff00\b/i.test(htmlSource)
-  ) {
-    htmlSource = htmlSource.replace(
-      /((?:body|#root)\s*\{[^}]*?)background\s*:\s*#00ff00\b/gi,
-      "$1background: transparent"
-    );
-    fs.writeFileSync(entryPath, htmlSource, "utf8");
-  }
+    needsLegacyGreenSanitize(rawHtmlSource);
+  const htmlSource = wantGreenStage ? sanitizeLegacyGreenBackground(rawHtmlSource) : rawHtmlSource;
 
   const hashOptions = {
     absCompDir,
@@ -405,6 +401,20 @@ export function renderHyperFramesCompositionToMp4(options: {
         extendTimeline,
       });
       targetRenderDir = tempSceneHostDir;
+    }
+    if (wantGreenStage) {
+      if (targetRenderDir === absCompDir) {
+        tempSceneHostDir = stageSanitizedCopy({
+          absCompDir,
+          entryHtml: options.entryHtml,
+          blobsDir: options.blobsDir,
+          prefix: "hf_render_green",
+          sanitizedHtml: htmlSource,
+        });
+        targetRenderDir = tempSceneHostDir;
+      } else {
+        sanitizeStagedEntryHtml(targetRenderDir, options.entryHtml);
+      }
     }
 
     // HyperFrames' own GPU encode gives no measurable speed-up here (frame capture dominates) and its rate

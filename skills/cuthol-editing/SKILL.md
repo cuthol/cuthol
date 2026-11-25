@@ -66,7 +66,22 @@ the media are rejected (G202).
 | `mute / unmute(clip \| clips \| all_spine?)` | Mute one clip, a list, or the whole spine (omit `clip`); `muted=false` restores. |
 | `reframe(…)` | Track one subject in wider footage onto a narrower stage (writes `scale_x` + a calm `x_pct` pan envelope). Details: `references/effects.md`. |
 | `envelope(clip, param, points, easing, bezier?)` | Keyframes over the item's own time (0 = its start); spine clips and lane cues. Details: `references/effects.md`. |
-| `grade(…)` / `fx_add / fx_set / fx_remove / fx_list` | Constant colour grade; per-clip effect chain (`ext:<ext>/<fx>` or raw `filter=`). Details: `references/effects.md`. |
+| `envelope_point_add / _move / _remove(clip, param, at, value?, to?)` | One keyframe at a time (`at` item-local; `sequence_time=true` for timeline time, `beat`+`beats_of` for beat time). Details: `references/effects.md`. |
+| `value(item, param, at, sequence_time?)` | Value of an animated parameter at a time, without rendering. Details: `references/effects.md`. |
+| `grade(…)` / `fx_catalog / fx_add / fx_set / fx_remove / fx_list` | Constant colour grade; effect chain on a spine clip or lane cue (`item=sp_XX|cue_XX`, `ext:<ext>/<fx>` or raw `filter=`). One fx stage for clips and cues: the effect receives the item's own fitted pixels (RGBA after a colour stage, BT.709); `t` is item-local seconds; size is the item's fitted size. `alpha: keep` (default) leaves the alpha plane untouched, `process` runs on it too (blur, shift, distortion). Details: `references/effects.md`. |
+
+## Motion layers
+
+A `motion` fx entry is a placement layer on the same item, not a pixel
+effect: `fx_add(item, kind="motion", params={scale_x: 1})` for the static
+layer value, then `envelope(item, param="fx.<id>.<channel>", points=[...])`
+to animate it. Stack layers (slow zoom + beat punch); combine rule:
+`x_pct`/`y_pct`/`rotation_deg` add, `scale_x`/`scale_y`/`opacity` multiply
+(opacity clamps to `[0, 1]`). Read back with `value(item,
+param="placement.<channel>", at)` (effective value + per-layer breakdown) or
+`brief` canvas lens (`motion: fx_02(…)` note). Worked example:
+`references/effects.md` ("Motion layers").
+| `mask(clip, shape, …)` / `motion_blur(clip, shutter, subframes)` | Soft or hard mask in the clip's own frame (keyframable `treatments.mask.*`); shutter blur over source frames. Soft masks are costly to render. Details: `references/treatments.md`. |
 
 ## Lanes and cues
 

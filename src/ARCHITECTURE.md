@@ -74,7 +74,7 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 | `subprocess.ts` | Spawning with the progress watchdog (stall → kill tree). |
 | `standards.ts` | Default parameters and their sources. |
 | `env.ts`, `png_canvas.ts` | `.env` loader; dependency-free PNG canvas. |
-| `skills_install.ts` | Agent skill installer: `skills/` scan, agent-tool detection, atomic install/update/remove, auto-install hook, MCP `guide` topic resolution. |
+| `skills_install.ts` | Agent skill installer: `skills/` scan, agent-tool detection, atomic install/update/remove (explicit commands only, never automatic), shared outdated-or-not-installed attention rule, MCP `guide` topic resolution. |
 
 ### sequence/
 | File | Responsibility |
@@ -82,6 +82,9 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 | `spine.ts` | Facade. |
 | `spine_time.ts` | Speed ramps, source ↔ sequence ms, transcript projection, magnetic reflow. |
 | `spine_envelope.ts` | Envelope evaluation/slicing, reframe focal points. |
+| `envelope_points.ts` | One keyframe at a time (add/move/remove) and clock conversion (sequence time with tempo, beat of a placed asset) into item-local ms. |
+| `spine_treatments.ts` | Mask and motion blur mutations on spine clips. |
+| `placement_resolve.ts` | Effective placement of a clip or cue (base value, envelope; motion layers later). Every placement reader goes through it; ffmpeg expressions via `compilePlacementChannelExpr` in `compositor/compile_filters.ts`. |
 | `spine_edit.ts` | append, split, trim, excise, remove, reorder, transform, speed, transition, envelope, mute. |
 | `spine_reframe.ts` | Subject-tracking reframe. |
 | `lanes.ts` | Lane cues: add/update/remove, anchors, `lane excise`, markers. |
@@ -108,7 +111,7 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 |---|---|
 | `compiler.ts` | Facade + `compileSequenceRenderPlan` (the video filter graph). |
 | `compile_lane.ts`, `compile_spine.ts` | Per-lane compilation (HyperFrames compositions, visual asset cues, lane `.ass` typography) and per-clip spine compilation (inputs, speed, transforms, envelopes, transitions). |
-| `compile_spine_timing.ts`, `compile_spine_color.ts`, `compile_spine_fx.ts`, `compile_spine_transition.ts`, `compile_spine_edge.ts` | Stages of the spine clip filter chain: timing / speed ramp, colour, per-clip fx, transitions (chain filters + overlay position), edge mode. Stage order is documented at the top of `compile_spine.ts`. |
+| `compile_spine_timing.ts`, `compile_spine_color.ts`, `compile_spine_fx.ts`, `compile_spine_mask.ts`, `compile_spine_transition.ts`, `compile_spine_edge.ts` | Stages of the spine clip filter chain: timing / speed ramp, colour, per-clip fx, mask and motion blur, transitions (chain filters + overlay position), edge mode. Stage order is documented at the top of `compile_spine.ts`. |
 | `compile_audio.ts` | The audio graph shared by render and loudness measurement. |
 | `compile_filters.ts`, `compile_color.ts`, `compile_backdrop.ts` | Filter helpers; explicit BT.709 conversions; backdrop slices under compositions. |
 | `hyperframes_bridge.ts` | Facade for everything HyperFrames: |
@@ -146,6 +149,13 @@ live/        Cuthol Live: local server + window (src/live/ui, plain HTML/CSS/JS)
 | `encoder.ts` | Facade + hardware encoder probing/verification and selection. |
 | `encoder_args.ts` | Encoder types, BT.709 output args, codec arguments. |
 | `monitor/preview.ts`, `monitor/timeline_view.ts` | `monitor frame/sheet` images; timeline image. |
+
+### effects/
+
+| File | Responsibility |
+|---|---|
+| `effect_registry.ts` | Effect definitions an agent can use (built-in transitions, raw ffmpeg fx, enabled extensions' fx and transitions) for `spine fx catalog`. |
+| `effect_types.ts` | Effect system contract (types only): definition shape shared by built-in and extension effects, backends (`ffmpeg`, `shader`, `spine`), placement layer combination, preset provenance. |
 
 ### verify/, brief/, library/, extensions/
 | File | Responsibility |

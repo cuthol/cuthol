@@ -90,7 +90,11 @@ export function decodeFrameRgb24(
 ): { width: number; height: number; data: Buffer } {
   const tmp = path.join(os.tmpdir(), `cuthol-frame-${process.pid}-${Math.round(Math.random() * 1e9)}.raw`);
   const colorProbe = asset?.probe ?? probeStandaloneVideoColorMetadata(file);
-  const spec = resolveSourceColorSpec(colorProbe, file);
+  // No full-range pin (`fitPixFmt`) in measurement decodes: the render graph needs it so the range
+  // conversion does not move with later filters, but here a `yuvj*` frame is converted to RGB once,
+  // and splitting that into two default-precision steps moves the measured colours (measured on a
+  // full-range phone clip: Lab chroma median 1.42 → 2.39 against an exact decode at 1.04).
+  const spec = { ...resolveSourceColorSpec(colorProbe, file), fitPixFmt: undefined };
   const pre = asset ? inputTransformFilters(asset) : [];
   const vf = [
     ...pre,

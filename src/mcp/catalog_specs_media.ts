@@ -8,13 +8,15 @@ export const MEDIA_ACTION_SPECS: ActionSpec[] = [
     action: "scaffold",
     argv: ["composition", "scaffold"],
     summary: "Create a composition folder (index.html + assets/gsap.min.js + window.__cuthol runtime). Use preset 'blank' to write your own animation.",
-    mutates: false,
+    // A forced scaffold commits a journal revision: queue it like every other mutation.
+    mutates: true,
     params: [
       { name: "comp_dir", type: "string", description: "Folder to create (relative to the project), e.g. 'compositions/intro'.", required: true },
       { name: "preset", type: "string", description: "Starting point (default counter).", enum: ["blank", "counter", "beat_cards", "audio_glow", "cut_phases", "lower_third", "title_card", "stat_callout", "badge_overlay"] },
       { name: "duration", type: "time", description: "Composition length (default 3000ms); keep it equal to the cue duration." },
       { name: "props", type: "object", description: "Preset props, e.g. {headline, subline, value, accent}." },
       { name: "transparent", type: "boolean", description: "Transparent background (default true)." },
+      { name: "force", type: "boolean", description: "Overwrite files edited after Cuthol wrote them (otherwise G215 stops the scaffold). Undoable with workspace.journal undo." },
     ],
   },
   {

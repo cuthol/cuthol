@@ -354,7 +354,7 @@ test("LUT: missing/outside-project/bad-extension is G414 and blocks render; vali
   assert.equal(fs.existsSync(outMp4), false, "render with a missing LUT must not start");
 });
 
-test("G409 fires only for motion_blur/mask/lane colour envelopes", () => {
+test("G409 fires only for lane colour envelopes", () => {
   const wsDir = path.join(TEST_TMP, "ws_g409");
   fs.rmSync(wsDir, { recursive: true, force: true });
   initWorkspace({ dir: wsDir, title: "g409", aspect: "16:9", fps: 30 });
@@ -424,12 +424,12 @@ test("G409 fires only for motion_blur/mask/lane colour envelopes", () => {
   const g409 = rep.diagnostics.filter((d) => d.code === "CUTHOL-G409");
   const fields = g409.map((d) => `${d.subject_id} ${d.what}`);
   assert.ok(
-    fields.some((f) => f.includes("sp_dirty") && f.includes("treatments.motion_blur")),
-    JSON.stringify(fields)
+    !fields.some((f) => f.includes("sp_dirty") && f.includes("treatments.motion_blur")),
+    `spine motion blur renders: ${JSON.stringify(fields)}`
   );
   assert.ok(
-    fields.some((f) => f.includes("sp_dirty") && f.includes("treatments.mask")),
-    JSON.stringify(fields)
+    !fields.some((f) => f.includes("sp_dirty") && f.includes("treatments.mask")),
+    `spine mask renders: ${JSON.stringify(fields)}`
   );
   assert.ok(
     fields.some((f) => f.includes("cue_grade") && f.includes("treatments.color_grade.saturation")),

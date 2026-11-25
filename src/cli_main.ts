@@ -65,7 +65,6 @@ import { runDoctorCommand } from "./cli_cmd_doctor.js";
 import { runSetupCommand } from "./cli_cmd_setup.js";
 import { runColorCommand } from "./cli_cmd_color.js";
 import { runExportCommand } from "./cli_cmd_export.js";
-import { maybeAutoInstallSkills } from "./core/skills_install.js";
 
 /**
  * Runs one CLI command. Throws on failure (`runCliMain` turns that into the error envelope).
@@ -93,15 +92,9 @@ export async function runCli(argv: string[] = process.argv.slice(2), invokedPath
     return;
   }
 
-  // Install Cuthol skills into detected agent tools on first run of a new
-  // package version. Silent once settled; never breaks the running command.
-  // (The `mcp` branch above returns early; the server runs the same hook and
-  // reports it on the first tool response instead of stderr.)
-  const skillsAutoNote = maybeAutoInstallSkills();
-  if (skillsAutoNote) {
-    console.error(skillsAutoNote);
-  }
-
+  // Skills are never installed automatically: only an explicit
+  // `cuthol skills install --agent <id>` (or `cuthol setup --apply` with
+  // `--agent`) writes into agent tool folders.
   for (const key of Object.keys(flags)) {
     if (!KNOWN_CLI_FLAGS.has(key)) {
       throw new CutholError(

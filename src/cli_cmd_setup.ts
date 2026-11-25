@@ -1,6 +1,12 @@
 // CLI 'setup' command: registers the Cuthol MCP server with the agent tools found on this machine.
 import { CutholError, DIAGNOSTICS } from "./core/diagnostics.js";
-import { isValidAgentId } from "./core/skills_install.js";
+import {
+  detectAgentTargets,
+  installSkills,
+  isValidAgentId,
+  listSkillsStatus,
+  resolveSelectedTargets,
+} from "./core/skills_install.js";
 import { applySetup } from "./core/mcp_register.js";
 import {
   applyLocalSpeechSetup,
@@ -82,9 +88,22 @@ export async function runSetupCommand(ctx: CliCommandContext): Promise<CliComman
     apply: boolFlag(flags, "apply", false),
     force: boolFlag(flags, "force", false),
   });
+  // Skills follow the --agent selection only: setup --apply performs the
+  // skills step together with the registration because the user asked setup
+  // to apply. Edited skills are never overwritten (setup --force is not
+  // passed to the skills step). Without --agent no skills are written.
+  const skillsTargets = resolveSelectedTargets({ ids });
+  const skillsStatus = listSkillsStatus({ targets: skillsTargets });
+  const skillsLines = skillsStatus.targets.map((t) => {
+    if (!t.detected) return `skills ${t.id}: not detected; skipped`;
+    const missing = t.skills.filter((s) => s.status === "missing").length;
+    const outdated = t.skills.filter((s) => s.status === "outdated").length;
+    const state = missing > 0 || outdated > 0 ? "would install/update" : "up to date";
+    return `skills ${t.id}: ${state}`;
+  });
   const wantsJson = Boolean(flags["json"]);
   if (wantsJson) {
-    emitEnvelopeJson(workspaceDir, "setup", { ...report });
+    emitEnvelopeJson(workspaceDir, "setup", { ...report, skills: skillsStatus });
     return;
   }
   if (!report.dry_run) {
@@ -92,6 +111,26 @@ export async function runSetupCommand(ctx: CliCommandContext): Promise<CliComman
       console.log(`${tool.id}: ${tool.action}${tool.backup ? ` (backup: ${tool.backup})` : ""}`);
     }
     for (const diag of report.diagnostics) console.log(diag.formatted);
+    if (ids && ids.length > 0) {
+      const installed = installSkills({ targets: skillsTargets });
+      for (const target of installed.targets) {
+        if (target.error) {
+          console.log(`skills ${target.id}: not written (${target.error})`);
+          continue;
+        }
+        const changed = target.installed.length + target.updated.length + target.removed_stale.length;
+        const kept = target.skipped_modified.length > 0 ? `; kept ${target.skipped_modified.length} edited` : "";
+        console.log(
+          changed > 0
+            ? `skills ${target.id}: installed ${target.installed.length}, updated ${target.updated.length}${kept}`
+            : `skills ${target.id}: up to date${kept}`
+        );
+      }
+    } else {
+      const detected = detectAgentTargets();
+      console.log("skills: not written (no --agent); run one command per tool you use:");
+      for (const t of detected) console.log(`  cuthol skills install --agent ${t.id}`);
+    }
     console.log("Start a new agent session to load the MCP server.");
     return;
   }
@@ -112,5 +151,9 @@ export async function runSetupCommand(ctx: CliCommandContext): Promise<CliComman
     }
   }
   for (const diag of report.diagnostics) console.log(diag.formatted);
+  for (const line of skillsLines) console.log(line);
+  if (!ids || ids.length === 0) {
+    for (const t of detectAgentTargets()) console.log(`  cuthol skills install --agent ${t.id}`);
+  }
   console.log("Start a new agent session to load the MCP server.");
 }

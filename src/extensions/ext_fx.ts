@@ -11,17 +11,99 @@ export interface ExtensionFxSpec {
   /** ffmpeg video filter template, e.g. `"gblur=sigma={{sigma}}"`. */
   video_filter: string;
   /**
+   * Alpha class of the effect: `keep` (default) leaves the item's alpha plane untouched,
+   * `process` runs the effect on the alpha too. Nothing reads it yet.
+   */
+  alpha?: "keep" | "process";
+  /**
    * Names of number params whose filter option accepts a per-frame expression, so an envelope
    * `fx.<id>.<param>` may animate them. Any other envelope on this effect is G119 (never silent).
    */
   animatable?: string[];
 }
 
-export const ALLOWED_FX_KEYS = new Set(["description", "params", "video_filter", "animatable"]);
+export const ALLOWED_FX_KEYS = new Set(["description", "params", "video_filter", "animatable", "alpha"]);
 
 export const EFFECT_NAME_RE = /^[a-z][a-z0-9_-]{0,63}$/;
 
 const FX_PLACEHOLDER_RE = /\{\{\s*([a-zA-Z0-9_-]+)\s*\}\}/g;
+
+/**
+ * Filters rejected inside a built-in (`kind: "ffmpeg"`) chain, with rationale:
+ * - `movie` / `amovie` read arbitrary files or URLs as new graph inputs. The fx stage compiles into one
+ *   hermetic chain fed by the clip's own input; an outside source breaks that assumption and turns a sequence
+ *   field into a file/URL read primitive.
+ * - `sendcmd` executes filter commands from a file at render time (a second program hidden in data).
+ * - `zmq` / `azmq` open network sockets for live remote control of the filter graph.
+ */
+const BANNED_BUILTIN_FX_FILTERS = new Set(["movie", "amovie", "sendcmd", "zmq", "azmq"]);
+
+/**
+ * Filter options that read external files (e.g. `lut3d=file=...`, `subtitles=filename=...`). Rejecting the
+ * option key keeps file-backed effects where they belong: in extensions (sandboxed, hash-pinned), never in a
+ * raw user chain. Residual: positional filename args (`subtitles=/x`) are not detected; document, don't chase.
+ */
+const FILE_READING_FX_OPTIONS = new Set(["file", "filename", "path"]);
+
+/** Split on a separator, ignoring separators inside single quotes and parens. Brackets are rejected earlier. */
+export function splitTopLevel(text: string, sep: "," | ":"): string[] {
+  const out: string[] = [];
+  let cur = "";
+  let depth = 0;
+  let quote = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote) {
+      cur += ch;
+      if (ch === "\\" && i + 1 < text.length) {
+        cur += text[i + 1];
+        i++;
+      } else if (ch === "'") {
+        quote = false;
+      }
+      continue;
+    }
+    if (ch === "\\" && i + 1 < text.length) {
+      cur += ch + text[i + 1];
+      i++;
+      continue;
+    }
+    if (ch === "'") {
+      quote = true;
+      cur += ch;
+      continue;
+    }
+    if (ch === "(") depth++;
+    else if (ch === ")") depth = Math.max(0, depth - 1);
+    if (ch === sep && depth === 0) {
+      out.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
+
+/** Filter name is the leading identifier of a segment (`scale=w=..` → `scale`). */
+function fxSegmentFilterName(segment: string): string {
+  const m = /^\s*([A-Za-z][A-Za-z0-9_]*)/.exec(segment);
+  return m ? m[1].toLowerCase() : "";
+}
+
+/** Option keys of one filter segment (`key=value` pieces of the args after the first `=`). */
+function fxSegmentOptionKeys(segment: string): string[] {
+  const eq = segment.indexOf("=");
+  if (eq === -1) return [];
+  const keys: string[] = [];
+  for (const piece of splitTopLevel(segment.slice(eq + 1), ":")) {
+    const keyEq = piece.indexOf("=");
+    if (keyEq === -1) continue;
+    keys.push(piece.slice(0, keyEq).trim().toLowerCase());
+  }
+  return keys;
+}
 
 /** Names in `animatable` must be declared number params (envelopes carry numbers). */
 function parseFxAnimatable(
@@ -64,6 +146,41 @@ function parseFxAnimatable(
   return [...seen];
 }
 
+/**
+ * Validates a built-in (`kind: "ffmpeg"`) raw chain. Returns the English G118 detail, or null when valid.
+ * Shared by the compiler and the verify gate so both always agree. Extension `video_filter` templates are
+ * checked with the same function at manifest load (placeholders sit in value position, so filter names and
+ * option keys read exactly as in a raw chain).
+ */
+export function checkBuiltinFxFilterChain(chain: unknown): string | null {
+  if (typeof chain !== "string" || !chain.trim()) {
+    return `'filter' must be a non-empty filter chain (e.g. "gblur=sigma=3").`;
+  }
+  const trimmed = chain.trim();
+  const badChar = trimmed.match(/[[;\]]/);
+  if (badChar) {
+    return `chain must not contain the graph separator ('${badChar[0]}') (compiled as a single chain).`;
+  }
+  if (/[\r\n\x00]/.test(trimmed)) {
+    return `chain must not contain line breaks.`;
+  }
+  for (const seg of splitTopLevel(trimmed, ",")) {
+    const name = fxSegmentFilterName(seg);
+    if (!name) {
+      return `unresolvable filter segment ('${seg.trim().slice(0, 40)}').`;
+    }
+    if (BANNED_BUILTIN_FX_FILTERS.has(name)) {
+      return `'${name}' filter is forbidden in a raw chain (it reads files or opens external commands/remote control).`;
+    }
+    for (const key of fxSegmentOptionKeys(seg)) {
+      if (FILE_READING_FX_OPTIONS.has(key)) {
+        return `'${key}=' in the '${name}' filter reads a file; effects using files must be defined in an extension.`;
+      }
+    }
+  }
+  return null;
+}
+
 /** Every `{{name}}` in the template must be a declared param, otherwise compile would emit it raw. */
 function assertFxPlaceholdersDeclared(
   template: string,
@@ -96,6 +213,20 @@ function assertFxTemplateSafe(template: string, extName: string, fxName: string)
       )
     );
   }
+}
+
+/** `alpha` is `"keep"` (default) or `"process"`; anything else is a manifest error. */
+function parseFxAlpha(raw: unknown, extName: string, fxName: string): "keep" | "process" | undefined {
+  if (raw === undefined) return undefined;
+  if (raw !== "keep" && raw !== "process") {
+    throw new CutholError(
+      DIAGNOSTICS.INVALID_EXTENSION_MANIFEST(
+        extName,
+        `'fx.${fxName}.alpha' must be "keep" or "process" (given: ${JSON.stringify(raw)}).`
+      )
+    );
+  }
+  return raw;
 }
 
 export function parseManifestFxSection(
@@ -135,12 +266,23 @@ export function parseManifestFxSection(
     const params = validateParamsMap(obj.params, extName, `fx.${fxName}`);
     const videoFilter = (obj.video_filter as string).trim();
     assertFxTemplateSafe(videoFilter, extName, fxName);
+    const banned = checkBuiltinFxFilterChain(videoFilter);
+    if (banned) {
+      throw new CutholError(
+        DIAGNOSTICS.INVALID_EXTENSION_MANIFEST(
+          extName,
+          `'fx.${fxName}.video_filter' uses a forbidden filter or file option (${banned}).`
+        )
+      );
+    }
     assertFxPlaceholdersDeclared(videoFilter, params, extName, fxName);
     const animatable = parseFxAnimatable(obj.animatable, params, extName, fxName);
+    const alpha = parseFxAlpha(obj.alpha, extName, fxName);
     out[fxName] = {
       ...(typeof obj.description === "string" ? { description: obj.description } : {}),
       ...(Object.keys(params).length > 0 ? { params } : {}),
       ...(animatable.length > 0 ? { animatable } : {}),
+      ...(alpha !== undefined ? { alpha } : {}),
       video_filter: videoFilter,
     };
   }

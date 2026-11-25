@@ -206,6 +206,8 @@ export function computeSceneThumbKey(sequence: any, scene: LiveSceneSummary, pro
           : null,
         typography: cue.typography ?? null,
         envelopes: cue.envelopes ?? null,
+        fx: cue.fx ?? null,
+        color: cue.color ?? null,
       });
     }
   }

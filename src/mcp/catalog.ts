@@ -15,6 +15,7 @@ import { TIMELINE_ACTION_SPECS } from "./catalog_specs_timeline.js";
 import { MEDIA_ACTION_SPECS } from "./catalog_specs_media.js";
 import { OUTPUT_ACTION_SPECS } from "./catalog_specs_output.js";
 import { COLOR_ACTION_SPECS } from "./catalog_specs_color.js";
+import { TREATMENT_ACTION_SPECS } from "./catalog_specs_treatments.js";
 
 export type { ParamType, ParamSpec, ActionSpec, ToolSpec } from "./catalog_types.js";
 
@@ -42,7 +43,7 @@ export const TOOL_SPECS: ToolSpec[] = [
     name: "spine",
     title: "Primary spine edits",
     description:
-      "Edit the magnetic primary storyline. Spine clips (sp_01, sp_02 …) play back-to-back with no gaps: trimming or removing a clip ripples everything after it, and lane cues anchored to a clip move with it.",
+      "Edit the magnetic primary storyline. Spine clips (sp_01, sp_02 …) play back-to-back with no gaps: trimming or removing a clip ripples everything after it, and lane cues anchored to a clip move with it. Fx entries of kind motion are placement layers (x/y/rotation add, scale/opacity multiply), read back with spine value.",
   },
   {
     name: "lane",
@@ -117,6 +118,7 @@ export const ACTION_SPECS: ActionSpec[] = [
   ...MEDIA_ACTION_SPECS,
   ...OUTPUT_ACTION_SPECS,
   ...COLOR_ACTION_SPECS,
+  ...TREATMENT_ACTION_SPECS,
 ];
 
 /** Tools that do not take a workspace `dir`. */

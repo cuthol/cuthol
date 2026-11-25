@@ -5,9 +5,9 @@ import { syncEnabledExtensionAssetsToComposition } from "./compositor/bridge_exp
 import {
   ensureCompositionRuntimeFiles,
   HyperFramesPresetKind,
-  scaffoldHyperFramesComposition,
   validateHyperFramesCompositionContract,
 } from "./compositor/hyperframes_bridge.js";
+import { attachScaffoldToRevision, scaffoldBeforeCommit } from "./compositor/scaffold_guard.js";
 import { readCurrentScriptErrorRecord } from "./compositor/coords_extract.js";
 import {
   probeScriptRecordsChildSync,
@@ -171,19 +171,28 @@ export function runLaneCommand(ctx: CliCommandContext): CliCommandResult {
     // If `--scaffold <preset>` is passed or the composition dir does not exist yet, scaffold it deterministically
     const { paths, sequence } = loadSequence(workspaceDir);
     const absCompDir = path.isAbsolute(compDir) ? compDir : path.resolve(workspaceDir, compDir);
+    // Edited files in the folder stop the scaffold (G215) unless --force; a forced overwrite rides on
+    // the cue's own revision, so one undo removes the cue and brings the edited files back.
+    let scaffoldStep: ReturnType<typeof scaffoldBeforeCommit> | null = null;
     if (flags["scaffold"] || !fs.existsSync(path.join(absCompDir, entryHtml))) {
       const preset = (strFlag(flags, "scaffold", "lower_third") as HyperFramesPresetKind) ?? "lower_third";
-      scaffoldHyperFramesComposition({
-        targetDir: absCompDir,
-        width: sequence.stage.width,
-        height: sequence.stage.height,
-        fps: sequence.stage.fps,
-        durationMs,
-        preset,
-        props,
-        transparent,
+      scaffoldStep = scaffoldBeforeCommit({
+        workspaceDir,
+        force: boolFlag(flags, "force", false) ?? false,
+        scaffold: {
+          targetDir: absCompDir,
+          width: sequence.stage.width,
+          height: sequence.stage.height,
+          fps: sequence.stage.fps,
+          durationMs,
+          preset,
+          props,
+          transparent,
+        },
       });
     }
+    let addCommitted = false;
+    try {
 
     // Place missing runtime files into the folder without touching the
     // agent-written entry HTML (no `composition scaffold` round-trip needed).
@@ -282,6 +291,15 @@ export function runLaneCommand(ctx: CliCommandContext): CliCommandResult {
         mode,
       },
     });
+    addCommitted = true;
+    if (scaffoldStep?.sidecarFiles) {
+      attachScaffoldToRevision({
+        workspaceDir,
+        absDir: absCompDir,
+        revision: res.revision,
+        sidecarFiles: scaffoldStep.sidecarFiles,
+      });
+    }
     // Absent `composition_audio` already means `mix`; only an explicit `off`
     // needs a second journaled write at creation time.
     const addCompAudio = parseCompositionAudioFlag(res.cue.id, strFlag(flags, "composition-audio"));
@@ -297,9 +315,13 @@ export function runLaneCommand(ctx: CliCommandContext): CliCommandResult {
     emitEnvelopeJson(workspaceDir, "lane.add-composition", {
       action: "lane.add-composition",
       ...emitted,
+      ...(scaffoldStep && scaffoldStep.overwritten.length > 0 ? { overwritten: scaffoldStep.overwritten } : {}),
       ...(addDiagnostics.length > 0 ? { diagnostics: addDiagnostics } : {}),
     });
     return;
+    } finally {
+      if (!addCommitted) scaffoldStep?.rollback();
+    }
   }
 
   if (action === "update-cue") {

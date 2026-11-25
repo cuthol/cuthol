@@ -2,6 +2,7 @@
 import { CutholError, DIAGNOSTICS } from "./core/diagnostics.js";
 import {
   AGENT_IDS,
+  detectAgentTargets,
   installSkills,
   isValidAgentId,
   listSkillsStatus,
@@ -59,6 +60,21 @@ export function runSkillsCommand(ctx: CliCommandContext): CliCommandResult {
   }
 
   if (skillsAction === "install") {
+    // Without --agent nothing is written: list the detected tools and the
+    // exact command per tool. Skills are only installed for named tools.
+    if (!ids && !customDir) {
+      const detected = detectAgentTargets();
+      const empty = listSkillsStatus({ targets: [] });
+      emitEnvelopeJson(workspaceDir, "skills.install", {
+        package_version: empty.package_version,
+        skills: empty.skills,
+        targets: [],
+        detected: detected.map((t) => t.id),
+        hint: "No agent selected; nothing written. Run one command per tool you use:",
+        commands: detected.map((t) => `cuthol skills install --agent ${t.id}`),
+      });
+      return;
+    }
     const report = installSkills({ targets, force: boolFlag(flags, "force", false) });
     emitEnvelopeJson(workspaceDir, "skills.install", { ...report });
     return;
