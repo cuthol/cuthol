@@ -398,6 +398,13 @@ export interface CutholSequence {
      * monitor, Live preview, timeline export and output duration apply the rate.
      */
     tempo?: number;
+    /**
+     * Default fade (ms) applied at each discontinuous spine join: the outgoing
+     * clip fades out over its last N ms and the incoming clip fades in over
+     * its first N ms (`afade` pair, no timeline overlap). Absent = 10.
+     * Explicit 0 turns the join fades off.
+     */
+    audio_join_fade_ms?: number;
     timebase: "ms";
     color_space: "bt709";
     backdrop: {

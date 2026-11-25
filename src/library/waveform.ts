@@ -75,6 +75,110 @@ export interface AcousticWindowProfile {
 const acousticWindowCache = new Map<string, AcousticWindowProfile>();
 
 /**
+ * Version tag for the persisted acoustic-window profile. Bump when the
+ * 25 ms window / floor maths changes so stale rows miss the cache.
+ */
+export const ACOUSTIC_WINDOWS_CACHE_VERSION = "v2";
+
+/**
+ * Lossless ledger row: window dB stored as the exact Float64 values, base64 of
+ * the `Float64Array` raw bytes in little-endian byte order; every other number
+ * is stored unrounded.
+ */
+export interface AcousticWindowsCacheRow {
+  version: string;
+  sample_rate_hz: number;
+  window_ms: number;
+  duration_ms: number;
+  silence_floor_dbfs: number;
+  has_silence_variation: boolean;
+  window_db_f64le_b64: string;
+}
+
+export function acousticWindowsCacheKey(digestSha256: string): string {
+  return `acoustic-windows:${ACOUSTIC_WINDOWS_CACHE_VERSION}:${digestSha256}`;
+}
+
+function encodeAcousticProfile(profile: AcousticWindowProfile): AcousticWindowsCacheRow {
+  const bytes = Buffer.from(
+    profile.window_dbfs.buffer,
+    profile.window_dbfs.byteOffset,
+    profile.window_dbfs.byteLength
+  );
+  const leBytes = Buffer.alloc(bytes.length);
+  if (os.endianness() === "LE") {
+    bytes.copy(leBytes);
+  } else {
+    for (let i = 0; i < bytes.length; i += 8) {
+      for (let b = 0; b < 8; b++) leBytes[i + b] = bytes[i + 7 - b];
+    }
+  }
+  return {
+    version: ACOUSTIC_WINDOWS_CACHE_VERSION,
+    sample_rate_hz: profile.sample_rate_hz,
+    window_ms: profile.window_ms,
+    duration_ms: profile.duration_ms,
+    silence_floor_dbfs: profile.silence_floor_dbfs,
+    has_silence_variation: profile.has_silence_variation,
+    window_db_f64le_b64: leBytes.toString("base64"),
+  };
+}
+
+function decodeAcousticProfile(row: AcousticWindowsCacheRow): AcousticWindowProfile | null {
+  if (!row || row.version !== ACOUSTIC_WINDOWS_CACHE_VERSION) return null;
+  if (typeof row.window_db_f64le_b64 !== "string") return null;
+  if (typeof row.window_ms !== "number" || typeof row.silence_floor_dbfs !== "number") return null;
+  let bytes: Buffer;
+  try {
+    bytes = Buffer.from(row.window_db_f64le_b64, "base64");
+  } catch {
+    return null;
+  }
+  if (bytes.length % 8 !== 0) return null;
+  const winDbs = new Float64Array(bytes.length / 8);
+  if (os.endianness() === "LE") {
+    Buffer.from(winDbs.buffer).set(bytes);
+  } else {
+    for (let i = 0; i < bytes.length; i += 8) {
+      const word = Buffer.alloc(8);
+      for (let b = 0; b < 8; b++) word[b] = bytes[i + 7 - b];
+      winDbs[i / 8] = word.readDoubleLE(0);
+    }
+  }
+  if (winDbs.length > 0) {
+    for (let i = 0; i < winDbs.length; i++) {
+      if (!Number.isFinite(winDbs[i])) return null;
+    }
+  }
+  return {
+    sample_rate_hz: row.sample_rate_hz,
+    window_ms: row.window_ms,
+    duration_ms: row.duration_ms,
+    silence_floor_dbfs: row.silence_floor_dbfs,
+    has_silence_variation: row.has_silence_variation,
+    window_dbfs: winDbs,
+  };
+}
+
+function readPersistedAcousticProfile(ledger: MediaLedger, digestSha256: string): AcousticWindowProfile | null {
+  try {
+    const row = ledger.getAcousticWindows<AcousticWindowsCacheRow>(acousticWindowsCacheKey(digestSha256));
+    if (!row) return null;
+    return decodeAcousticProfile(row);
+  } catch {
+    return null;
+  }
+}
+
+function writePersistedAcousticProfile(ledger: MediaLedger, digestSha256: string, profile: AcousticWindowProfile): void {
+  try {
+    ledger.setAcousticWindows(acousticWindowsCacheKey(digestSha256), digestSha256, encodeAcousticProfile(profile));
+  } catch {
+    // Cache write failures fall back to measuring; never fail verify.
+  }
+}
+
+/**
  * In-place Radix-2 Cooley-Tukey FFT.
  */
 export function radix2Fft(real: Float64Array, imag: Float64Array): void {
@@ -494,6 +598,22 @@ export function measureAssetAcousticWindows(options: {
   }
 
   const absFile = resolveLibraryItemPath(paths.rootDir, item);
+
+  try {
+    const readLedger = new MediaLedger(paths.ledgerFile);
+    try {
+      const persisted = readPersistedAcousticProfile(readLedger, item.digest_sha256);
+      if (persisted) {
+        acousticWindowCache.set(item.digest_sha256, persisted);
+        return persisted;
+      }
+    } finally {
+      readLedger.close();
+    }
+  } catch {
+    // Fall through to measuring.
+  }
+
   if (!fs.existsSync(absFile)) {
     return null;
   }
@@ -590,6 +710,16 @@ export function measureAssetAcousticWindows(options: {
   };
 
   acousticWindowCache.set(item.digest_sha256, profile);
+  try {
+    const writeLedger = new MediaLedger(paths.ledgerFile);
+    try {
+      writePersistedAcousticProfile(writeLedger, item.digest_sha256, profile);
+    } finally {
+      writeLedger.close();
+    }
+  } catch {
+    // Cache write failures fall back to measuring; never fail verify.
+  }
   return profile;
 }
 

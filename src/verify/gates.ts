@@ -41,6 +41,53 @@ import { verifySpineFx } from "./gates_fx.js";
 import { verifyPresetBindings } from "./gates_preset.js";
 import { verifyTransitionBackstop } from "./gates_transitions.js";
 import { verifyColorGates } from "./gates_color.js";
+import { measureAssetAcousticWindows } from "../library/waveform.js";
+import { summarizeJoinEdgeLoudness } from "../speech/cleanup_acoustic.js";
+
+/**
+ * Surfaces the cleanup join-edge summary as INFO on `verify` (best effort:
+ * skipped when no excise joins exist or acoustic profiles are unmeasurable).
+ */
+function pushJoinEdgeSummaryInfo(
+  seq: CutholSequence,
+  paths: WorkspacePaths | undefined,
+  diagnostics: CutholDiagnostic[]
+): void {
+  if (!paths) return;
+  try {
+    const byAsset = new Map<string, typeof seq.spine.clips>();
+    for (const clip of seq.spine.clips) {
+      const list = byAsset.get(clip.asset_handle) ?? [];
+      list.push(clip);
+      byAsset.set(clip.asset_handle, list);
+    }
+    let hasJoin = false;
+    for (const list of byAsset.values()) {
+      const sorted = list.slice().sort((a, b) => a.source_in_ms - b.source_in_ms);
+      for (let i = 0; i < sorted.length - 1; i++) {
+        if (sorted[i + 1].source_in_ms >= sorted[i].source_out_ms + 2) {
+          hasJoin = true;
+          break;
+        }
+      }
+      if (hasJoin) break;
+    }
+    if (!hasJoin) return;
+    const profileByHandle = new Map<string, ReturnType<typeof measureAssetAcousticWindows>>();
+    for (const asset of byAsset.keys()) {
+      try {
+        profileByHandle.set(asset, measureAssetAcousticWindows({ workspaceDir: paths.rootDir, handle: asset }));
+      } catch {
+        profileByHandle.set(asset, null);
+      }
+    }
+    const summary = summarizeJoinEdgeLoudness({ clips: seq.spine.clips, profileByHandle });
+    if (summary.total_joins === 0) return;
+    diagnostics.push(DIAGNOSTICS.JOIN_EDGE_SUMMARY(summary.summary_line));
+  } catch {
+    // Acoustic summary is informational only; never fail verification for it.
+  }
+}
 import { verifyEmptyCompositions } from "./gates_empty_composition.js";
 import { verifyBoundaryContinuity } from "./gates_boundary.js";
 
@@ -368,6 +415,7 @@ export function verifySequence(
   if (gateSet.has("G5_SIGNAL")) {
     verifyG5Signal(seq, paths, libMap, diagnostics);
     verifyBoundaryContinuity(seq, paths, diagnostics);
+    pushJoinEdgeSummaryInfo(seq, paths, diagnostics);
   }
 
   const errorCount = diagnostics.filter((d) => d.severity === "ERROR").length;

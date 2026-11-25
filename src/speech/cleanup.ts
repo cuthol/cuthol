@@ -136,6 +136,12 @@ export interface DialogueCleanupResult {
   distant_repetition_candidates: RepetitionRestartCandidate[];
   preserved_untranscribed: PreservedUntranscribedSpan[];
   tail_without_audio_candidates: TailWithoutAudioCandidate[];
+  edge_placement?: {
+    filler: { cuts: number; edges_moved: number; edges_still_loud: number };
+    repetition: { cuts: number; edges_moved: number; edges_still_loud: number };
+    pause: { cuts: number; edges_moved: number; edges_still_loud: number; edges_refined?: number };
+  };
+  edge_placement_summary?: string;
   decision_trace: DecisionTrace;
   remaining_clips?: SpineClip[];
   cue_id?: string;
@@ -223,6 +229,8 @@ export function cleanupClipDialogue(options: {
     totalSavedSourceMs,
     totalSavedSeqMs,
     globalSilenceFloorVal,
+    edgePlacement,
+    edgePlacementSummary,
   } = planTargetClipsCuts({
     sequence,
     targetClips,
@@ -268,6 +276,14 @@ export function cleanupClipDialogue(options: {
   const clipIdSummary =
     targetClips.length === 1 ? targetClips[0].id : targetClips.map((c) => c.id).join(",");
   const clipIdsList = targetClips.map((c) => c.id);
+  // The edge-placement aggregate only exists when filler/repetition cuts were
+  // planned: pause-only projects keep byte-identical output.
+  const hasWordCuts = allPlannedCuts.some(
+    (c) => c.kind === "filler" || c.kind === "repetition"
+  );
+  const edgePlacementFields = hasWordCuts
+    ? { edge_placement: edgePlacement, edge_placement_summary: edgePlacementSummary }
+    : {};
 
   if (dryRun || allPlannedCuts.length === 0) {
     return {
@@ -284,6 +300,7 @@ export function cleanupClipDialogue(options: {
       distant_repetition_candidates: distantRepetitionCandidates,
       preserved_untranscribed: preservedUntranscribed,
       tail_without_audio_candidates: tailWithoutAudioCandidates,
+      ...edgePlacementFields,
       decision_trace: buildTrace(sequence.meta.revision),
       ...(dryRun ? {} : { remaining_clips: targetClips, revision: sequence.meta.revision }),
     };
@@ -305,6 +322,7 @@ export function cleanupClipDialogue(options: {
     distantRepetitionCandidates,
     preservedUntranscribed,
     tailWithoutAudioCandidates,
+    ...(hasWordCuts ? { edgePlacement, edgePlacementSummary } : {}),
     selectedReviewIds,
     selectedRepetitionIds,
     selectedTailIds,

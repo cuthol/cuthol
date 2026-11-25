@@ -15,6 +15,7 @@ import { placementLayers, placementStaticValue } from "../sequence/placement_res
 import { MOTION_FX_KIND, PLACEMENT_CHANNELS } from "../effects/effect_types.js";
 import { isVerticalStage, OPEN_STANDARDS } from "../core/standards.js";
 import { formatTimecode } from "../core/time.js";
+import { audioJoinFadeMsOf, DEFAULT_AUDIO_JOIN_FADE_MS } from "../sequence/tempo.js";
 import {
   computeSequenceDurationMs,
   describeSequenceExtent,
@@ -229,8 +230,10 @@ function renderOverviewLens(seq: CutholSequence): string {
   );
   lines.push(`- Colour: \`${describeSequenceColour(seq)}\``);
   const tempoRate = seq.stage.tempo ?? 1;
+  const joinFadeMs = audioJoinFadeMsOf(seq);
+  const fadeSuffix = joinFadeMs !== DEFAULT_AUDIO_JOIN_FADE_MS ? ` | Join fade: \`${joinFadeMs}ms\`` : "";
   lines.push(
-    `- Sequence Duration: \`${totalMs}ms\` (\`${formatTimecode(totalMs)}\`) | Magnetic Spine: \`${seq.spine.magnetic ? "ON" : "OFF"}\`${describeSpinelessExtent(seq)}${tempoRate !== 1 ? ` | Tempo: \`${tempoRate}x\` (output \`${Math.max(1, Math.round(totalMs / tempoRate))}ms\`)` : ""}`
+    `- Sequence Duration: \`${totalMs}ms\` (\`${formatTimecode(totalMs)}\`) | Magnetic Spine: \`${seq.spine.magnetic ? "ON" : "OFF"}\`${describeSpinelessExtent(seq)}${tempoRate !== 1 ? ` | Tempo: \`${tempoRate}x\` (output \`${Math.max(1, Math.round(totalMs / tempoRate))}ms\`)` : ""}${fadeSuffix}`
   );
   lines.push("");
 

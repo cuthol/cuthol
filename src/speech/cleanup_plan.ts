@@ -7,10 +7,39 @@ import { measureAssetAcousticWindows } from "../library/waveform.js";
 import { sourceMsToSequenceMs } from "../sequence/spine.js";
 import type { PlannedCutInterval } from "./cleanup.js";
 import {
+  isKeptEdgeLoud,
   RawCandidate,
   refineSelectedCandidateSpanAcoustically,
+  snapPlannedFillerEdgesToQuiet,
   verifyPauseCandidatesAcoustically,
 } from "./cleanup_acoustic.js";
+
+export interface EdgePlacementKindStats {
+  cuts: number;
+  edges_moved: number;
+  edges_still_loud: number;
+  /** Pause-path acoustic refinement count (kept separately, never in edges_moved). */
+  edges_refined?: number;
+}
+
+export interface EdgePlacementStats {
+  filler: EdgePlacementKindStats;
+  repetition: EdgePlacementKindStats;
+  pause: EdgePlacementKindStats;
+}
+
+export function emptyEdgePlacementStats(): EdgePlacementStats {
+  const blank = (): EdgePlacementKindStats => ({ cuts: 0, edges_moved: 0, edges_still_loud: 0 });
+  return { filler: blank(), repetition: blank(), pause: blank() };
+}
+
+export function formatEdgePlacementSummary(stats: EdgePlacementStats): string {
+  const wordPart = (name: string, s: EdgePlacementKindStats): string =>
+    `${name} ${s.cuts} cuts, ${s.edges_moved} edges moved, ${s.edges_still_loud} still loud`;
+  const pausePart = (s: EdgePlacementKindStats): string =>
+    `pause ${s.cuts} cuts, ${s.edges_still_loud} still loud`;
+  return `edge placement: ${wordPart("filler", stats.filler)}; ${wordPart("repetition", stats.repetition)}; ${pausePart(stats.pause)}`;
+}
 import type { CleanupAssetLoaders, SelectedCandidateSpan } from "./cleanup_candidates.js";
 import {
   DetectedDisfluencySpan,
@@ -127,6 +156,8 @@ export function collectClipRawCandidates(params: {
     if (origEnd <= origStart) continue;
 
     if (span.kind !== "pause") {
+      // Keep raw ASR edges here: bridging (and its pause decisions) must see
+      // exactly the old inputs. Acoustic placement happens after bridging.
       rawNonPauseCandidates.push({
         kind: span.kind,
         label: span.label,
@@ -805,6 +836,8 @@ export function planTargetClipsCuts(params: {
   totalSavedSourceMs: number;
   totalSavedSeqMs: number;
   globalSilenceFloorVal: number;
+  edgePlacement: EdgePlacementStats;
+  edgePlacementSummary: string;
 } {
   const {
     sequence,
@@ -829,6 +862,7 @@ export function planTargetClipsCuts(params: {
   let totalSavedSourceMs = 0;
   let totalSavedSeqMs = 0;
   let globalSilenceFloorVal: number = OPEN_STANDARDS.DIALOGUE_CLEANUP.SILENCE_FLOOR_DBFS;
+  const edgePlacement = emptyEdgePlacementStats();
 
   for (const clip of targetClips) {
     const assetItem = sequence.library.find((a) => a.handle === clip.asset_handle);
@@ -936,8 +970,7 @@ export function planTargetClipsCuts(params: {
       hasKeptWordInSpan,
     });
 
-    const { mergedRanges, clipSavedSourceMs, clipSavedSeqMs } =
-      bridgeInterCutSliversAndSummarizeClip({
+    const { mergedRanges } = bridgeInterCutSliversAndSummarizeClip({
         clip,
         sequence,
         plannedCuts,
@@ -947,6 +980,69 @@ export function planTargetClipsCuts(params: {
         minRemainderTimelineMs,
         hasKeptWordInSpan,
       });
+
+    // Quiet-edge pass over filler/repetition cuts AFTER bridging, so pause
+    // bridging decisions (and the pause set) are exactly the old behaviour.
+    // Bridging only ever extends cut interiors, never the kept joins.
+    snapPlannedFillerEdgesToQuiet({
+      plannedCuts,
+      clip,
+      transcriptWords,
+      acousticProfile,
+    });
+
+    // Re-derive merged ranges from the snapped edges (same overlap-merge rule).
+    mergedRanges.length = 0;
+    for (const c of plannedCuts) {
+      if (mergedRanges.length === 0 || c.padded_source_start_ms > mergedRanges[mergedRanges.length - 1].end_ms) {
+        mergedRanges.push({ start_ms: c.padded_source_start_ms, end_ms: c.padded_source_end_ms });
+      } else {
+        mergedRanges[mergedRanges.length - 1].end_ms = Math.max(
+          mergedRanges[mergedRanges.length - 1].end_ms,
+          c.padded_source_end_ms
+        );
+      }
+    }
+    const clipSavedSourceMs = mergedRanges.reduce((acc, r) => acc + (r.end_ms - r.start_ms), 0);
+    const clipSavedSeqMs = mergedRanges.reduce(
+      (acc, r) =>
+        acc +
+        Math.max(0, sourceMsToSequenceMs(clip, r.end_ms) - sourceMsToSequenceMs(clip, r.start_ms)),
+      0
+    );
+
+    if (acousticProfile && acousticProfile.has_silence_variation) {
+      for (const c of plannedCuts) {
+        if (c.kind !== "filler" && c.kind !== "repetition" && c.kind !== "pause") continue;
+        const bucket = edgePlacement[c.kind];
+        bucket.cuts += 1;
+        const origStart =
+          typeof c.original_source_start_ms === "number"
+            ? c.original_source_start_ms
+            : c.raw_source_start_ms;
+        const origEnd =
+          typeof c.original_source_end_ms === "number"
+            ? c.original_source_end_ms
+            : c.raw_source_end_ms;
+        // The pause count comes from the pause path's own older acoustic
+        // refinement, not from quiet-point placement: keep that number in
+        // edges_refined so the summary never claims pause edges moved.
+        const movedCounter = c.kind === "pause" ? "edges_refined" : "edges_moved";
+        if (c.padded_source_start_ms !== origStart) bucket[movedCounter] = (bucket[movedCounter] ?? 0) + 1;
+        if (c.padded_source_end_ms !== origEnd) bucket[movedCounter] = (bucket[movedCounter] ?? 0) + 1;
+        if (isKeptEdgeLoud(acousticProfile, c.padded_source_start_ms, "before")) {
+          bucket.edges_still_loud += 1;
+        }
+        if (isKeptEdgeLoud(acousticProfile, c.padded_source_end_ms, "after")) {
+          bucket.edges_still_loud += 1;
+        }
+      }
+    } else {
+      for (const c of plannedCuts) {
+        if (c.kind !== "filler" && c.kind !== "repetition" && c.kind !== "pause") continue;
+        edgePlacement[c.kind].cuts += 1;
+      }
+    }
 
     totalSavedSourceMs += clipSavedSourceMs;
     totalSavedSeqMs += clipSavedSeqMs;
@@ -971,5 +1067,7 @@ export function planTargetClipsCuts(params: {
     totalSavedSourceMs,
     totalSavedSeqMs,
     globalSilenceFloorVal,
+    edgePlacement,
+    edgePlacementSummary: formatEdgePlacementSummary(edgePlacement),
   };
 }

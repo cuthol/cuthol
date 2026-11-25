@@ -188,12 +188,40 @@ function downloadModel(plan: LocalSpeechSetupPlan): void {
   }
 }
 
+/**
+ * Run Piper itself (`python -m piper --help`, short timeout) to prove the
+ * installed venv is not broken (e.g. a `uv` trampoline left behind by a
+ * copied or moved folder). Throws when the install record exists but Piper
+ * does not run.
+ */
+export function verifyLocalSpeechPiper(plan: LocalSpeechSetupPlan): void {
+  const py = venvPython(plan);
+  const proc = spawnSync(py, ["-m", "piper", "--help"], {
+    windowsHide: true,
+    encoding: "utf8",
+    timeout: 30_000,
+    maxBuffer: 4 * 1024 * 1024,
+  });
+  const detail = (
+    proc.stderr ||
+    (proc.error instanceof Error ? proc.error.message : String(proc.error ?? "")) ||
+    proc.stdout ||
+    "piper did not run"
+  ).trim().slice(-500);
+  if (proc.error || proc.status !== 0) {
+    fail("piper-check", `Piper in '${plan.venvDir}' is broken (${detail}); reinstall or re-run with '--apply' after removing '${plan.venvDir}'.`);
+  }
+}
+
 export async function applyLocalSpeechSetup(
   options: LocalSpeechSetupOptions = {},
   startedAt = Date.now()
 ): Promise<{ plan: LocalSpeechSetupPlan; noop: boolean; seconds: number }> {
   const plan = planLocalSpeechSetup(options);
-  if (plan.alreadyInstalled) return { plan, noop: true, seconds: 0 };
+  if (plan.alreadyInstalled) {
+    verifyLocalSpeechPiper(plan);
+    return { plan, noop: true, seconds: 0 };
+  }
 
   fs.mkdirSync(plan.root, { recursive: true });
   const py = venvPython(plan);

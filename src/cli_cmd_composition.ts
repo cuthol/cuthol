@@ -239,6 +239,25 @@ export function runCompositionCommand(ctx: CliCommandContext): CliCommandResult 
   return CLI_NOT_HANDLED;
 }
 
+/**
+ * Resolve a cue-sheet `--file` value. Outputs resolve against the project
+ * folder (`--dir`): a relative path is written under the workspace, an
+ * absolute path is used unchanged. Inputs resolve against the working
+ * directory first, then under the workspace.
+ */
+export function resolveCueSheetWritePath(sheetFile: string, workspaceDir: string): string {
+  if (path.isAbsolute(sheetFile)) return sheetFile;
+  return path.join(workspaceDir, sheetFile);
+}
+
+export function resolveCueSheetReadPath(sheetFile: string, workspaceDir: string): string {
+  const cwdPath = path.resolve(sheetFile);
+  if (fs.existsSync(cwdPath)) return cwdPath;
+  const dirPath = path.isAbsolute(sheetFile) ? sheetFile : path.join(workspaceDir, sheetFile);
+  if (fs.existsSync(dirPath)) return dirPath;
+  throw new CutholError(DIAGNOSTICS.CUE_SHEET_FILE_NOT_FOUND([cwdPath, dirPath]));
+}
+
 export function runCueCommand(ctx: CliCommandContext): CliCommandResult {
   const { action, rest, flags, workspaceDir } = ctx;
   const sheetFile = strFlag(flags, "file") ?? rest[0];
@@ -246,14 +265,20 @@ export function runCueCommand(ctx: CliCommandContext): CliCommandResult {
     const { sequence } = loadSequence(workspaceDir);
     const exported = exportSequenceToCueSheet(sequence);
     if (sheetFile) {
-      fs.writeFileSync(path.resolve(sheetFile), JSON.stringify(exported, null, 2), "utf8");
+      fs.writeFileSync(
+        resolveCueSheetWritePath(sheetFile, workspaceDir),
+        JSON.stringify(exported, null, 2),
+        "utf8"
+      );
     }
     emitEnvelopeJson(workspaceDir, "cue.export", { action: "cue.export", sheet: exported });
     return;
   }
 
   if (!sheetFile) throw new Error("Provide --file <cuthol.cues.json>.");
-  const sheet = JSON.parse(fs.readFileSync(path.resolve(sheetFile), "utf8")) as CutholCueSheet;
+  const sheet = JSON.parse(
+    fs.readFileSync(resolveCueSheetReadPath(sheetFile, workspaceDir), "utf8")
+  ) as CutholCueSheet;
 
   if (action === "diff") {
     const { sequence } = loadSequence(workspaceDir);

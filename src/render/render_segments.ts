@@ -22,7 +22,7 @@ import {
 import { CutholSequence } from "../core/schema.js";
 import { WorkspacePaths } from "../core/workspace.js";
 import { runParallelFfmpegJobsSync } from "./render_frames.js";
-import { atempoChain, outputDurationMs, tempoOf } from "../sequence/tempo.js";
+import { atempoChain, audioJoinFadeMsOf, outputDurationMs, tempoOf } from "../sequence/tempo.js";
 
 export interface RenderTimeSegment {
   index: number;
@@ -270,6 +270,10 @@ export function buildOrRenderSequenceAudioForMixOrRender(
         JSON.stringify({
           libDigests,
           segSamples,
+          // The spine-join fade setting changes the filter text itself, but it
+          // is also hashed explicitly so old `aseg_*` files (rendered without
+          // the join fades) are never reused once the setting changes.
+          joinFadeMs: audioJoinFadeMsOf(seq),
           inputArgs: segPlan.inputArgs,
           segFilter,
         })

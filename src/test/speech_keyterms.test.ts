@@ -9,8 +9,9 @@
  * - Keyterms are part of the transcription request and of the transcript cache
  *   key: a scoped transcript never serves a request without keyterms and a
  *   plain transcript never serves a request with keyterms.
- * - Without keyterms every cache key is byte-identical to the old scheme, so
- *   existing cached transcripts keep hitting (no paid re-transcribe).
+ * - Without keyterms every cache key keeps the old scheme except the local
+ *   provider's key, which carries the engine revision (cloud keys stay
+ *   byte-identical, so existing cloud transcripts keep hitting).
  */
 
 import assert from "node:assert/strict";
@@ -27,6 +28,7 @@ import { buildCliArgv, findActionSpec } from "../mcp/catalog.js";
 import { cleanupClipDialogue } from "../speech/cleanup.js";
 import {
   loadCachedTranscriptForAsset,
+  localAsrCachePrefix,
   transcribeLibraryAsset,
 } from "../speech/transcribe.js";
 
@@ -148,7 +150,7 @@ test("keyterms reach the provider request and scope the cache key", async () => 
   assert.deepEqual(transcriptWords(plainAfter.transcript), ["base"]);
 });
 
-test("cache keys without keyterms are byte-identical to the old scheme", async () => {
+test("cache keys without keyterms keep the old scheme except the revisioned local key", async () => {
   const wsDir = setupWs("ws_key_identity");
   // Sidecar-backed local provider: no install, no network, no paid call.
   fs.writeFileSync(
@@ -169,11 +171,12 @@ test("cache keys without keyterms are byte-identical to the old scheme", async (
   const ledger = new MediaLedger(path.join(wsDir, ".cuthol", "ledger.sqlite"));
   try {
     const sha = res.sha256;
-    // Old scheme writes exactly these keys (see transcribe.ts write path):
-    // `<provider>:<lang>`, bare `<lang>`, `auto`, `latest`.
-    for (const key of ["local:tr", "tr", "auto", "latest"]) {
+    // The local provider's key carries the engine revision (see
+    // localAsrCachePrefix); every other key is byte-identical to the old
+    // scheme so existing cloud transcripts keep hitting.
+    for (const key of [`${localAsrCachePrefix()}:tr`, "tr", "auto", "latest"]) {
       const rec = ledger.getTranscript(sha, key);
-      assert.ok(rec, `expected old-scheme cache key ${key} to exist`);
+      assert.ok(rec, `expected cache key ${key} to exist`);
     }
   } finally {
     ledger.close();

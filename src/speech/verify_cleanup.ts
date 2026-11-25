@@ -19,6 +19,10 @@ import { AcousticWindowProfile, measureAssetAcousticWindows } from "../library/w
 import { projectTranscriptAcrossSequence, sourceMsToSequenceMs } from "../sequence/spine.js";
 import { resolveCleanupTargetClips } from "./cleanup_candidates.js";
 import {
+  JOIN_EDGE_LOUD_SHARE_WARN_THRESHOLD,
+  summarizeJoinEdgeLoudness,
+} from "./cleanup_acoustic.js";
+import {
   AsrProviderId,
   normalizeTokenForMatch,
   RawTranscriptWord,
@@ -91,6 +95,23 @@ export interface VerifyRepeatedPhrase {
   preserved_untranscribed?: VerifyPreservedLink;
 }
 
+export interface VerifyJoinEdgeSummary {
+  total_joins: number;
+  loud_joins: number;
+  loud_share: number;
+  worst: Array<{
+    join_id: string;
+    asset_handle: string;
+    source_ms: number;
+    edge: "left" | "right";
+    max_dbfs: number;
+  }>;
+  summary_line: string;
+  abnormal: boolean;
+  diagnostic_code: string;
+  diagnostic_severity: "INFO" | "WARN";
+}
+
 export interface VerifyCleanupResult {
   dry_run: true;
   clip_id: string;
@@ -109,6 +130,7 @@ export interface VerifyCleanupResult {
   repeated_phrases: VerifyRepeatedPhrase[];
   unexpected_words: VerifyUnexpectedWord[];
   substituted_words: VerifySubstitutedWord[];
+  join_edge_summary: VerifyJoinEdgeSummary;
 }
 
 interface ExpectedTok {
@@ -705,6 +727,49 @@ function roundRate(matched: number, expected: number, heard: number): number {
   return Math.round(rate * 10000) / 10000;
 }
 
+/**
+ * Acoustic-only join summary for `speech verify-cleanup`: no transcription,
+ * just the kept-edge loudness of every excise join on the spine.
+ */
+export function buildJoinEdgeSummary(
+  workspaceDir: string,
+  sequence: CutholSequence
+): VerifyJoinEdgeSummary {
+  const profileByHandle = new Map<string, AcousticWindowProfile | null>();
+  const seen = new Set<string>();
+  for (const clip of sequence.spine.clips) {
+    if (seen.has(clip.asset_handle)) continue;
+    seen.add(clip.asset_handle);
+    try {
+      profileByHandle.set(
+        clip.asset_handle,
+        measureAssetAcousticWindows({ workspaceDir, handle: clip.asset_handle })
+      );
+    } catch {
+      profileByHandle.set(clip.asset_handle, null);
+    }
+  }
+  const summary = summarizeJoinEdgeLoudness({
+    clips: sequence.spine.clips,
+    profileByHandle,
+  });
+  const abnormal =
+    summary.total_joins > 0 && summary.loud_share >= JOIN_EDGE_LOUD_SHARE_WARN_THRESHOLD;
+  const diagnostic = abnormal
+    ? DIAGNOSTICS.JOIN_EDGE_LOUD_SHARE_HIGH(summary.summary_line)
+    : DIAGNOSTICS.JOIN_EDGE_SUMMARY(summary.summary_line);
+  return {
+    total_joins: summary.total_joins,
+    loud_joins: summary.loud_joins,
+    loud_share: summary.loud_share,
+    worst: summary.worst,
+    summary_line: diagnostic.formatted,
+    abnormal,
+    diagnostic_code: diagnostic.code,
+    diagnostic_severity: diagnostic.severity as "INFO" | "WARN",
+  };
+}
+
 export async function verifyCleanup(options: VerifyCleanupOptions): Promise<VerifyCleanupResult> {
   const { paths, sequence } = loadSequence(options.workspaceDir);
   loadDotEnvIfNeeded(paths.rootDir);
@@ -727,6 +792,7 @@ export async function verifyCleanup(options: VerifyCleanupOptions): Promise<Veri
     clips,
     language
   );
+  const joinEdgeSummary = buildJoinEdgeSummary(options.workspaceDir, sequence);
   const provider = resolveProvider(
     typeof options.provider === "string" ? options.provider : undefined,
     [...docsByHandle.values()]
@@ -815,5 +881,6 @@ export async function verifyCleanup(options: VerifyCleanupOptions): Promise<Veri
     repeated_phrases: findRepeatedPhrases(heard, preserved),
     unexpected_words,
     substituted_words,
+    join_edge_summary: joinEdgeSummary,
   };
 }

@@ -23,6 +23,7 @@ import type {
   TailWithoutAudioCandidate,
 } from "./cleanup.js";
 import type { RepetitionRestartCandidate } from "./repetitions.js";
+import type { EdgePlacementStats } from "./cleanup_plan.js";
 
 export function applyCleanupCutsToSpine(params: {
   workspaceDir: string;
@@ -44,6 +45,8 @@ export function applyCleanupCutsToSpine(params: {
   selectedRepetitionIds: Set<string>;
   selectedTailIds: Set<string>;
   buildCleanupTrace: (rev: number) => DecisionTrace;
+  edgePlacement?: EdgePlacementStats;
+  edgePlacementSummary?: string;
 }): DialogueCleanupResult {
   const {
     workspaceDir,
@@ -104,6 +107,12 @@ export function applyCleanupCutsToSpine(params: {
       remaining_clips: exciseRes.remainingClips,
       revision: exciseRes.revision,
       verification: exciseRes.verification,
+      ...(params.edgePlacement
+        ? {
+            edge_placement: params.edgePlacement,
+            edge_placement_summary: params.edgePlacementSummary ?? "",
+          }
+        : {}),
     };
   }
 
@@ -293,5 +302,11 @@ export function applyCleanupCutsToSpine(params: {
     remaining_clips: remainingClips,
     revision,
     verification,
+    ...(params.edgePlacement
+      ? {
+          edge_placement: params.edgePlacement,
+          edge_placement_summary: params.edgePlacementSummary ?? "",
+        }
+      : {}),
   };
 }

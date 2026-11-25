@@ -14,6 +14,29 @@ export function isTempoActive(seq: { stage?: { tempo?: number } }): boolean {
   return tempoOf(seq) !== 1;
 }
 
+/** Default `afade` length (ms) applied at each discontinuous spine join. */
+export const DEFAULT_AUDIO_JOIN_FADE_MS = 10;
+/** Largest `stage.audio_join_fade_ms` value accepted. */
+export const MAX_AUDIO_JOIN_FADE_MS = 100;
+
+export function normalizeAudioJoinFadeMs(raw: unknown): number {
+  const v = typeof raw === "string" ? Number(raw) : (raw as number);
+  if (!Number.isFinite(v)) throw new Error("audio_join_fade_ms must be a finite number");
+  return v;
+}
+
+/**
+ * Effective spine-join fade (ms) for a sequence. A missing field means the
+ * default, so old projects open unchanged and only gain the fades at render.
+ * Explicit 0 turns the join fades off (old filter text byte-identical).
+ */
+export function audioJoinFadeMsOf(seq: { stage?: { audio_join_fade_ms?: number } }): number {
+  const v = seq?.stage?.audio_join_fade_ms;
+  if (v === undefined) return DEFAULT_AUDIO_JOIN_FADE_MS;
+  if (typeof v !== "number" || !Number.isFinite(v) || v < 0) return DEFAULT_AUDIO_JOIN_FADE_MS;
+  return Math.min(MAX_AUDIO_JOIN_FADE_MS, v);
+}
+
 /** Sequence ms -> output ms. */
 export function seqToOutMs(seqMs: number, tempo: number): number {
   return seqMs / tempo;

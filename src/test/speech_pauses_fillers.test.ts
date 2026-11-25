@@ -5,7 +5,7 @@
  * Covers:
  * 1. Recording-relative silence floor in `analyzeAssetWaveform` and word-safe acoustic pause fusion in `transcribeLibraryAsset`.
  * 2. `OVERLAPS_WORD` rejection in `cleanupClipDialogue` (`decision_trace`) + zero overlapping cuts on `t1`.
- * 3. Contextual filler gating ("şey", "yani", "hani", "acaba" only when pause-isolated) and preserving all unexcised words in captions.
+ * 3. Contextual filler gating ("şey", "yani", "hani", "acaba" only when pause-isolated); captions hide is_filler words while cleanup keeps them.
  * 4. Project/transcript language-based CPS threshold (19 CPS for Turkish even on ASCII-only captions like "modelleri.", 17 CPS for English).
  */
 
@@ -232,7 +232,7 @@ test("2. cleanupClipDialogue rejects word-overlapping pause candidates with OVER
   }
 });
 
-test("3. Contextual Turkish discourse words ('şey', 'yani', 'hani', 'acaba') & full unexcised caption fidelity", () => {
+test("3. Contextual Turkish discourse words ('şey', 'yani', 'hani', 'acaba') & filler hiding in captions", () => {
   // 3a. Fluent "şöyle bir şey var" and "yani sen" must NOT be marked as fillers, whereas pause-isolated "şey" and unconditional "ıı" ARE marked
   const annotated = annotateWordsAndDisfluencies(
     [
@@ -261,7 +261,8 @@ test("3. Contextual Turkish discourse words ('şey', 'yani', 'hani', 'acaba') & 
   assert.equal(annotated.words[7].word, "ıı");
   assert.equal(annotated.words[7].is_filler, true, "Unconditional 'ıı' must always be flagged as filler");
 
-  // 3b. Captions must display EVERY unexcised spoken word (even if legacy cache marked is_filler: true)
+  // 3b. Captions hide words the transcript marks is_filler (fillers stay in
+  // the transcript for cleanup); every other unexcised word still displays.
   const wsDir = path.join(TEST_ROOT, "ws_captions_unexcised");
   fs.rmSync(wsDir, { recursive: true, force: true });
   const { paths } = initWorkspace({ dir: wsDir, title: "Unexcised Captions", aspect: "9:16", fps: 30 });
@@ -315,10 +316,10 @@ test("3. Contextual Turkish discourse words ('şey', 'yani', 'hani', 'acaba') & 
   const cleanRes = cleanupClipDialogue({ workspaceDir: wsDir, clipId: "sp_01", dryRun: false });
   assert.equal(cleanRes.cuts_count, 0, "Fluent 'şey' in 'şöyle bir şey var' must not be excised by cleanup");
 
-  // Captions must include 'şey' so the viewer reads "şöyle bir şey var."
+  // Captions hide the filler-marked 'şey'; the viewer reads "şöyle bir var."
   const capRes = generateSequenceCaptions({ workspaceDir: wsDir, style: "active_word", language: "tr" });
   assert.equal(capRes.cues.length, 1);
-  assert.equal(capRes.cues[0].typography?.text, "şöyle bir şey var.");
+  assert.equal(capRes.cues[0].typography?.text, "şöyle bir var.");
 });
 
 test("4. G4_STAGE CPS threshold selects 19 CPS for Turkish transcripts even on ASCII-only captions, and 17 CPS for English", () => {

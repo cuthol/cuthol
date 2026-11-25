@@ -20,6 +20,7 @@ import {
 import { AspectPreset, createEmptySequence, CutholSequence } from "./schema.js";
 import { formatTimecode } from "./time.js";
 import { computeSequenceDurationMs } from "./timeline.js";
+import { audioJoinFadeMsOf, DEFAULT_AUDIO_JOIN_FADE_MS } from "../sequence/tempo.js";
 import {
   assertBridgeWontRewriteExternal,
   assertMutatorKeptExternalFiles,
@@ -767,12 +768,15 @@ export function formatWorkspaceOpenSummary(
     tempoRate !== 1
       ? ` | Tempo: \`${tempoRate}x\` (output \`${Math.max(1, Math.round(totalMs / tempoRate))}ms\`)`
       : "";
+  const joinFadeMs = audioJoinFadeMsOf(seq);
+  const fadeSuffix =
+    joinFadeMs !== DEFAULT_AUDIO_JOIN_FADE_MS ? ` | Join fade: \`${joinFadeMs}ms\`` : "";
   const totalCues = seq.lanes.reduce((sum, l) => sum + l.cues.length, 0);
   const lines: string[] = [];
   if (options.noticeLine) lines.push(options.noticeLine);
 
   lines.push(
-    `- Project: **${seq.meta.title}** (\`${seq.meta.project_id}\`) | Rev: \`r${seq.meta.revision}\` | Stage: \`${seq.stage.width}x${seq.stage.height}\` (\`${seq.stage.aspect}\`) @ \`${seq.stage.fps}fps\` | Backdrop: \`${seq.stage.backdrop.color}\` | Duration: \`${totalMs}ms\` (\`${formatTimecode(totalMs)}\`)${tempoSuffix}`
+    `- Project: **${seq.meta.title}** (\`${seq.meta.project_id}\`) | Rev: \`r${seq.meta.revision}\` | Stage: \`${seq.stage.width}x${seq.stage.height}\` (\`${seq.stage.aspect}\`) @ \`${seq.stage.fps}fps\` | Backdrop: \`${seq.stage.backdrop.color}\` | Duration: \`${totalMs}ms\` (\`${formatTimecode(totalMs)}\`)${tempoSuffix}${fadeSuffix}`
   );
 
   if (seq.library.length === 0) {

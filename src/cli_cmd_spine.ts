@@ -44,6 +44,10 @@ import {
   sequenceTimeToLocalMs,
 } from "./sequence/envelope_points.js";
 import { boolFlag, numFlag, parseExciseRanges, parsePropsJsonFlag, strFlag } from "./cli_args.js";
+import { measureAssetAcousticWindows } from "./library/waveform.js";
+import { snapRangesToQuietEdges } from "./speech/cleanup_acoustic.js";
+import { loadCachedTranscriptForAsset } from "./speech/transcribe.js";
+import type { RawTranscriptWord } from "./speech/providers.js";
 import fs from "node:fs";
 import path from "node:path";
 import { checkEffectDefinition, checkFxChain } from "./effects/fx_check.js";
@@ -673,10 +677,42 @@ export function runSpineCommand(ctx: CliCommandContext): CliCommandResult {
     if (!clipId || !rangesRaw) throw new Error("Provide --clip <sp_XX> --ranges <a..b,c..d>.");
     const ranges = parseExciseRanges(rangesRaw);
     const coordFlag = strFlag(flags, "coord") as "source" | "sequence" | "clip_local" | undefined;
+    const snap = boolFlag(flags, "snap", false);
+    let finalRanges = ranges;
+    if (snap) {
+      // Opt-in: move each range edge to the nearest quiet point (±100 ms),
+      // same placement as automatic filler/repetition cuts. Off by default:
+      // raw ranges are excised exactly as given.
+      const { sequence } = loadSequence(workspaceDir);
+      const target = sequence.spine.clips.find((c) => c.id === clipId);
+      if (!target) throw new CutholError(DIAGNOSTICS.UNKNOWN_HANDLE(clipId));
+      let transcriptWords: RawTranscriptWord[] = [];
+      try {
+        transcriptWords = loadCachedTranscriptForAsset(workspaceDir, target.asset_handle)
+          .words as RawTranscriptWord[];
+      } catch {
+        transcriptWords = [];
+      }
+      let acousticProfile: ReturnType<typeof measureAssetAcousticWindows> = null;
+      try {
+        acousticProfile = measureAssetAcousticWindows({
+          workspaceDir,
+          handle: target.asset_handle,
+        });
+      } catch {
+        acousticProfile = null;
+      }
+      finalRanges = snapRangesToQuietEdges({
+        clip: target,
+        ranges,
+        transcriptWords,
+        acousticProfile,
+      });
+    }
     const res = exciseSpineRanges({
       workspaceDir,
       clipId,
-      ranges,
+      ranges: finalRanges,
       coordinateSpace: coordFlag,
       isSourceTime: boolFlag(flags, "source-time", false),
     });

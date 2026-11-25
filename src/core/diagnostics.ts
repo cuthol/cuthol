@@ -634,6 +634,15 @@ export const DIAGNOSTICS = {
       `Run 'cuthol verify' for the full per-range list, or cover the ranges with spine or lane cues.`
     ),
   // [local-speech G237–G239]
+  // [sk-w2 G770–G774]
+  CUE_SHEET_FILE_NOT_FOUND: (tried: string[]) =>
+    createDiagnostic(
+      "CUTHOL-G770",
+      "G1_SCHEMA",
+      "ERROR",
+      `Cue sheet file not found (looked in ${tried.map((t) => `'${t}'`).join(" and ")}).`,
+      `Pass an absolute path, or place the file at one of those paths and retry.`
+    ),
   // [script-ext G433, G438–G439]
   // [monitor-scaffold G214–G216]
   // [color-schema G130–G139]   colour stage / Look validation, cluster and scope checks (verify)
@@ -929,13 +938,13 @@ export const DIAGNOSTICS = {
       `Local speech setup failed at '${step}': ${detail}`,
       `Fix the underlying problem and re-run 'cuthol setup --local-speech --apply'.`
     ),
-  LOCAL_SPEECH_BRIDGE_FAILED: (op: string, detail: string) =>
+  LOCAL_SPEECH_BRIDGE_FAILED: (op: string, detail: string, suggestion?: string) =>
     createDiagnostic(
       "CUTHOL-G239",
       "SYS",
       "ERROR",
       `Local speech ${op} failed: ${detail}`,
-      `Re-run 'cuthol setup --local-speech --apply' to repair the installation, then retry.`
+      suggestion ?? `Re-run 'cuthol setup --local-speech --apply' to repair the installation, then retry.`
     ),
 
   // --- Speech language: CUTHOL-G213 ---
@@ -2434,6 +2443,16 @@ export const DIAGNOSTICS = {
 
   // --- end of provider block ---
 
+  // [a1 G760–G764] speech provider notes
+  DEEPGRAM_AUTO_ENGLISH_NO_FILLERS: () =>
+    createDiagnostic(
+      "CUTHOL-G760",
+      "G2_ASSETS",
+      "INFO",
+      `Deepgram auto-detection settled on English but the response holds no filler token; fillers are not returned in auto mode.`,
+      `Re-run 'cuthol speech transcribe --lang en' to transcribe with nova-2 and get filler tokens.`
+    ),
+
   // --- Composition script errors: CUTHOL-G430 .. CUTHOL-G434 ---
   // (G434 is reserved for future composition page diagnostics.)
 
@@ -2543,6 +2562,15 @@ export const DIAGNOSTICS = {
       "ERROR",
       `Invalid tempo '${raw}': rate must be between 0.5 and 2.0 (sequence rate applied at output; absent = 1).`,
       `Run 'cuthol workspace tempo --rate 1.1' with a rate in 0.5..2.0, or '--rate 1' to clear it.`
+    ),
+  // [u1 G750–G754]               spine-join audio fade setting (stage.audio_join_fade_ms)
+  INVALID_AUDIO_JOIN_FADE: (raw: string) =>
+    createDiagnostic(
+      "CUTHOL-G750",
+      "G1_SCHEMA",
+      "ERROR",
+      `Invalid audio join fade '${raw}': length must be between 0 and 100 ms (0 turns the join fades off; absent = 10).`,
+      `Run 'cuthol workspace audio-fade --ms 10' with a value in 0..100, or '--ms 0' to turn the join fades off.`
     ),
   // [multi-notes G690–G699]      Live notes across frames, scene boundaries, scene ranges
   LIVE_MULTI_NOTES_QUEUED: (id: string, cells: number, frames: number) =>
@@ -2886,6 +2914,24 @@ export const DIAGNOSTICS = {
     ),
 
   // ---------------------------------------------------------------------------------------------------
+
+  // [u3 G740–G749] cleanup join-edge loudness: `speech verify-cleanup` summary and `verify` INFO
+  JOIN_EDGE_SUMMARY: (summaryLine: string) =>
+    createDiagnostic(
+      "CUTHOL-G740",
+      "G5_SIGNAL",
+      "INFO",
+      `${summaryLine}`,
+      `Re-run 'cuthol speech cleanup' with acoustic edge placement, or fix the worst joins by hand ('cuthol spine excise --snap').`
+    ),
+  JOIN_EDGE_LOUD_SHARE_HIGH: (summaryLine: string) =>
+    createDiagnostic(
+      "CUTHOL-G741",
+      "G5_SIGNAL",
+      "WARN",
+      `${summaryLine}`,
+      `Re-run 'cuthol speech cleanup' with acoustic edge placement, or fix the worst joins by hand ('cuthol spine excise --snap').`
+    ),
 } as const;
 
 export function estimateCommandLineLength(executable: string, args: readonly string[]): number {

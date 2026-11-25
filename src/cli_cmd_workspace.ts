@@ -14,7 +14,7 @@ import {
   stepJournal,
   tagCurrentRevision,
 } from "./core/workspace.js";
-import { setStageBackdropColor, setStageTempo } from "./sequence/stage.js";
+import { setStageAudioJoinFadeMs, setStageBackdropColor, setStageTempo } from "./sequence/stage.js";
 import { resizeStage } from "./sequence/stage_resize.js";
 import { boolFlag, numFlag, strFlag } from "./cli_args.js";
 import {
@@ -130,6 +130,23 @@ export function runWorkspaceCommand(ctx: CliCommandContext): CliCommandResult {
     const res = setStageTempo({ workspaceDir, rate });
     emitEnvelopeJson(workspaceDir, "workspace.tempo", {
       action: "workspace.tempo",
+      ...res,
+    });
+    return;
+  }
+
+  if (action === "audio-fade") {
+    const raw = strFlag(flags, "ms") ?? rest[0];
+    if (raw == null || String(raw).trim() === "") {
+      throw new CutholError(DIAGNOSTICS.INVALID_AUDIO_JOIN_FADE("(empty / missing --ms)"));
+    }
+    const num = Number(String(raw).trim());
+    if (!Number.isFinite(num) || num < 0 || num > 100) {
+      throw new CutholError(DIAGNOSTICS.INVALID_AUDIO_JOIN_FADE(String(raw)));
+    }
+    const res = setStageAudioJoinFadeMs({ workspaceDir, ms: num });
+    emitEnvelopeJson(workspaceDir, "workspace.audio-fade", {
+      action: "workspace.audio-fade",
       ...res,
     });
     return;

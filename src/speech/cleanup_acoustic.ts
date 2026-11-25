@@ -4,6 +4,7 @@ import { DecisionTraceItem } from "../core/decision_trace.js";
 import { SpineClip } from "../core/schema.js";
 import { OPEN_STANDARDS } from "../core/standards.js";
 import { AcousticWindowProfile, measureAssetAcousticWindows } from "../library/waveform.js";
+import { sourceMsToSequenceMs } from "../sequence/spine.js";
 import { RawTranscriptWord } from "./providers.js";
 
 /** Profiles measured during cleanup, keyed by library digest. Absent entries are skipped. */
@@ -389,6 +390,453 @@ export function refineSelectedCandidateSpanAcoustically(options: {
     ...(preservedSpeechStartMs !== undefined ? { preservedSpeechStartMs } : {}),
     ...(trailingSilenceGuardEndMs !== undefined ? { trailingSilenceGuardEndMs } : {}),
   };
+}
+
+/**
+ * Speech-level threshold for a kept join edge: 20th percentile of the RMS
+ * profile + 15 dB, clamped to 5..25 dB above the recording's silence floor,
+ * minus a 0.5 dB agreement margin. The percentile matches the proof metric's
+ * floor definition and the clamp keeps a usable threshold on assets with
+ * long digital-silence stretches; the margin makes edges placed as quiet
+ * read quiet under a direct 20 ms probe as well (25 ms windows smooth
+ * narrow notches the probe still sees). Results are cached per profile.
+ */
+const edgeThresholdCache = new WeakMap<object, number>();
+
+export function edgeSpeechThresholdDbfs(
+  profile: Pick<AcousticWindowProfile, "silence_floor_dbfs" | "window_dbfs" | "window_ms">
+): number {
+  const cached = edgeThresholdCache.get(profile);
+  if (cached !== undefined) return cached;
+  const winDbs = profile.window_dbfs;
+  const sorted = [...winDbs].sort((a, b) => a - b);
+  const p20 =
+    sorted.length > 0
+      ? sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.2))]
+      : -60;
+  const floor = profile.silence_floor_dbfs;
+  const thr = Math.min(Math.max(p20 + 15, floor + 5), floor + 25) - 0.5;
+  edgeThresholdCache.set(profile, thr);
+  return thr;
+}
+
+/**
+ * Energy-average dBFS over an arbitrary span (overlap-weighted mean of the
+ * window energies). Approximates a raw RMS measurement over the same span,
+ * so quiet checks agree with a direct 20 ms RMS probe of the kept edge.
+ */
+function energyDbOverRange(
+  winDbs: Float64Array | number[],
+  winMs: number,
+  startMs: number,
+  endMs: number
+): number {
+  if (endMs <= startMs) return -120;
+  const w0 = Math.max(0, Math.floor(startMs / winMs));
+  const w1 = Math.min(winDbs.length, Math.ceil(endMs / winMs));
+  let energy = 0;
+  let weight = 0;
+  for (let w = w0; w < w1; w++) {
+    const overlap = Math.min(endMs, (w + 1) * winMs) - Math.max(startMs, w * winMs);
+    if (overlap <= 0) continue;
+    energy += Math.pow(10, winDbs[w] / 10) * overlap;
+    weight += overlap;
+  }
+  if (weight <= 0 || energy <= 0) return -120;
+  return 10 * Math.log10(energy / weight);
+}
+
+/** True when the 20 ms of kept audio at a cut edge is above speech level. */
+export function isKeptEdgeLoud(
+  profile: Pick<AcousticWindowProfile, "silence_floor_dbfs" | "window_dbfs" | "window_ms">,
+  edgeMs: number,
+  side: "before" | "after"
+): boolean {
+  const thr = edgeSpeechThresholdDbfs(profile);
+  const span =
+    side === "before" ? { s: edgeMs - 20, e: edgeMs } : { s: edgeMs, e: edgeMs + 20 };
+  return energyDbOverRange(profile.window_dbfs, profile.window_ms, span.s, span.e) > thr;
+}
+
+export interface AutomaticEdgeRefinement {
+  startMs: number;
+  endMs: number;
+  movedStart: boolean;
+  movedEnd: boolean;
+  stillLoudBefore: boolean;
+  stillLoudAfter: boolean;
+}
+
+/**
+ * Acoustic edge placement for automatic filler/repetition cuts.
+ * Each edge moves within ±100 ms (5 ms steps): to the lowest-energy 20 ms
+ * window below the speech threshold, preferring the move that grows kept
+ * audio into the removed part; otherwise to the lowest-energy 10 ms point.
+ * Edges never move into a neighbouring kept word (a 20 ms margin is kept).
+ */
+export function refineAutomaticCutEdgesAcoustically(options: {
+  rawStart: number;
+  rawEnd: number;
+  clip: SpineClip;
+  transcriptWords: RawTranscriptWord[];
+  acousticProfile: ReturnType<typeof measureAssetAcousticWindows>;
+  /** When false, prefer trimming kept audio over growing it (fallback direction). */
+  preferKeptIntact?: boolean;
+}): AutomaticEdgeRefinement {
+  const { rawStart, rawEnd, clip, transcriptWords, acousticProfile } = options;
+  const preferKeptIntact = options.preferKeptIntact ?? true;
+  const loud = (edgeMs: number, side: "before" | "after"): boolean =>
+    !!acousticProfile &&
+    !!acousticProfile.has_silence_variation &&
+    isKeptEdgeLoud(acousticProfile, edgeMs, side);
+  const fallback = (): AutomaticEdgeRefinement => ({
+    startMs: rawStart,
+    endMs: rawEnd,
+    movedStart: false,
+    movedEnd: false,
+    stillLoudBefore: loud(rawStart, "before"),
+    stillLoudAfter: loud(rawEnd, "after"),
+  });
+  if (
+    !acousticProfile ||
+    !acousticProfile.has_silence_variation ||
+    rawEnd <= rawStart ||
+    (loud(rawStart, "before") === false && loud(rawEnd, "after") === false)
+  ) {
+    // Edges already quiet (or no profile): keep raw ASR edges byte-identical.
+    return fallback();
+  }
+  const winMs = acousticProfile.window_ms;
+  const winDbs = acousticProfile.window_dbfs;
+
+  const cutWords = transcriptWords.filter((w) => {
+    const ov = Math.min(rawEnd, w.source_end_ms) - Math.max(rawStart, w.source_start_ms);
+    const wDur = Math.max(1, w.source_end_ms - w.source_start_ms);
+    return ov >= wDur * 0.5 || (w.source_start_ms >= rawStart - 30 && w.source_end_ms <= rawEnd + 30);
+  });
+  const cutSet = new Set(cutWords);
+  let prevKept: RawTranscriptWord | null = null;
+  let nextKept: RawTranscriptWord | null = null;
+  for (const w of transcriptWords) {
+    if (cutSet.has(w)) continue;
+    if (w.source_end_ms <= rawStart + 40) {
+      if (!prevKept || w.source_end_ms > prevKept.source_end_ms) prevKept = w;
+    } else if (w.source_start_ms >= rawEnd - 40) {
+      if (!nextKept || w.source_start_ms < nextKept.source_start_ms) nextKept = w;
+    }
+  }
+
+  const placeEdge = (rawEdge: number, side: "before" | "after"): number => {
+    // Preferred direction: grow kept audio into the removed part when
+    // preferKeptIntact, else trim kept audio first (fallback direction).
+    const preferGrown = side === "before"
+      ? (p: number) => p >= rawEdge
+      : (p: number) => p <= rawEdge;
+    const lo = Math.max(
+      clip.source_in_ms,
+      rawEdge - 100,
+      side === "before" && prevKept ? prevKept.source_end_ms + 20 : -Infinity,
+      side === "after" ? rawStart : -Infinity
+    );
+    const hi = Math.min(
+      clip.source_out_ms,
+      rawEdge + 100,
+      side === "after" && nextKept ? nextKept.source_start_ms - 20 : Infinity,
+      side === "before" ? rawEnd : Infinity
+    );
+    if (hi < lo) return rawEdge;
+    const candidates: number[] = [];
+    for (let p = Math.ceil(lo / 5) * 5; p <= hi; p += 5) candidates.push(p);
+    if (!candidates.includes(rawEdge) && rawEdge >= lo && rawEdge <= hi) {
+      candidates.push(rawEdge);
+    }
+    if (candidates.length === 0) return rawEdge;
+    const quietAt = (p: number): boolean => {
+      const span = side === "before" ? { s: p - 20, e: p } : { s: p, e: p + 20 };
+      return (
+        energyDbOverRange(winDbs, winMs, span.s, span.e) <=
+        edgeSpeechThresholdDbfs(acousticProfile)
+      );
+    };
+    // Among quiet windows prefer the direction that keeps kept words intact;
+    // within a direction pick the lowest energy (deepest quiet, robust to
+    // small metric disagreements), tie-broken by distance to the raw edge.
+    const energyAt = (p: number): number => {
+      const span = side === "before" ? { s: p - 20, e: p } : { s: p, e: p + 20 };
+      return energyDbOverRange(winDbs, winMs, span.s, span.e);
+    };
+    const bestOf = (list: number[]): number => {
+      let best = list[0];
+      let bestDb = energyAt(best);
+      for (const p of list) {
+        const db = energyAt(p);
+        if (db < bestDb - 0.5 || (Math.abs(db - bestDb) <= 0.5 && Math.abs(p - rawEdge) < Math.abs(best - rawEdge))) {
+          best = p;
+          bestDb = db;
+        }
+      }
+      return best;
+    };
+    const grownQuiet = candidates.filter((p) => preferGrown(p) && quietAt(p));
+    const shrunkQuiet = candidates.filter((p) => !preferGrown(p) && quietAt(p));
+    const first = preferKeptIntact ? grownQuiet : shrunkQuiet;
+    const second = preferKeptIntact ? shrunkQuiet : grownQuiet;
+    if (first.length > 0) return bestOf(first);
+    if (second.length > 0) return bestOf(second);
+    // No quiet 20 ms window: lowest-energy 10 ms point at the kept side.
+    let best = rawEdge;
+    let bestDb = Infinity;
+    for (const p of candidates) {
+      const span = side === "before" ? { s: p - 10, e: p } : { s: p, e: p + 10 };
+      if (side === "before" && prevKept && span.s < prevKept.source_end_ms) continue;
+      if (side === "after" && nextKept && span.e > nextKept.source_start_ms) continue;
+      const db = energyDbOverRange(winDbs, winMs, span.s, span.e);
+      if (db < bestDb) {
+        bestDb = db;
+        best = p;
+      }
+    }
+    return best;
+  };
+
+  const startMs = placeEdge(rawStart, "before");
+  const endMs = Math.max(startMs, placeEdge(rawEnd, "after"));
+  return {
+    startMs,
+    endMs,
+    movedStart: startMs !== rawStart,
+    movedEnd: endMs !== rawEnd,
+    stillLoudBefore: loud(startMs, "before"),
+    stillLoudAfter: loud(endMs, "after"),
+  };
+}
+
+export interface LoudJoinEdge {
+  join_id: string;
+  asset_handle: string;
+  source_ms: number;
+  edge: "left" | "right";
+  max_dbfs: number;
+}
+
+export interface JoinEdgeLoudnessSummary {
+  total_joins: number;
+  loud_joins: number;
+  loud_share: number;
+  worst: LoudJoinEdge[];
+  summary_line: string;
+  abnormal: boolean;
+}
+
+/**
+ * WARN threshold for the loud-join share: clean edits measured 16–17% loud
+ * joins at this threshold, the reference bad edit 59%. 40% separates them.
+ */
+export const JOIN_EDGE_LOUD_SHARE_WARN_THRESHOLD = 0.4;
+
+function maxDbAt(
+  winDbs: Float64Array | number[],
+  winMs: number,
+  startMs: number,
+  endMs: number
+): number {
+  return energyDbOverRange(winDbs, winMs, startMs, endMs);
+}
+
+/**
+ * One summary line over the kept edges of every excise join on the spine:
+ * count, share, and the 3–5 worst joins with times. No per-join warnings.
+ */
+export function summarizeJoinEdgeLoudness(options: {
+  clips: Array<{ id: string; asset_handle: string; source_in_ms: number; source_out_ms: number }>;
+  profileByHandle: Map<
+    string,
+    Pick<AcousticWindowProfile, "silence_floor_dbfs" | "window_dbfs" | "window_ms"> | null
+  >;
+}): JoinEdgeLoudnessSummary {
+  const { clips, profileByHandle } = options;
+  const byAsset = new Map<string, typeof clips>();
+  for (const clip of clips) {
+    const list = byAsset.get(clip.asset_handle) ?? [];
+    list.push(clip);
+    byAsset.set(clip.asset_handle, list);
+  }
+  const loud: LoudJoinEdge[] = [];
+  let total = 0;
+  for (const [asset, list] of byAsset) {
+    const profile = profileByHandle.get(asset);
+    if (!profile) continue;
+    const thr = edgeSpeechThresholdDbfs(profile);
+    const sorted = list.slice().sort((a, b) => a.source_in_ms - b.source_in_ms);
+    for (let i = 0; i < sorted.length - 1; i++) {
+      const prev = sorted[i];
+      const next = sorted[i + 1];
+      if (next.source_in_ms < prev.source_out_ms) continue;
+      if (next.source_in_ms - prev.source_out_ms < 2) continue;
+      total++;
+      const leftDb = maxDbAt(profile.window_dbfs, profile.window_ms, prev.source_out_ms - 20, prev.source_out_ms);
+      const rightDb = maxDbAt(profile.window_dbfs, profile.window_ms, next.source_in_ms, next.source_in_ms + 20);
+      const id = `ex_${asset}_${prev.source_out_ms}_${next.source_in_ms}`;
+      if (leftDb > thr) {
+        loud.push({ join_id: id, asset_handle: asset, source_ms: prev.source_out_ms, edge: "left", max_dbfs: Number(leftDb.toFixed(2)) });
+      }
+      if (rightDb > thr) {
+        loud.push({ join_id: id, asset_handle: asset, source_ms: next.source_in_ms, edge: "right", max_dbfs: Number(rightDb.toFixed(2)) });
+      }
+    }
+  }
+  const worst = loud
+    .slice()
+    .sort((a, b) => b.max_dbfs - a.max_dbfs)
+    .slice(0, 5);
+  const share = total === 0 ? 0 : loud.length / (total * 2);
+  const pct = Math.round(share * 100);
+  const worstTxt =
+    worst.length === 0
+      ? "none loud"
+      : worst.map((w) => `${w.join_id}@${w.edge} ${w.source_ms}ms`).join(", ");
+  const summary_line = `join edges: ${loud.length}/${total * 2} loud (${pct}%) across ${total} joins; worst: ${worstTxt}`;
+  return {
+    total_joins: total,
+    loud_joins: loud.length,
+    loud_share: Math.round(share * 10000) / 10000,
+    worst,
+    summary_line,
+    abnormal: total > 0 && share >= JOIN_EDGE_LOUD_SHARE_WARN_THRESHOLD,
+  };
+}
+
+/**
+ * Snap explicit excise ranges to quiet edges (opt-in `spine excise --snap`).
+ * Same edge placement as automatic filler/repetition cuts. Ranges without an
+ * acoustic profile are returned unchanged.
+ */
+export function snapRangesToQuietEdges(options: {
+  clip: SpineClip;
+  ranges: Array<{ start_ms: number; end_ms: number }>;
+  transcriptWords: RawTranscriptWord[];
+  acousticProfile: ReturnType<typeof measureAssetAcousticWindows>;
+}): Array<{ start_ms: number; end_ms: number }> {
+  const { clip, ranges, transcriptWords, acousticProfile } = options;
+  if (!acousticProfile || !acousticProfile.has_silence_variation) return ranges;
+  return ranges.map((r) => {
+    const refined = refineAutomaticCutEdgesAcoustically({
+      rawStart: r.start_ms,
+      rawEnd: r.end_ms,
+      clip,
+      transcriptWords,
+      acousticProfile,
+    });
+    return { start_ms: refined.startMs, end_ms: refined.endMs };
+  });
+}
+
+/**
+ * Final quiet-edge pass over planned filler/repetition cuts (after sliver
+ * bridging): snaps each kept edge to the same ±100 ms quiet placement.
+ * Pause cuts are never touched. Edges are clamped to neighbouring cuts so
+ * bridging decisions are preserved.
+ */
+export function snapPlannedFillerEdgesToQuiet(options: {
+  plannedCuts: Array<{
+    kind: "pause" | "filler" | "repetition" | "tail_without_audio";
+    padded_source_start_ms: number;
+    padded_source_end_ms: number;
+    cut_duration_ms: number;
+    sequence_start_ms: number;
+    sequence_end_ms: number;
+    acoustic_edge_trimmed?: boolean;
+    original_source_start_ms?: number;
+    original_source_end_ms?: number;
+  }>;
+  clip: SpineClip;
+  transcriptWords: RawTranscriptWord[];
+  acousticProfile: ReturnType<typeof measureAssetAcousticWindows>;
+}): void {
+  const { plannedCuts, clip, transcriptWords, acousticProfile } = options;
+  if (!acousticProfile || !acousticProfile.has_silence_variation) return;
+  const ordered = plannedCuts.slice().sort(
+    (a, b) => a.padded_source_start_ms - b.padded_source_start_ms
+  );
+  for (let i = 0; i < ordered.length; i++) {
+    const cut = ordered[i];
+    if (cut.kind !== "filler" && cut.kind !== "repetition") continue;
+    const prevEnd = i > 0 ? ordered[i - 1].padded_source_end_ms : clip.source_in_ms;
+    const nextStart =
+      i + 1 < ordered.length ? ordered[i + 1].padded_source_start_ms : clip.source_out_ms;
+    const refined = refineAutomaticCutEdgesAcoustically({
+      rawStart: Math.max(cut.padded_source_start_ms, prevEnd),
+      rawEnd: Math.min(cut.padded_source_end_ms, nextStart),
+      clip,
+      transcriptWords,
+      acousticProfile,
+    });
+    let startMs = Math.max(prevEnd, Math.min(refined.startMs, cut.padded_source_end_ms));
+    let endMs = Math.min(nextStart, Math.max(refined.endMs, startMs));
+    const loudCount = (s: number, e: number): number =>
+      (isKeptEdgeLoud(acousticProfile, s, "before") ? 1 : 0) +
+      (isKeptEdgeLoud(acousticProfile, e, "after") ? 1 : 0);
+    // A grown-preferred placement that would shrink the cut below the 80 ms
+    // lower bound is discarded; retry with the fallback direction (trim kept
+    // audio) before giving up, and adopt whichever placement is quieter.
+    if (endMs - startMs < 80) {
+      const shrunk = refineAutomaticCutEdgesAcoustically({
+        rawStart: Math.max(cut.padded_source_start_ms, prevEnd),
+        rawEnd: Math.min(cut.padded_source_end_ms, nextStart),
+        clip,
+        transcriptWords,
+        acousticProfile,
+        preferKeptIntact: false,
+      });
+      const ss = Math.max(prevEnd, Math.min(shrunk.startMs, cut.padded_source_end_ms));
+      const se = Math.min(nextStart, Math.max(shrunk.endMs, ss));
+      if (se - ss >= 80 && loudCount(ss, se) <= loudCount(cut.padded_source_start_ms, cut.padded_source_end_ms)) {
+        startMs = ss;
+        endMs = se;
+      }
+    }
+    // Second round re-anchored at the round-1 output: a badly placed input
+    // edge (e.g. a selected span pulled onto a word onset) can sit more than
+    // 100 ms from quiet that is close to where round 1 landed. Adopted only
+    // when it strictly reduces the loud-edge count: re-anchoring changes the
+    // word partition, so a blind adopt could wander back to a loud spot.
+    if (loudCount(startMs, endMs) > 0) {
+      const re2 = refineAutomaticCutEdgesAcoustically({
+        rawStart: startMs,
+        rawEnd: endMs,
+        clip,
+        transcriptWords,
+        acousticProfile,
+      });
+      const s2 = Math.max(prevEnd, Math.min(re2.startMs, cut.padded_source_end_ms));
+      const e2 = Math.min(nextStart, Math.max(re2.endMs, s2));
+      if (e2 - s2 >= 80 && loudCount(s2, e2) < loudCount(startMs, endMs)) {
+        startMs = s2;
+        endMs = e2;
+      }
+    }
+    if (endMs - startMs < 80) continue;
+    if (startMs !== cut.padded_source_start_ms || endMs !== cut.padded_source_end_ms) {
+      if (typeof cut.original_source_start_ms !== "number") {
+        cut.original_source_start_ms = cut.padded_source_start_ms;
+      }
+      if (typeof cut.original_source_end_ms !== "number") {
+        cut.original_source_end_ms = cut.padded_source_end_ms;
+      }
+      cut.padded_source_start_ms = startMs;
+      cut.padded_source_end_ms = endMs;
+      cut.cut_duration_ms = endMs - startMs;
+      cut.acoustic_edge_trimmed = true;
+    }
+  }
+  plannedCuts.sort(
+    (a, b) => a.padded_source_start_ms - b.padded_source_start_ms
+  );
+  for (let i = 0; i < plannedCuts.length; i++) {
+    const cut = plannedCuts[i];
+    cut.sequence_start_ms = sourceMsToSequenceMs(clip, cut.padded_source_start_ms);
+    cut.sequence_end_ms = sourceMsToSequenceMs(clip, cut.padded_source_end_ms);
+  }
 }
 
 export function verifyPauseCandidatesAcoustically(params: {

@@ -21,6 +21,31 @@ export const LOCAL_SPEECH_PINNED_PACKAGES = {
 export const LOCAL_SPEECH_DEFAULT_MODEL = "small";
 export const LOCAL_SPEECH_DEFAULT_VOICE = "tr_TR-dfki-medium";
 
+/**
+ * Revision of the chunked keyless local ASR engine (`scripts/local_speech.py`:
+ * silence-valley chunking with a per-chunk filler prompt). Bumped whenever the
+ * engine's output contract changes; the transcript cache keys the local
+ * provider with it so old whole-file transcripts are re-transcribed.
+ * Must match `LOCAL_ASR_ENGINE_REVISION` in `scripts/local_speech.py`.
+ */
+export const LOCAL_ASR_ENGINE_REVISION = "v5";
+
+/** Parallel chunk workers for keyless local ASR (each loads its own model copy). */
+export function localAsrJobs(): number {
+  const raw = (process.env.CUTHOL_LOCAL_ASR_JOBS ?? "").trim();
+  const n = raw ? Number.parseInt(raw, 10) : 2;
+  if (!Number.isFinite(n)) return 2;
+  return Math.min(8, Math.max(1, Math.floor(n)));
+}
+
+/** Threads per keyless local ASR process (0 = faster-whisper default). */
+export function localAsrCpuThreads(): number {
+  const raw = (process.env.CUTHOL_LOCAL_ASR_THREADS ?? "").trim();
+  const n = raw ? Number.parseInt(raw, 10) : 3;
+  if (!Number.isFinite(n)) return 3;
+  return Math.min(16, Math.max(0, Math.floor(n)));
+}
+
 // Measured on this machine (bytes on disk, 2026-11-14): small model dir,
 // large-v3-turbo model dir, tr_TR-dfki-medium voice (onnx + json).
 export const LOCAL_SPEECH_MODELS = {
@@ -186,6 +211,35 @@ export interface LocalBridgeWord {
   confidence?: number;
 }
 
+/**
+ * Pick the message shown for a failed bridge run. The failure cause is
+ * usually an early stderr line naming the error (e.g. a line containing
+ * `error:`), while the tail is often a long argv dump — so the message
+ * keeps the first cause line(s) plus the tail, and the suggestion fits
+ * the failure instead of always pointing at `setup --apply`.
+ */
+export function selectBridgeFailureDetail(raw: string): { detail: string; suggestion: string } {
+  const text = (raw || "failed").replace(/\r\n/g, "\n");
+  const lines = text.split("\n").map((l) => l.trimEnd()).filter((l) => l.trim().length > 0);
+  const causeLines = lines.filter((l) => /error:/i.test(l)).slice(0, 3);
+  const tail = lines.slice(-3).join("\n");
+  const detail =
+    causeLines.length > 0 && !tail.split("\n").every((l) => causeLines.includes(l))
+      ? `${causeLines.join("\n")}\n…\n${tail}`
+      : text.slice(-500);
+  let suggestion = `Re-run 'cuthol setup --local-speech --apply' to repair the installation, then retry.`;
+  if (/model|snapshot|huggingface|download/i.test(text)) {
+    suggestion = `Check the model path and network access, then re-run 'cuthol setup --local-speech --apply' to re-download the model.`;
+  } else if (/voice|onnx|piper/i.test(text)) {
+    suggestion = `Check the Piper voice file and the venv Python ('<root>/venv/Scripts/python.exe -m piper --help'), then re-run 'cuthol setup --local-speech --apply' if the install is broken.`;
+  } else if (/ffmpeg|decode|codec|invalid data/i.test(text)) {
+    suggestion = `Verify the input audio file is a readable media file (ffprobe it), then retry; the install itself looks fine.`;
+  } else if (/memory|cuda|out of/i.test(text)) {
+    suggestion = `Free memory (or lower '--jobs' / use a smaller model) and retry; the install itself looks fine.`;
+  }
+  return { detail, suggestion };
+}
+
 function runBridge(cmdArgs: string[], op: string): string {
   const installation = requireLocalSpeech();
   const proc = spawnSync(
@@ -199,11 +253,18 @@ function runBridge(cmdArgs: string[], op: string): string {
     }
   );
   if (proc.status !== 0) {
-    throw new CutholError(
-      DIAGNOSTICS.LOCAL_SPEECH_BRIDGE_FAILED(op, (proc.stderr || proc.error?.message || "failed").slice(-300))
+    const { detail, suggestion } = selectBridgeFailureDetail(
+      proc.stderr || (proc.error instanceof Error ? proc.error.message : String(proc.error ?? "")) || "failed"
     );
+    throw new CutholError(DIAGNOSTICS.LOCAL_SPEECH_BRIDGE_FAILED(op, detail, suggestion));
   }
   return proc.stdout ?? "";
+}
+
+export interface LocalBridgeDroppedSegment {
+  start_ms: number;
+  end_ms: number;
+  reason: string;
 }
 
 export function runLocalAsrBridge(options: {
@@ -211,7 +272,9 @@ export function runLocalAsrBridge(options: {
   language?: string;
   modelName?: string;
   keyterms?: string[];
-}): { language: string; modelName: string; words: LocalBridgeWord[] } {
+  jobs?: number;
+  cpuThreads?: number;
+}): { language: string; modelName: string; words: LocalBridgeWord[]; droppedSegments: LocalBridgeDroppedSegment[] } {
   const installation = requireLocalSpeech();
   const modelName = (options.modelName ?? installation.modelName).trim() || installation.modelName;
   const modelDir =
@@ -219,6 +282,8 @@ export function runLocalAsrBridge(options: {
       ? installation.modelDir
       : path.join(installation.root, "models", modelName);
   const keyterms = (options.keyterms ?? []).map((k) => k.trim()).filter((k) => k.length > 0);
+  const jobs = options.jobs ?? localAsrJobs();
+  const cpuThreads = options.cpuThreads ?? localAsrCpuThreads();
   const out = runBridge(
     [
       "asr",
@@ -228,12 +293,16 @@ export function runLocalAsrBridge(options: {
       "--model",
       modelDir,
       ...(keyterms.length > 0 ? ["--keyterms", keyterms.join(",")] : []),
+      "--jobs",
+      String(jobs),
+      "--cpu-threads",
+      String(cpuThreads),
     ],
     "local ASR"
   );
-  let parsed: { language?: unknown; words?: unknown };
+  let parsed: { language?: unknown; words?: unknown; dropped_segments?: unknown };
   try {
-    parsed = JSON.parse(out) as { language?: unknown; words?: unknown };
+    parsed = JSON.parse(out) as { language?: unknown; words?: unknown; dropped_segments?: unknown };
   } catch (err) {
     throw new CutholError(
       DIAGNOSTICS.LOCAL_SPEECH_BRIDGE_FAILED(
@@ -257,7 +326,15 @@ export function runLocalAsrBridge(options: {
     typeof parsed.language === "string" && parsed.language.trim()
       ? parsed.language.trim().toLowerCase()
       : (options.language ?? "auto").trim().toLowerCase() || "auto";
-  return { language, modelName, words };
+  const droppedSegments = Array.isArray(parsed.dropped_segments)
+    ? (parsed.dropped_segments as LocalBridgeDroppedSegment[]).filter(
+        (d) =>
+          d &&
+          Number.isFinite(Number((d as LocalBridgeDroppedSegment).start_ms)) &&
+          Number.isFinite(Number((d as LocalBridgeDroppedSegment).end_ms))
+      )
+    : [];
+  return { language, modelName, words, droppedSegments };
 }
 
 export function runLocalTtsBridge(options: {

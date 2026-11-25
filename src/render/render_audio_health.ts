@@ -17,7 +17,7 @@ import { CutholSequence, getCuePlaybackRate, maxSourceDurationMs, SpeedRampPoint
 import { WorkspacePaths } from "../core/workspace.js";
 import { atempoChain, outputDurationMs, outToSeqMs, seqToOutMs, tempoOf } from "../sequence/tempo.js";
 import { resolveLibraryItemPath } from "../library/probe.js";
-import { compileSequenceAudioPlan } from "../compositor/compile_audio.js";
+import { compileSequenceAudioPlan, computeSpineJoinFades } from "../compositor/compile_audio.js";
 import { integrateRampSourceOffsetToLocalMs, invertRampLocalMsToSourceOffset } from "../sequence/spine_time.js";
 import { runParallelFfmpegJobsSync } from "./render_frames.js";
 import { computeRenderTimeSegments, RenderTimeSegment } from "./render_segments.js";
@@ -520,6 +520,19 @@ export function scanRenderedMp4AudioHealth(
       rampFallbackRate: clip.playback.rate,
       ramp: clip.playback.speed_ramp,
     });
+  }
+
+  // Spine-join fades (default 10 ms `afade` at each discontinuous join) ramp
+  // through silence by design like the clip's own fades: probes must avoid
+  // those zones, so the join fade on each side extends the fade expectation.
+  // Applied before the tempo scaling below so join zones scale with the rest.
+  for (const [clipIdx, join] of computeSpineJoinFades(seq)) {
+    const clip = seq.spine.clips[clipIdx];
+    if (!clip) continue;
+    const item = audioItems.find((a) => a.id === clip.id && a.kind === "spine");
+    if (!item) continue;
+    item.fadeInMs = Math.max(item.fadeInMs, join.fadeInMs);
+    item.fadeOutMs = Math.max(item.fadeOutMs, join.fadeOutMs);
   }
 
   // Delivered audio is on the output clock: item positions move to it, and one

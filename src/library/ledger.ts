@@ -97,6 +97,12 @@ export class MediaLedger {
         alignment_json TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS acoustic_windows_cache (
+        cache_key TEXT PRIMARY KEY,
+        sha256 TEXT NOT NULL,
+        metrics_json TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS extension_cache (
         cache_key TEXT PRIMARY KEY,
         output_path TEXT NOT NULL,
@@ -246,6 +252,22 @@ export class MediaLedger {
          VALUES (?, ?, ?, ?, ?)`
       )
       .run(key, sha256, threshold, JSON.stringify(metrics), new Date().toISOString());
+  }
+
+  public getAcousticWindows<T>(cacheKey: string): T | null {
+    const row = this.db.prepare(`SELECT metrics_json FROM acoustic_windows_cache WHERE cache_key = ?`).get(cacheKey) as
+      | { metrics_json: string }
+      | undefined;
+    return row ? (JSON.parse(row.metrics_json) as T) : null;
+  }
+
+  public setAcousticWindows<T>(cacheKey: string, sha256: string, metrics: T): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO acoustic_windows_cache (cache_key, sha256, metrics_json, created_at)
+         VALUES (?, ?, ?, ?)`
+      )
+      .run(cacheKey, sha256, JSON.stringify(metrics), new Date().toISOString());
   }
 
   public getTranscript<T>(sha256: string, lang: string): T | null {

@@ -24,9 +24,51 @@ import { projectTranscriptAcrossSequence } from "../sequence/spine.js";
 import {
   AsrProviderId,
   TranscriptDocument,
+  isDeepgramAutoEnglishWithoutFillers,
+  isEnglishAsrLanguage,
   transcribeWithDeepgram,
   transcribeWithLocalProvider,
 } from "./providers.js";
+import { LOCAL_ASR_ENGINE_REVISION } from "./local_engine.js";
+
+/** Cache namespace of the keyless local ASR engine (old `local:*` keys miss). */
+export function localAsrCachePrefix(): string {
+  return `local@${LOCAL_ASR_ENGINE_REVISION}`;
+}
+
+/**
+ * True when a cached record was written by an older keyless local engine
+ * (whole-file transcription without per-chunk filler prompts): skipped on
+ * read so the asset is re-transcribed once with the current engine. Only
+ * keyless-engine records (`faster-whisper-*` models) are stale-checked;
+ * sidecar/custom-cli transcripts and cloud records are engine-independent.
+ */
+export function isStaleLocalEngineRecord(doc: TranscriptDocument): boolean {
+  return (
+    doc.provider === "local" &&
+    typeof doc.model === "string" &&
+    doc.model.startsWith("faster-whisper-") &&
+    doc.engineRev !== LOCAL_ASR_ENGINE_REVISION
+  );
+}
+
+/**
+ * True when a cached Deepgram record was made with nova-3 for English:
+ * nova-3 returns no filler tokens, so an explicit-English `speech
+ * transcribe` treats it as a miss and re-transcribes once with nova-2.
+ * Only the transcribe lookup applies this rule; every reader
+ * (`loadCachedTranscriptForAsset`, captions, cleanup, `library query`,
+ * `brief`) keeps returning the existing record. Non-English records never
+ * change (shared fixture keys such as `deepgram:tr` keep hitting).
+ */
+export function isStaleDeepgramNova3Record(doc: TranscriptDocument): boolean {
+  return (
+    doc.provider === "deepgram" &&
+    typeof doc.model === "string" &&
+    doc.model !== "nova-2" &&
+    isEnglishAsrLanguage(doc.language)
+  );
+}
 import { providerCacheTag, resolveExtensionProvider } from "../extensions/ext_providers.js";
 import { transcribeWithExtensionProvider } from "./provider_ext.js";
 import { extensionNameOf, resolveAsrProvider } from "./provider_select.js";
@@ -37,6 +79,7 @@ export interface TranscribeResult {
   cached: boolean;
   transcript: TranscriptDocument;
   projected_sequence_words: TimedWordToken[];
+  notes?: string[];
 }
 
 /** Language named by a transcript cache key, or null for generic keys. */
@@ -103,24 +146,31 @@ function resolveTranscribeLookupKeys(
   requestedAuto: boolean,
   hasKeyterms: boolean
 ): string[] {
+  // Legacy whole-file engine keys (`local:*`): read-only fallback so records
+  // written before the engine revision still hit; stale keyless-engine
+  // documents are skipped by isStaleLocalEngineRecord either way.
+  const legacyLocalKey = cacheLangKey.startsWith("local@")
+    ? `local:${cacheLangKey.split(":").slice(1).join(":")}`
+    : null;
+  const ownKeys = legacyLocalKey ? [cacheLangKey, legacyLocalKey] : [cacheLangKey];
   if (hasKeyterms) {
     // Keyterms change the request, so only the keyterm-suffixed record may
     // hit: a transcript cached without keyterms must never be returned.
-    return [cacheLangKey];
+    return ownKeys;
   }
   if (requestedAuto) {
     // Auto-detection accepts whatever the transcript's language is; `auto` and
     // `latest` always point at the most recent transcript. An explicit provider
     // reads only its own auto record so providers never share transcripts.
     return providerSource !== "builtin"
-      ? [cacheLangKey]
-      : ["auto", "latest", cacheLangKey, "tr", "en", "deepgram:tr", "deepgram:en", "local:tr", "local:en"];
+      ? ownKeys
+      : ["auto", "latest", cacheLangKey, "tr", "en", "deepgram:tr", "deepgram:en", `${localAsrCachePrefix()}:tr`, `${localAsrCachePrefix()}:en`, "local:tr", "local:en"];
   }
   // An explicit language searches only that language's keys; generic keys are
   // never consulted, so another language's record cannot leak in.
   return providerSource !== "builtin"
-    ? [cacheLangKey]
-    : [cacheLangKey, lang, `local:${lang}`];
+    ? ownKeys
+    : [cacheLangKey, lang, `${localAsrCachePrefix()}:${lang}`, `local:${lang}`];
 }
 
 export async function transcribeLibraryAsset(options: {
@@ -160,7 +210,9 @@ export async function transcribeLibraryAsset(options: {
             workspaceDir: options.workspaceDir,
           }).extension
         )
-      : provider;
+      : provider === "local"
+        ? localAsrCachePrefix()
+        : provider;
   // Keyterms are part of the transcription request, so they are part of the
   // cache key: a short hash suffix keeps the `<provider>:<lang>` shape (and
   // its language parsing) intact. Without keyterms every key is exactly as
@@ -189,6 +241,15 @@ export async function transcribeLibraryAsset(options: {
         const candidate = ledger.getTranscript<TranscriptDocument>(item.digest_sha256, k);
         if (!candidate) continue;
         if (isPoisonedCacheRecord(k, candidate.language)) continue;
+        // A record from an older keyless local engine is re-transcribed once
+        // with the current engine instead of being served again.
+        if (isStaleLocalEngineRecord(candidate)) continue;
+        // An English Deepgram record made with nova-3 holds no fillers;
+        // an explicit-English transcribe re-transcribes it once with
+        // nova-2. Auto requests keep nova-3, so the rule never applies.
+        if (!requestedAuto && isEnglishAsrLanguage(lang) && isStaleDeepgramNova3Record(candidate)) {
+          continue;
+        }
         // A plain request never reads a keyterm-made record: when only a
         // keyterm transcript is cached the lookup misses and transcribes.
         if (keyterms === null && isKeytermMarkedTranscript(candidate)) continue;
@@ -457,12 +518,21 @@ export async function transcribeLibraryAsset(options: {
     const latestSeq = loadSequence(options.workspaceDir).sequence;
     const projectedWords = projectTranscriptAcrossSequence(latestSeq, item.handle, doc.words);
 
+    // Auto mode keeps nova-3, which returns no fillers for English: when
+    // detection settled on English and the response holds no filler token,
+    // attach one INFO note pointing at `--lang en`.
+    const notes: string[] =
+      requestedAuto && isDeepgramAutoEnglishWithoutFillers(doc)
+        ? [DIAGNOSTICS.DEEPGRAM_AUTO_ENGLISH_NO_FILLERS().formatted]
+        : [];
+
     return {
       handle: item.handle,
       sha256: item.digest_sha256,
       cached: wasCached,
       transcript: doc,
       projected_sequence_words: projectedWords,
+      notes,
     };
   } finally {
     ledger.close();
@@ -488,10 +558,11 @@ export function loadCachedTranscriptForAsset(
     // records (key language vs doc.language mismatch) are skipped everywhere.
     const candidateKeys =
       normLang === "auto"
-        ? ["latest", "auto", "tr", "en", "deepgram:tr", "deepgram:en", "local:tr", "local:en"]
+        ? ["latest", "auto", "tr", "en", "deepgram:tr", "deepgram:en", `${localAsrCachePrefix()}:tr`, `${localAsrCachePrefix()}:en`, "local:tr", "local:en"]
         : [
             normLang,
             `deepgram:${normLang}`,
+            `${localAsrCachePrefix()}:${normLang}`,
             `local:${normLang}`,
             "latest",
             "auto",

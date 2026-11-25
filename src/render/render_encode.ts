@@ -82,6 +82,14 @@ export interface RenderEncodeStageResult {
   encoderFallback: RenderEncoderFallback | null;
 }
 
+/**
+ * Forced audio output rate/channels for every render mux. The segmented path
+ * resamples in its filter graph, but the single-segment graph keeps the
+ * source rate — so every final encode pins 48 kHz stereo here instead of in
+ * the compiled plan (which stays byte-identical for all-48 kHz projects).
+ */
+export const RENDER_AUDIO_OUT_RATE_ARGS = ["-ar", "48000", "-ac", "2"];
+
 /** Shader intermediate files a compiled plan references ("used by this render"). */
 function shaderOutPathsOf(plan: CompiledRenderPlan): string[] {
   return (plan.prePasses ?? [])
@@ -200,6 +208,7 @@ function buildSingleSegmentFfmpegArgs(params: {
       "aac",
       "-b:a",
       "192k",
+      ...RENDER_AUDIO_OUT_RATE_ARGS,
       "-movflags",
       "+faststart",
       tmpOut,
@@ -223,8 +232,8 @@ function buildSingleSegmentFfmpegArgs(params: {
     const alphaCodec = resolveAlphaVideoCodec();
     const audioArgs =
       alphaCodec === "prores_ks"
-        ? ["-c:a", "aac", "-b:a", "192k"]
-        : ["-c:a", "libopus", "-b:a", "128k"];
+        ? ["-c:a", "aac", "-b:a", "192k", ...RENDER_AUDIO_OUT_RATE_ARGS]
+        : ["-c:a", "libopus", "-b:a", "128k", ...RENDER_AUDIO_OUT_RATE_ARGS];
     return [
       "-y",
       "-v",
@@ -267,6 +276,7 @@ function buildSingleSegmentFfmpegArgs(params: {
     "aac",
     "-b:a",
     "192k",
+    ...RENDER_AUDIO_OUT_RATE_ARGS,
     "-movflags",
     "+faststart",
     tmpOut,
@@ -808,6 +818,7 @@ function muxVideoSegmentsWithAudio(params: {
     "aac",
     "-b:a",
     "192k",
+    ...RENDER_AUDIO_OUT_RATE_ARGS,
     "-movflags",
     "+faststart",
     tmpOut,

@@ -7,7 +7,7 @@ import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
 import { CutholSequence } from "../core/schema.js";
 import { computeSequenceDurationMs } from "../core/timeline.js";
 import { commitVerifiedMutation, VerificationReport } from "../verify/gates.js";
-import { outputDurationMs, tempoOf } from "./tempo.js";
+import { DEFAULT_AUDIO_JOIN_FADE_MS, MAX_AUDIO_JOIN_FADE_MS, normalizeAudioJoinFadeMs, outputDurationMs, tempoOf } from "./tempo.js";
 
 /** Accepts `#RRGGBB` or `RRGGBB` (any case) and returns `#RRGGBB` in upper case. */
 export function normalizeHexColor(raw: string): string {
@@ -52,6 +52,49 @@ export function setStageTempo(options: { workspaceDir: string; rate?: number | n
         verification: undefined as unknown as VerificationReport,
       };
       return { tempo: (seq.stage as { tempo?: number }).tempo };
+    }
+  );
+  out.revision = revision;
+  out.verification = verification;
+  void result;
+  return out;
+}
+
+export function setStageAudioJoinFadeMs(options: { workspaceDir: string; ms?: number | null }): {
+  audio_join_fade_ms?: number;
+  previous_audio_join_fade_ms?: number;
+  effective_audio_join_fade_ms: number;
+  revision: number;
+  verification: VerificationReport;
+} {
+  let out = { audio_join_fade_ms: undefined as number | undefined, previous_audio_join_fade_ms: undefined as number | undefined, effective_audio_join_fade_ms: DEFAULT_AUDIO_JOIN_FADE_MS, revision: 0, verification: undefined as unknown as VerificationReport };
+  const { result, revision, verification } = commitVerifiedMutation(
+    options.workspaceDir,
+    options.ms == null ? `workspace.audio-fade(clear)` : `workspace.audio-fade(${options.ms})`,
+    (seq) => {
+      const prev = (seq.stage as { audio_join_fade_ms?: number }).audio_join_fade_ms;
+      if (options.ms == null) {
+        delete (seq.stage as { audio_join_fade_ms?: number }).audio_join_fade_ms;
+      } else {
+        const v = normalizeAudioJoinFadeMs(options.ms);
+        if (!Number.isFinite(v) || v < 0 || v > MAX_AUDIO_JOIN_FADE_MS) {
+          throw new CutholError(DIAGNOSTICS.INVALID_AUDIO_JOIN_FADE(String(options.ms)));
+        }
+        if (v === DEFAULT_AUDIO_JOIN_FADE_MS) {
+          delete (seq.stage as { audio_join_fade_ms?: number }).audio_join_fade_ms;
+        } else {
+          (seq.stage as { audio_join_fade_ms?: number }).audio_join_fade_ms = v;
+        }
+      }
+      const next = (seq.stage as { audio_join_fade_ms?: number }).audio_join_fade_ms;
+      out = {
+        audio_join_fade_ms: next,
+        previous_audio_join_fade_ms: prev,
+        effective_audio_join_fade_ms: next ?? DEFAULT_AUDIO_JOIN_FADE_MS,
+        revision: 0,
+        verification: undefined as unknown as VerificationReport,
+      };
+      return { audio_join_fade_ms: next };
     }
   );
   out.revision = revision;

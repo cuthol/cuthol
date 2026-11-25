@@ -98,7 +98,8 @@ export function generateSequenceCaptions(options: {
       try {
         const doc = loadCachedTranscriptForAsset(options.workspaceDir, targetClip.asset_handle, lang);
         if (!detectedTranscriptLang && doc.language) detectedTranscriptLang = doc.language;
-        const activeWords = doc.words.map((w) => ({
+        // Fillers stay in the transcript for `speech cleanup` but never reach captions.
+        const activeWords = doc.words.filter((w) => !w.is_filler).map((w) => ({
           word: w.punctuated_word || w.word,
           source_start_ms: w.source_start_ms,
           source_end_ms: w.source_end_ms,
@@ -138,6 +139,8 @@ export function generateSequenceCaptions(options: {
         cueSourceIn + maxSpanMs
       );
       for (const w of doc.words) {
+        // Fillers stay in the transcript for `speech cleanup` but never reach captions.
+        if (w.is_filler) continue;
         if (w.source_end_ms <= cueSourceIn || w.source_start_ms >= cueSourceOut) {
           skippedExcisedCount++;
           continue;
@@ -178,7 +181,8 @@ export function generateSequenceCaptions(options: {
       try {
         const doc = loadCachedTranscriptForAsset(options.workspaceDir, clip.asset_handle, lang);
         if (!detectedTranscriptLang && doc.language) detectedTranscriptLang = doc.language;
-        const allAssetWords = doc.words.map((w) => ({
+        // Fillers stay in the transcript for `speech cleanup` but never reach captions.
+        const allAssetWords = doc.words.filter((w) => !w.is_filler).map((w) => ({
           word: w.punctuated_word || w.word,
           source_start_ms: w.source_start_ms,
           source_end_ms: w.source_end_ms,
@@ -230,7 +234,8 @@ export function generateSequenceCaptions(options: {
           try {
             const doc = loadCachedTranscriptForAsset(options.workspaceDir, voCue.asset_handle, lang);
             if (!detectedTranscriptLang && doc.language) detectedTranscriptLang = doc.language;
-            const allAssetWords = doc.words.map((w) => ({
+            // Fillers stay in the transcript for `speech cleanup` but never reach captions.
+            const allAssetWords = doc.words.filter((w) => !w.is_filler).map((w) => ({
               word: w.punctuated_word || w.word,
               source_start_ms: w.source_start_ms,
               source_end_ms: w.source_end_ms,

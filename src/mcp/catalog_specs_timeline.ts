@@ -50,6 +50,7 @@ export const TIMELINE_ACTION_SPECS: ActionSpec[] = [
       p.clip(),
       { name: "ranges", type: "string_list", description: "Ranges to remove, e.g. ['1.2s..2.0s','4.5s..5.1s'].", required: true },
       { name: "coord", type: "string", description: "Coordinate space of `ranges` (default clip_local).", enum: ["source", "sequence", "clip_local"] },
+      { name: "snap", type: "boolean", description: "Move each range edge to the nearest quiet point (±100 ms), same placement as automatic filler/repetition cuts. Use when ranges come from ASR word edges. Default false: ranges are excised exactly as given." },
     ],
   },
   {

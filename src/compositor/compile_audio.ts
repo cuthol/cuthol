@@ -1,6 +1,7 @@
 // Audio filter-graph compiler shared by render and loudness measurement (split out of compiler.ts).
 import { computeRenderDurationMs, resolveCueStartMs } from "../core/timeline.js";
 import { CutholSequence, SpeedRampPoint, getCuePlaybackRate, maxSourceDurationMs, ParameterEnvelope } from "../core/schema.js";
+import { audioJoinFadeMsOf } from "../sequence/tempo.js";
 import { WorkspacePaths } from "../core/workspace.js";
 import {
   resolveLibraryItemPath
@@ -23,6 +24,78 @@ export interface CompiledAudioPlan {
   audioOutPad: string;
   totalDurationMs: number;
   hasActiveAudio: boolean;
+}
+
+/**
+ * Default short `afade` applied at a discontinuous spine join.
+ *
+ * Other tools fade every cut by ~10-15 ms; a hard butt-join of non-silent
+ * audio steps from one waveform to another (an audible click, visible in a
+ * spectrogram). The outgoing clip fades out over its last N ms and the
+ * incoming clip fades in over its first N ms. No `acrossfade`: it overlaps
+ * and shortens the timeline (A/V drift). Shape is quarter-sine (`qsin`),
+ * which approximates an equal-power curve (smooth at both ends, no kink at
+ * full scale) while reaching silence exactly at the cut.
+ */
+export const SPINE_JOIN_FADE_CURVE = "qsin";
+
+export interface SpineJoinFade {
+  fadeInMs: number;
+  fadeOutMs: number;
+}
+
+function spineClipEffectiveRate(clip: CutholSequence["spine"]["clips"][number]): number {
+  return Math.max(
+    0.1,
+    Math.min(16.0, (clip.source_out_ms - clip.source_in_ms) / Math.max(1, clip.duration_ms))
+  );
+}
+
+/**
+ * Per-clip join fades for the spine, keyed by clip index. A join between two
+ * consecutively rendered (audible) spine clips gets the `afade` pair when it
+ * is discontinuous: the previous clip's `source_out_ms` is not the next
+ * clip's `source_in_ms`, the assets differ, or the playback rate changes
+ * (including speed ramps). Each side is `min(N, duration/2)`; a clip's own
+ * `fade_in_ms`/`fade_out_ms` wins over the join fade on that side; muted clips
+ * break the chain (no fade on either side of them); joins at a transition keep
+ * today's behaviour (no join fade); the sequence start/end get no fade.
+ * A contiguous `split` (same source continuing) stays sample-identical.
+ */
+export function computeSpineJoinFades(seq: CutholSequence): Map<number, SpineJoinFade> {
+  const out = new Map<number, SpineJoinFade>();
+  const n = audioJoinFadeMsOf(seq);
+  if (!(n > 0)) return out;
+  const clips = seq.spine.clips;
+  const audible = (c: CutholSequence["spine"]["clips"][number]): boolean =>
+    !c.audio_chain.muted && c.duration_ms > 0;
+  const set = (idx: number, patch: Partial<SpineJoinFade>): void => {
+    const cur = out.get(idx) ?? { fadeInMs: 0, fadeOutMs: 0 };
+    out.set(idx, { ...cur, ...patch });
+  };
+  for (let i = 1; i < clips.length; i++) {
+    const prev = clips[i - 1];
+    const cur = clips[i];
+    if (!audible(prev) || !audible(cur)) continue;
+    if (prev.transition_out) continue;
+    if (Math.abs(prev.timeline_in_ms + prev.duration_ms - cur.timeline_in_ms) > 1e-3) continue;
+    const prevRamped = (prev.playback.speed_ramp?.length ?? 0) >= 2;
+    const curRamped = (cur.playback.speed_ramp?.length ?? 0) >= 2;
+    const discontinuous =
+      prevRamped ||
+      curRamped ||
+      prev.asset_handle !== cur.asset_handle ||
+      prev.source_out_ms !== cur.source_in_ms ||
+      Math.abs(spineClipEffectiveRate(prev) - spineClipEffectiveRate(cur)) > 1e-6;
+    if (!discontinuous) continue;
+    if (prev.audio_chain.fade_out_ms <= 0) {
+      set(i - 1, { fadeOutMs: Math.min(n, prev.duration_ms / 2) });
+    }
+    if (cur.audio_chain.fade_in_ms <= 0) {
+      set(i, { fadeInMs: Math.min(n, cur.duration_ms / 2) });
+    }
+  }
+  return out;
 }
 
 /** The time map the audio follows in a ramped clip. */
@@ -145,6 +218,40 @@ function buildRampedSliceFilterParts(options: {
  * for the ramped (multi-slice) path, to be applied to the `concat` output.
  * The unramped path stays as-is inside `buildSingleAudioTrackFilterChain`.
  */
+/**
+ * `afade` pair for one side of a discontinuous spine join. Only emitted when
+ * the clip has no own fade on that side (the clip's own fade wins) and the
+ * join fade is positive. `st`/`d` use the same 3-decimal-second form as the
+ * clip's own fades.
+ */
+function buildJoinFadeFilters(options: {
+  joinFadeInMs: number;
+  joinFadeOutMs: number;
+  ownFadeInMs: number;
+  ownFadeOutMs: number;
+  postTrimDurationMs: number;
+  envelopeTimeBaseOffsetMs: number;
+}): string[] {
+  // Six-decimal seconds (like `atrim`): the fade must land sample-exact in
+  // windowed/segmented renders, where the chain time base starts mid-clip and
+  // a 3-decimal rounding would shift the fade by up to half a millisecond.
+  const out: string[] = [];
+  if (options.joinFadeInMs > 0 && options.ownFadeInMs <= 0) {
+    const stSec = Math.max(0, options.envelopeTimeBaseOffsetMs / 1000).toFixed(6);
+    const dSec = (Math.max(0.02, options.joinFadeInMs) / 1000).toFixed(6);
+    out.push(`afade=t=in:st=${stSec}:d=${dSec}:curve=${SPINE_JOIN_FADE_CURVE}`);
+  }
+  if (options.joinFadeOutMs > 0 && options.ownFadeOutMs <= 0) {
+    const outStartMs = options.postTrimDurationMs - options.joinFadeOutMs + options.envelopeTimeBaseOffsetMs;
+    if (outStartMs + options.joinFadeOutMs > 0) {
+      const outStart = Math.max(0, outStartMs / 1000).toFixed(6);
+      const dSec = (options.joinFadeOutMs / 1000).toFixed(6);
+      out.push(`afade=t=out:st=${outStart}:d=${dSec}:curve=${SPINE_JOIN_FADE_CURVE}`);
+    }
+  }
+  return out;
+}
+
 function buildRampedAudioPostFilters(options: {
   audioChain: CutholSequence["spine"]["clips"][number]["audio_chain"] | undefined;
   envelopes: ParameterEnvelope[];
@@ -154,6 +261,8 @@ function buildRampedAudioPostFilters(options: {
   timelineStartMs: number;
   legacyPostAdelayClampEndSec?: number;
   totalDurationSec: number;
+  joinFadeInMs?: number;
+  joinFadeOutMs?: number;
 }): string[] {
   const aFilters: string[] = [];
   const envOffsetMs = options.envelopeTimeBaseOffsetMs ?? 0;
@@ -200,6 +309,16 @@ function buildRampedAudioPostFilters(options: {
         aFilters.push(`afade=t=out:st=${outStart}:d=${dSec}`);
       }
     }
+    aFilters.push(
+      ...buildJoinFadeFilters({
+        joinFadeInMs: options.joinFadeInMs ?? 0,
+        joinFadeOutMs: options.joinFadeOutMs ?? 0,
+        ownFadeInMs: ac.fade_in_ms,
+        ownFadeOutMs: ac.fade_out_ms,
+        postTrimDurationMs: options.postTrimDurationMs,
+        envelopeTimeBaseOffsetMs: envOffsetMs,
+      })
+    );
   }
 
   if (options.localSliceTrimSec) {
@@ -242,6 +361,8 @@ function buildSingleAudioTrackFilterChain(options: {
   envelopeTimeBaseOffsetMs?: number;
   localSliceTrimSec?: [number, number];
   legacyPostAdelayClampEndSec?: number;
+  joinFadeInMs?: number;
+  joinFadeOutMs?: number;
 }): string {
   const rateFilters =
     options.preservePitch === false && Math.abs(options.effectiveRate - 1.0) > 0.001
@@ -305,6 +426,16 @@ function buildSingleAudioTrackFilterChain(options: {
         aFilters.push(`afade=t=out:st=${outStart}:d=${dSec}`);
       }
     }
+    aFilters.push(
+      ...buildJoinFadeFilters({
+        joinFadeInMs: options.joinFadeInMs ?? 0,
+        joinFadeOutMs: options.joinFadeOutMs ?? 0,
+        ownFadeInMs: ac.fade_in_ms,
+        ownFadeOutMs: ac.fade_out_ms,
+        postTrimDurationMs: options.postTrimDurationMs,
+        envelopeTimeBaseOffsetMs: envOffsetMs,
+      })
+    );
   }
 
   if (options.localSliceTrimSec) {
@@ -409,6 +540,8 @@ export function compileSequenceAudioPlan(
     postTrimDurationMs: number;
     timelineStartMs: number;
     rampInfo?: AudioRampInfo;
+    joinFadeInMs?: number;
+    joinFadeOutMs?: number;
   }): void => {
     const itemStartMs = item.timelineStartMs;
     const itemEndMs = itemStartMs + item.postTrimDurationMs;
@@ -476,8 +609,8 @@ export function compileSequenceAudioPlan(
         const localWinEndMs = Math.min(item.postTrimDurationMs, winEndMs - itemStartMs);
         const rampHasStatefulFilter = true;
         let rampPreRollMs = rampHasStatefulFilter ? Math.min(localWinStartMs, 500) : 0;
-        const rampFadeInMs = item.audioChain?.fade_in_ms ?? 0;
-        const rampFadeOutMs = item.audioChain?.fade_out_ms ?? 0;
+        const rampFadeInMs = Math.max(item.audioChain?.fade_in_ms ?? 0, item.joinFadeInMs ?? 0);
+        const rampFadeOutMs = Math.max(item.audioChain?.fade_out_ms ?? 0, item.joinFadeOutMs ?? 0);
         if (rampFadeInMs > 0 && localWinStartMs < rampFadeInMs) {
           rampPreRollMs = localWinStartMs;
         }
@@ -548,6 +681,8 @@ export function compileSequenceAudioPlan(
           timelineStartMs: rampRelTimelineStartMs,
           legacyPostAdelayClampEndSec: rampLegacyClampEndSec,
           totalDurationSec,
+          joinFadeInMs: item.joinFadeInMs,
+          joinFadeOutMs: item.joinFadeOutMs,
         });
         const sParts = [
           ...buildRampedSliceFilterParts({
@@ -634,6 +769,8 @@ export function compileSequenceAudioPlan(
         timelineStartMs: rampRelTimelineStartMs,
         legacyPostAdelayClampEndSec: rampLegacyClampEndSec,
         totalDurationSec,
+        joinFadeInMs: item.joinFadeInMs,
+        joinFadeOutMs: item.joinFadeOutMs,
       });
       filterChains.push(`${rampConcatPad}${rampPostFilters.join(",")}${rampOutPad}`);
       audioMixPads.push(rampOutPad);
@@ -677,8 +814,8 @@ export function compileSequenceAudioPlan(
             Math.abs(item.effectiveRate - 1.0) > 1e-3
         );
         let preRollMs = hasStatefulFilter ? Math.min(localWinStartMs, 500) : 0;
-        const fadeInMs = item.audioChain?.fade_in_ms ?? 0;
-        const fadeOutMs = item.audioChain?.fade_out_ms ?? 0;
+        const fadeInMs = Math.max(item.audioChain?.fade_in_ms ?? 0, item.joinFadeInMs ?? 0);
+        const fadeOutMs = Math.max(item.audioChain?.fade_out_ms ?? 0, item.joinFadeOutMs ?? 0);
         if (fadeInMs > 0 && localWinStartMs < fadeInMs) {
           preRollMs = localWinStartMs;
         }
@@ -733,6 +870,8 @@ export function compileSequenceAudioPlan(
         envelopeTimeBaseOffsetMs: envOffsetMs,
         localSliceTrimSec,
         legacyPostAdelayClampEndSec,
+        joinFadeInMs: item.joinFadeInMs,
+        joinFadeOutMs: item.joinFadeOutMs,
       })
     );
     audioMixPads.push(aPad);
@@ -823,6 +962,7 @@ export function compileSequenceAudioPlan(
     compileLaneAudio(lane);
   }
 
+  const spineJoinFades = computeSpineJoinFades(seq);
   for (let i = 0; i < seq.spine.clips.length; i++) {
     const clip = seq.spine.clips[i];
     const asset = libMap.get(clip.asset_handle);
@@ -847,6 +987,8 @@ export function compileSequenceAudioPlan(
       envelopes: clip.envelopes,
       postTrimDurationMs: clip.duration_ms,
       timelineStartMs: clip.timeline_in_ms,
+      joinFadeInMs: spineJoinFades.get(i)?.fadeInMs ?? 0,
+      joinFadeOutMs: spineJoinFades.get(i)?.fadeOutMs ?? 0,
       rampInfo:
         clip.playback.speed_ramp && clip.playback.speed_ramp.length >= 2
           ? {

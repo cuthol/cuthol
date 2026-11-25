@@ -14,6 +14,7 @@ import { CutholError, DIAGNOSTICS } from "../core/diagnostics.js";
 import { requireApiKey } from "../core/env.js";
 import { OPEN_STANDARDS } from "../core/standards.js";
 import {
+  LOCAL_ASR_ENGINE_REVISION,
   LOCAL_SPEECH_DEFAULT_MODEL,
   localSpeechStatus,
   runLocalAsrBridge,
@@ -49,6 +50,19 @@ export interface TranscriptDocument {
   text: string;
   words: RawTranscriptWord[];
   disfluencies: DetectedDisfluencySpan[];
+  /**
+   * Keyless local ASR engine revision (`LOCAL_ASR_ENGINE_REVISION`). Present
+   * on every transcript the local provider returns; the cache skips local
+   * records stamped with an older revision so they are re-transcribed.
+   * Cloud providers never set it.
+   */
+  engineRev?: string;
+  /**
+   * Hallucinated segments the keyless local engine dropped (source-ms time
+   * ranges with reasons), reported next to `words`, never silently.
+   * Only the keyless local provider sets it; cloud providers never do.
+   */
+  local_dropped_segments?: Array<{ start_ms: number; end_ms: number; reason: string }>;
 }
 
 export interface TtsSynthesisOutput {
@@ -213,8 +227,24 @@ export function annotateWordsAndDisfluencies(
 }
 
 /**
- * Cloud ASR Provider: Deepgram Nova-3 (`/v1/listen`).
+ * Cloud ASR Provider: Deepgram (`/v1/listen`).
+ *
+ * Model per language: explicit English (`en` / `en-*`) uses `nova-2`
+ * because `nova-3` returns no filler tokens (`filler_words` is accepted
+ * but yields none); `nova-2` rejects `keyterm`, so the same terms are sent
+ * as `keywords`. Every other explicit language keeps `nova-3` + `keyterm`;
+ * `auto` keeps `nova-3` + `detect_language`.
  */
+export function isEnglishAsrLanguage(language: string | undefined): boolean {
+  const lang = (language ?? "").trim().toLowerCase();
+  return lang === "en" || lang.startsWith("en-");
+}
+
+export function deepgramModelForLanguage(language: string | undefined): "nova-2" | "nova-3" {
+  if (language && language !== "auto" && isEnglishAsrLanguage(language)) return "nova-2";
+  return "nova-3";
+}
+
 export async function transcribeWithDeepgram(options: {
   audioFilePath: string;
   language?: string;
@@ -224,8 +254,9 @@ export async function transcribeWithDeepgram(options: {
   const apiKey = requireApiKey("DEEPGRAM_API_KEY", "Deepgram ASR");
   const audioBuffer = fs.readFileSync(options.audioFilePath);
 
+  const model = deepgramModelForLanguage(options.language);
   const params = new URLSearchParams({
-    model: "nova-3",
+    model,
     smart_format: "true",
     utterances: "true",
     filler_words: "true",
@@ -236,9 +267,10 @@ export async function transcribeWithDeepgram(options: {
   } else {
     params.set("detect_language", "true");
   }
+  const keytermParam = model === "nova-2" ? "keywords" : "keyterm";
   for (const term of options.keyterms ?? ["Cuthol", "HyperFrames"]) {
     if (term.trim()) {
-      params.append("keyterm", term.trim());
+      params.append(keytermParam, term.trim());
     }
   }
 
@@ -290,13 +322,25 @@ export async function transcribeWithDeepgram(options: {
 
   return {
     provider: "deepgram",
-    model: "nova-3",
+    model,
     language: ch?.detected_language ?? options.language ?? "auto",
     duration_ms: options.durationMs,
     text: alt?.transcript ?? words.map((w) => w.punctuated_word).join(" "),
     words,
     disfluencies,
   };
+}
+
+/**
+ * True when an auto-detected Deepgram transcript needs the no-fillers INFO:
+ * detection settled on English but the response holds no filler token, so
+ * `filler_words` effectively did nothing and `--lang en` would enable them.
+ */
+export function isDeepgramAutoEnglishWithoutFillers(doc: TranscriptDocument): boolean {
+  if (doc.provider !== "deepgram") return false;
+  const lang = (doc.language ?? "").trim().toLowerCase();
+  if (lang !== "en" && !lang.startsWith("en-")) return false;
+  return !doc.words.some((w) => w.is_filler);
 }
 
 /**
@@ -365,6 +409,7 @@ export async function transcribeWithLocalProvider(options: {
       text: raw.text ?? words.map((w) => w.punctuated_word).join(" "),
       words,
       disfluencies,
+      engineRev: LOCAL_ASR_ENGINE_REVISION,
     };
   }
 
@@ -426,6 +471,7 @@ export async function transcribeWithLocalProvider(options: {
       text: words.map((w) => w.punctuated_word).join(" "),
       words,
       disfluencies,
+      engineRev: LOCAL_ASR_ENGINE_REVISION,
     };
   }
 
@@ -460,6 +506,8 @@ export async function transcribeWithLocalProvider(options: {
     text: words.map((w) => w.punctuated_word).join(" "),
     words,
     disfluencies,
+    engineRev: LOCAL_ASR_ENGINE_REVISION,
+    local_dropped_segments: bridge.droppedSegments,
   };
 }
 

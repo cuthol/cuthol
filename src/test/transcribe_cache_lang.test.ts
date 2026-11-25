@@ -28,7 +28,7 @@ import { appendSpineClip } from "../sequence/spine.js";
 import { generateSequenceCaptions } from "../speech/captions.js";
 import { cleanupClipDialogue } from "../speech/cleanup.js";
 import { TranscriptDocument } from "../speech/providers.js";
-import { loadCachedTranscriptForAsset, transcribeLibraryAsset } from "../speech/transcribe.js";
+import { loadCachedTranscriptForAsset, localAsrCachePrefix, transcribeLibraryAsset } from "../speech/transcribe.js";
 import { fakeLocalSpeechInstall } from "./fixtures.js";
 
 // Keyless local speech needs an installation; tests use the stub bridge (no venv, deterministic).
@@ -217,7 +217,7 @@ test("poisoned local:en record is skipped; fresh English replaces it, Turkish ke
   assert.equal(res.transcript.language, "en");
   assert.ok(res.transcript.text.includes("hello"));
 
-  assert.equal(readKey(wsDir, "vid_01", "local:en")?.language, "en");
+  assert.equal(readKey(wsDir, "vid_01", `${localAsrCachePrefix()}:en`)?.language, "en");
   assert.equal(readKey(wsDir, "vid_01", "en")?.language, "en");
   assert.equal(readKey(wsDir, "vid_01", "auto")?.language, "en");
   assert.equal(readKey(wsDir, "vid_01", "latest")?.language, "en");
@@ -260,7 +260,65 @@ test("--refresh skips the cache, re-transcribes, and replaces the stored record"
   } as TranscribeOptions);
   assert.equal(refreshed.cached, false);
   assert.ok(refreshed.transcript.text.includes("second"));
-  assert.ok(readKey(wsDir, "vid_01", "local:en")?.text.includes("second"));
+  assert.ok(readKey(wsDir, "vid_01", `${localAsrCachePrefix()}:en`)?.text.includes("second"));
+});
+
+test("stale whole-file local record is re-transcribed once with the current engine", async () => {
+  const { wsDir, mediaFile } = setupMedia("ws_stale_local_engine");
+  writeSidecar(mediaFile, {
+    language: "en",
+    text: "hello world today",
+    words: [{ word: "hello", source_start_ms: 100, source_end_ms: 500 }],
+  });
+  // Leftover from the whole-file engine: keyless model, no engine revision,
+  // filed under both the old and the revisioned key.
+  const stale = {
+    ...EN_DOC(),
+    provider: "local" as const,
+    model: "faster-whisper-small",
+    text: "outdated whole-file transcript",
+  };
+  delete (stale as { engineRev?: string }).engineRev;
+  seedKeys(wsDir, "vid_01", ["local:en", "local@v4:en", "en", "auto", "latest"], stale);
+
+  const res = await transcribeLibraryAsset({
+    workspaceDir: wsDir,
+    handle: "vid_01",
+    language: "en",
+    provider: "local",
+  });
+  assert.equal(res.cached, false);
+  assert.ok(res.transcript.text.includes("hello"));
+  assert.equal(res.transcript.engineRev, "v5");
+  assert.ok(readKey(wsDir, "vid_01", "local@v5:en")?.text.includes("hello"));
+
+  const again = await transcribeLibraryAsset({
+    workspaceDir: wsDir,
+    handle: "vid_01",
+    language: "en",
+    provider: "local",
+  });
+  assert.equal(again.cached, true);
+});
+
+test("readers keep serving an old-engine local record (only transcribe re-transcribes)", () => {
+  const { wsDir } = setupMedia("ws_old_engine_readers");
+  // Ledger holds only an older keyless local record: no revision, old key.
+  const old = {
+    ...EN_DOC(),
+    provider: "local" as const,
+    model: "faster-whisper-small",
+    text: "hello world today",
+  };
+  delete (old as { engineRev?: string }).engineRev;
+  seedKeys(wsDir, "vid_01", ["local:en"], old);
+
+  const cached = loadCachedTranscriptForAsset(wsDir, "vid_01", "en");
+  assert.ok(cached.text.includes("hello"));
+
+  appendSpineClip({ workspaceDir: wsDir, assetHandle: "vid_01", sourceInMs: 0, sourceOutMs: 3000 });
+  const res = generateSequenceCaptions({ workspaceDir: wsDir });
+  assert.ok(res.cues_created >= 1);
 });
 
 test("cache hit is keyed only by its real language (no generic rewrite, no other-language keys)", async () => {
@@ -353,7 +411,7 @@ test("default transcribe language is auto-detection, never silent tr", async () 
   const res = await transcribeLibraryAsset({ workspaceDir: wsDir, handle: "vid_01", provider: "local" });
   assert.equal(res.cached, false);
   assert.equal(res.transcript.language, "en");
-  assert.equal(readKey(wsDir, "vid_01", "local:en")?.language, "en");
+  assert.equal(readKey(wsDir, "vid_01", `${localAsrCachePrefix()}:en`)?.language, "en");
   assert.equal(readKey(wsDir, "vid_01", "tr"), null);
   assert.equal(readKey(wsDir, "vid_01", "local:tr"), null);
 });
